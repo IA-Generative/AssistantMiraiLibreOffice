@@ -353,6 +353,11 @@ class MainJob(unohelper.Base, XJobExecutor):
             # Access the current selection
             try:
                 user_input= self.input_box("Please enter edit instructions!", "Input", "")
+
+                if len(user_input) == 0 and len(text_range.getString()) == 0:
+                    # Don't do anything if there is no text selected and no edit prompt
+                    return
+
                 #text_range.setString(text_range.getString() + ": " + user_input)
                 url = self.get_config("endpoint", "http://127.0.0.1:5000") + "/v1/completions" 
 
