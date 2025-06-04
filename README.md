@@ -4,7 +4,7 @@ Consider donating to support development: https://ko-fi.com/johnbalis
 
 ## About
 
-This is a LibreOffice Writer extension that enables inline generative editing with local inference. It's compatible with language models supported by text-generation-webui.
+This is a LibreOffice Writer extension that enables inline generative editing with local inference. It's compatible with language models supported by `text-generation-webui` and `ollama`.
 
 ## Table of Contents
 
@@ -29,7 +29,7 @@ This extension provides two powerful commands for LibreOffice Writer:
 
 **Hotkey:** `CTRL + q`
 
-Uses a language model to predict and generate text following the selected content.  This is useful for tasks like writing stories, emails, or expanding on existing text.
+This uses a language model to predict and generate text following the selected content.  This is useful for tasks like writing stories, emails, or expanding on existing text.
 
 ### Edit Selection
 
@@ -68,6 +68,7 @@ After installation and model setup:
 *   Download and use a model (gemma3 isn't bad)
 *   Ensure the API is enabled.
 *   Set the endpoint in Localwriter to `localhost:11434` (or the configured port).
+*   Manually set the model name. ([This is required for Ollama to work](https://ask.libreoffice.org/t/localwriter-0-0-5-installation-and-usage/122241/5?u=jbalis))
 
 ## Settings
 
@@ -77,18 +78,19 @@ In the settings, you can configure:
 *   Maximum number of additional tokens (above the number of letters in the original selection) for "Edit Selection."
 *   Custom "system prompts" for both "Extend Selection" and "Edit Selection." These prompts are prepended to the selection before sending it to the language model.  For example, you can use a sample of your writing to guide the model's style.
 
-## License
+## License 
 
 (See `License.txt` for the full license text)
 
 Except where otherwise noted in source code, this software is provided with a MPL 2.0 license.
 
-The code not released with an MPL2.0 license is released under the following terms:
+The code not released with an MPL2.0 license is released under the following terms.
+License: Creative Commons Attribution-ShareAlike 3.0 Unported License,
+License: The Document Foundation  https://creativecommons.org/licenses/by-sa/3.0/
 
-*   License: Creative Commons Attribution-ShareAlike 3.0 Unported License
-*   License: The Document Foundation  https://creativecommons.org/licenses/by-sa/3.0/
+A large amount of code is derived from the following MPL2.0 licensed code from the Document Foundation
+https://gerrit.libreoffice.org/c/core/+/159938 
 
-A significant portion of the code is derived from the following MPL2.0 licensed code from the Document Foundation: [https://gerrit.libreoffice.org/c/core/+/159938](https://gerrit.libreoffice.org/c/core/+/159938)
 
 MPL2.0
 
