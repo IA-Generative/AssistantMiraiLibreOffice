@@ -29,13 +29,15 @@ This extension provides two powerful commands for LibreOffice Writer:
 
 **Hotkey:** `CTRL + q`
 
-This uses a language model to predict and generate text following the selected content.  This is useful for tasks like writing stories, emails, or expanding on existing text.
+*   This uses a language model to predict what comes after the selected text. There are a lot of ways to use this.
+*   Some example use cases for this include: writing a story or an email given a particular prompt, adding additional possible items to a grocery list, or summarizing the selected text.
 
 ### Edit Selection
 
 **Hotkey:** `CTRL + e`
 
-Allows users to prompt a language model to edit the selected text. The model will generate edited text, which replaces the original selection.  This is useful for tasks like changing the tone of an email or performing semantic editing.
+*   A dialog box appears to prompt the user for instructions about how to edit the selected text, then the selected text is replaced by the edited text.
+*   Some examples for use cases for this include changing the tone of an email, translating text to a different language, and semantically editing a scene in a story.
 
 ## Setup
 
