@@ -80,6 +80,30 @@ In the settings, you can configure:
 *   Maximum number of additional tokens (above the number of letters in the original selection) for "Edit Selection."
 *   Custom "system prompts" for both "Extend Selection" and "Edit Selection." These prompts are prepended to the selection before sending it to the language model.  For example, you can use a sample of your writing to guide the model's style.
 
+## Contributing
+
+Help with development is always welcome. localwriter has a number of outstanding feature requests by users. Feel free to work on any of them, and you can help improve freedom-respecting local AI. 
+
+### Building localwriter
+
+In a terminal, change directory into the localwriter repository top-level directory, then run the following command:
+
+````
+zip -r localwriter.oxt \
+  Accelerators.xcu \
+  Addons.xcu \
+  assets \
+  description.xml \
+  main.py \
+  META-INF \
+  registration \
+  README.md
+````
+
+This will create the file `localwriter.oxt` which you can open with libreoffice to install the localwriter extension. You can also change the file extension to .zip and manually unzip the extension file, if you want to inspect a localwriter `.oxt` file yourself. It is all human-readable, since python is an interpreted language. 
+
+
+
 ## License 
 
 (See `License.txt` for the full license text)
