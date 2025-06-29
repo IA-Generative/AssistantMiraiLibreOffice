@@ -6,7 +6,7 @@
           <value xml:lang="en-US">localwriter</value>
         </prop>
         <prop oor:name="Context" oor:type="xs:string">
-          <value>com.sun.star.text.TextDocument</value>
+          <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument</value>
         </prop>
         <node oor:name="Submenu">
           <node oor:name="M1" oor:op="replace">

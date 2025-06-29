@@ -8,8 +8,26 @@ from com.sun.star.task import XJobExecutor
 from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
 import uno
 import os 
+import logging
+import re
+
 from com.sun.star.beans import PropertyValue
 from com.sun.star.container import XNamed
+
+
+def log_to_file(message):
+    # Get the user's home directory
+    home_directory = os.path.expanduser('~')
+    
+    # Define the log file path
+    log_file_path = os.path.join(home_directory, 'log.txt')
+    
+    # Set up logging configuration
+    logging.basicConfig(filename=log_file_path, level=logging.INFO, format='%(asctime)s - %(message)s')
+    
+    # Log the input message
+    logging.info(message)
+
 
 # The MainJob is a UNO component derived from unohelper.Base class
 # and also the XJobExecutor, the implemented interface
@@ -20,6 +38,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         try:
             self.sm = ctx.getServiceManager()
             self.desktop = XSCRIPTCONTEXT.getDesktop()
+            self.document = XSCRIPTCONTEXT.getDocument()
         except NameError:
             self.sm = ctx.ServiceManager
             self.desktop = self.ctx.getServiceManager().createInstanceWithContext(
@@ -282,38 +301,95 @@ class MainJob(unohelper.Base, XJobExecutor):
         desktop = self.ctx.ServiceManager.createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.ctx)
         model = desktop.getCurrentComponent()
-        if not hasattr(model, "Text"):
-            model = self.desktop.loadComponentFromURL("private:factory/swriter", "_blank", 0, ())
-        text = model.Text
-        selection = model.CurrentController.getSelection()
-        text_range = selection.getByIndex(0)
+        #if not hasattr(model, "Text"):
+        #    model = self.desktop.loadComponentFromURL("private:factory/swriter", "_blank", 0, ())
+
+        if hasattr(model, "Text"):
+            text = model.Text
+            selection = model.CurrentController.getSelection()
+            text_range = selection.getByIndex(0)
+
+            
+            if args == "ExtendSelection":
+                # Access the current selection
+                #selection = model.CurrentController.getSelection()
+                
+                if len(text_range.getString()) > 0:
+                    # Get the first range of the selection
+                    #text_range = selection.getByIndex(0)
+                    try:
+
+                        url = self.get_config("endpoint", "http://127.0.0.1:5000") + "/v1/completions" 
+                        
+                        
+                        headers = {
+                            'Content-Type': 'application/json'
+                        }
+
+                        prompt = None
+                        if self.get_config("extend_selection_system_prompt", "") != "":
+                            prompt = "SYSTEM PROMPT\n" + self.get_config("extend_selection_system_prompt", "") + "\nEND SYSTEM PROMPT\n" + text_range.getString()
+                        else:
+                            prompt = text_range.getString()
+
+                        data = {
+                            'prompt': prompt,
+                            'max_tokens': self.get_config("extend_selection_max_tokens", 70),
+                            'temperature': 1,
+                            'top_p': 0.9,
+                            'seed': 10
+                        }
+
+                        model = self.get_config("model", "")
+                        if model != "":
+                            data["model"] = model
 
 
+                        # Convert data to JSON format
+                        json_data = json.dumps(data).encode('utf-8')
 
-        if args == "ExtendSelection":
-            # Access the current selection
-            #selection = model.CurrentController.getSelection()
-            if len(text_range.getString()) > 0:
-                # Get the first range of the selection
-                #text_range = selection.getByIndex(0)
+                        # Create a request object with the URL, data, and headers
+                        request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
+
+                        # Send the request and read the response
+                        with urllib.request.urlopen(request) as response:
+                            response_data = response.read()
+
+                        # If needed, decode the response data
+                        response = json.loads(response_data.decode('utf-8'))
+
+                        # Append completion to selection
+                        selected_text = text_range.getString()
+                        new_text = selected_text + response["choices"][0]["text"]
+
+                        # Set the new text
+                        text_range.setString(new_text)
+                
+                    except Exception as e:
+                        text_range = selection.getByIndex(0)
+                        # Append the user input to the selected text
+                        text_range.setString(text_range.getString() + ": " + str(e))
+
+            elif args == "EditSelection":
+                # Access the current selection
                 try:
-
+                    user_input= self.input_box("Please enter edit instructions!", "Input", "")
+                    #text_range.setString(text_range.getString() + ": " + user_input)
                     url = self.get_config("endpoint", "http://127.0.0.1:5000") + "/v1/completions" 
-                    
-                    
+
                     headers = {
                         'Content-Type': 'application/json'
                     }
 
-                    prompt = None
-                    if self.get_config("extend_selection_system_prompt", "") != "":
-                        prompt = "SYSTEM PROMPT\n" + self.get_config("extend_selection_system_prompt", "") + "\nEND SYSTEM PROMPT\n" + text_range.getString()
-                    else:
-                        prompt = text_range.getString()
+                    prompt =  "ORIGINAL VERSION:\n" + text_range.getString() + "\n Below is an edited version according to the following instructions. There are no comments in the edited version. The edited version is followed by the end of the document. The original version will be edited as follows to create the edited versio:\n" + user_input + "\nEDITED VERSION:\n"
+
+                    if self.get_config("edit_selection_system_prompt", "") != "":
+                        prompt = "SYSTEM PROMPT\n" + self.get_config("edit_selection_system_prompt","") + "\nEND SYSTEM PROMPT\n" + prompt
+
 
                     data = {
-                        'prompt': prompt,
-                        'max_tokens': self.get_config("extend_selection_max_tokens", 70),
+                        'prompt':prompt,
+                        'max_tokens': len(text_range.getString()) + self.get_config("edit_selection_max_new_tokens", 0), # this is a bit hacky, it's actually number of characters + max new tokens, so even if max new tokens is zero, max_tokens will often end up with more tokens than the selected text actually contains.
                         'temperature': 1,
                         'top_p': 0.9,
                         'seed': 10
@@ -322,7 +398,6 @@ class MainJob(unohelper.Base, XJobExecutor):
                     model = self.get_config("model", "")
                     if model != "":
                         data["model"] = model
-
 
                     # Convert data to JSON format
                     json_data = json.dumps(data).encode('utf-8')
@@ -337,106 +412,218 @@ class MainJob(unohelper.Base, XJobExecutor):
                     # If needed, decode the response data
                     response = json.loads(response_data.decode('utf-8'))
 
-                    # Append completion to selection
+
+                    # replace selection with completion
                     selected_text = text_range.getString()
-                    new_text = selected_text + response["choices"][0]["text"]
+                    new_text = response["choices"][0]["text"]
 
                     # Set the new text
                     text_range.setString(new_text)
-            
+
                 except Exception as e:
                     text_range = selection.getByIndex(0)
                     # Append the user input to the selected text
                     text_range.setString(text_range.getString() + ": " + str(e))
+            
+            elif args == "settings":
+                try:
 
-        elif args == "EditSelection":
-            # Access the current selection
+                    result = self.settings_box("Settings")
+                                    
+                    if "extend_selection_max_tokens" in result:
+                        self.set_config("extend_selection_max_tokens", result["extend_selection_max_tokens"])
+
+                    if "extend_selection_system_prompt" in result:
+                        self.set_config("extend_selection_system_prompt", result["extend_selection_system_prompt"])
+
+                    if "edit_selection_max_new_tokens" in result:
+                        self.set_config("edit_selection_max_new_tokens", result["edit_selection_max_new_tokens"])
+
+                    if "edit_selection_system_prompt" in result:
+                        self.set_config("edit_selection_system_prompt", result["edit_selection_system_prompt"])
+
+                    if "endpoint" in result and result["endpoint"].startswith("http"):
+                        self.set_config("endpoint", result["endpoint"])
+
+                    if "model" in result:                
+                        self.set_config("model", result["model"])
+
+
+                except Exception as e:
+                    text_range = selection.getByIndex(0)
+                    # Append the user input to the selected text
+                    text_range.setString(text_range.getString() + ":error: " + str(e))
+        elif hasattr(model, "Sheets"):
             try:
-                user_input= self.input_box("Please enter edit instructions!", "Input", "")
-
-                if len(user_input) == 0 and len(text_range.getString()) == 0:
-                    # Don't do anything if there is no text selected and no edit prompt
-                    return
-
                 #text_range.setString(text_range.getString() + ": " + user_input)
                 url = self.get_config("endpoint", "http://127.0.0.1:5000") + "/v1/completions" 
+                # Get the active sheet
+                sheet = model.CurrentController.ActiveSheet
+                
+                # Get the current selection (which could be a range of cells)
+                selection = model.CurrentController.Selection
+                
 
-                headers = {
-                    'Content-Type': 'application/json'
-                }
-
-                prompt =  "ORIGINAL VERSION:\n" + text_range.getString() + "\n Below is an edited version according to the following instructions. There are no comments in the edited version. The edited version is followed by the end of the document: \n" + user_input + "\nEDITED VERSION:\n"
-
-                if self.get_config("edit_selection_system_prompt", "") != "":
-                    prompt = "SYSTEM PROMPT\n" + self.get_config("edit_selection_system_prompt","") + "\nEND SYSTEM PROMPT\n" + prompt
-
-
-                data = {
-                    'prompt':prompt,
-                    'max_tokens': len(text_range.getString()) + self.get_config("edit_selection_max_new_tokens", 0), # this is a bit hacky, it's actually number of characters + max new tokens, so even if max new tokens is zero, max_tokens will often end up with more tokens than the selected text actually contains.
-                    'temperature': 1,
-                    'top_p': 0.9,
-                    'seed': 10
-                }
-
-                model = self.get_config("model", "")
-                if model != "":
-                    data["model"] = model
-
-                # Convert data to JSON format
-                json_data = json.dumps(data).encode('utf-8')
-
-                # Create a request object with the URL, data, and headers
-                request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
-
-                # Send the request and read the response
-                with urllib.request.urlopen(request) as response:
-                    response_data = response.read()
-
-                # If needed, decode the response data
-                response = json.loads(response_data.decode('utf-8'))
+                if args == "EditSelection":
+                    user_input= self.input_box("Please enter edit instructions!", "Input", "")
 
 
-                # Append completion to selection
-                selected_text = text_range.getString()
-                new_text = response["choices"][0]["text"]
+                area = selection.getRangeAddress()
+                start_row = area.StartRow
+                end_row = area.EndRow
+                start_col = area.StartColumn
+                end_col = area.EndColumn
 
-                # Set the new text
-                text_range.setString(new_text)
+                col_range = range(start_col, end_col + 1)
+                row_range = range(start_row, end_row + 1)
 
+                for row in row_range:
+                    new_values = []
+                    for col in col_range:
+                        cell = sheet.getCellByPosition(col, row)
+
+
+                        if args == "ExtendSelection":
+                            
+                            if len(cell.getString()) > 0:
+                                try:
+
+                                    url = self.get_config("endpoint", "http://127.0.0.1:5000") + "/v1/completions" 
+                                    
+                                    
+                                    headers = {
+                                        'Content-Type': 'application/json'
+                                    }
+
+                                    prompt = None
+                                    if self.get_config("extend_selection_system_prompt", "") != "":
+                                        prompt = "SYSTEM PROMPT\n" + self.get_config("extend_selection_system_prompt", "") + "\nEND SYSTEM PROMPT\n" + cell.getString()
+                                    else:
+                                        prompt = cell.getString()
+
+                                    data = {
+                                        'prompt': prompt,
+                                        'max_tokens': self.get_config("extend_selection_max_tokens", 70),
+                                        'temperature': 1,
+                                        'top_p': 0.9,
+                                        'seed': 10
+                                    }
+
+                                    model = self.get_config("model", "")
+                                    if model != "":
+                                        data["model"] = model
+
+
+                                    # Convert data to JSON format
+                                    json_data = json.dumps(data).encode('utf-8')
+
+                                    # Create a request object with the URL, data, and headers
+                                    request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
+
+                                    # Send the request and read the response
+                                    with urllib.request.urlopen(request) as response:
+                                        response_data = response.read()
+
+                                    # If needed, decode the response data
+                                    response = json.loads(response_data.decode('utf-8'))
+
+                                    # Append completion to selection
+                                    selected_text = cell.getString()
+                                    new_text = selected_text + response["choices"][0]["text"]
+
+                                    # Set the new text
+                                    cell.setString(new_text)
+                                except Exception as e:
+                                    # Append the user input to the selected text
+                                    cell.setString(cell.getString() + ": " + str(e))
+                        elif args == "EditSelection":
+                            # Access the current selection
+                            try:
+                                #text_range.setString(text_range.getString() + ": " + user_input)
+                                url = self.get_config("endpoint", "http://127.0.0.1:5000") + "/v1/completions" 
+
+                                headers = {
+                                    'Content-Type': 'application/json'
+                                }
+
+                                prompt =  "ORIGINAL VERSION:\n" + cell.getString() + "\n Below is an edited version according to the following instructions. Don't waste time thinking, be as fast as you can. There are no comments in the edited version. USER INSTRUCTIONS: \n" + user_input + "\nEDITED VERSION:\n"
+
+                                if self.get_config("edit_selection_system_prompt", "") != "":
+                                    prompt = "SYSTEM PROMPT\n" + self.get_config("edit_selection_system_prompt","") + "\nEND SYSTEM PROMPT\n" + prompt
+
+
+                                data = {
+                                    'prompt':prompt,
+                                    'max_tokens': len(cell.getString()) + self.get_config("edit_selection_max_new_tokens", 0), # this is a bit hacky, it's actually number of characters + max new tokens, so even if max new tokens is zero, max_tokens will often end up with more tokens than the selected text actually contains.
+                                    'temperature': 1,
+                                    'top_p': 0.9,
+                                    'seed': 10
+                                }
+
+                                model = self.get_config("model", "")
+                                if model != "":
+                                    data["model"] = model
+
+                                # Convert data to JSON format
+                                json_data = json.dumps(data).encode('utf-8')
+
+                                # Create a request object with the URL, data, and headers
+                                request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
+
+                                # Send the request and read the response
+                                with urllib.request.urlopen(request) as response:
+                                    response_data = response.read()
+
+                                # If needed, decode the response data
+                                response = json.loads(response_data.decode('utf-8'))
+
+
+                                # get previous selected text
+                                selected_text = cell.getString()
+
+                    
+                                raw_response = response["choices"][0]["text"]
+
+                                #action, rather than thought
+                                new_text = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL)
+
+                                # Set the new text for the cell
+                                cell.setString(new_text)
+
+
+                            except Exception as e:
+                                # Append the user input to the selected text
+                                cell.setString(cell.getString() + ": " + str(e))
+                        
+                        elif args == "settings":
+                            try:
+
+                                result = self.settings_box("Settings")
+                                                
+                                if "extend_selection_max_tokens" in result:
+                                    self.set_config("extend_selection_max_tokens", result["extend_selection_max_tokens"])
+
+                                if "extend_selection_system_prompt" in result:
+                                    self.set_config("extend_selection_system_prompt", result["extend_selection_system_prompt"])
+
+                                if "edit_selection_max_new_tokens" in result:
+                                    self.set_config("edit_selection_max_new_tokens", result["edit_selection_max_new_tokens"])
+
+                                if "edit_selection_system_prompt" in result:
+                                    self.set_config("edit_selection_system_prompt", result["edit_selection_system_prompt"])
+
+                                if "endpoint" in result and result["endpoint"].startswith("http"):
+                                    self.set_config("endpoint", result["endpoint"])
+
+                                if "model" in result:                
+                                    self.set_config("model", result["model"])
+
+
+                            except Exception as e:
+                                # Append the user input to the selected text
+                                cell.setString(cell.getString() + ":error: " + str(e))
             except Exception as e:
-                text_range = selection.getByIndex(0)
-                # Append the user input to the selected text
-                text_range.setString(text_range.getString() + ": " + str(e))
-        
-        elif args == "settings":
-            try:
-
-                result = self.settings_box("Settings")
-                                
-                if "extend_selection_max_tokens" in result:
-                    self.set_config("extend_selection_max_tokens", result["extend_selection_max_tokens"])
-
-                if "extend_selection_system_prompt" in result:
-                    self.set_config("extend_selection_system_prompt", result["extend_selection_system_prompt"])
-
-                if "edit_selection_max_new_tokens" in result:
-                    self.set_config("edit_selection_max_new_tokens", result["edit_selection_max_new_tokens"])
-
-                if "edit_selection_system_prompt" in result:
-                    self.set_config("edit_selection_system_prompt", result["edit_selection_system_prompt"])
-
-                if "endpoint" in result and result["endpoint"].startswith("http"):
-                    self.set_config("endpoint", result["endpoint"])
-
-                if "model" in result:                
-                    self.set_config("model", result["model"])
-
-
-            except Exception as e:
-                text_range = selection.getByIndex(0)
-                # Append the user input to the selected text
-                text_range.setString(text_range.getString() + ":error: " + str(e))
+                pass
 
 # Starting from Python IDE
 def main():
