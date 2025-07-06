@@ -19,6 +19,9 @@ This is a LibreOffice Writer extension that enables inline generative editing wi
         *   [text-generation-webui](#text-generation-webui)
         *   [Ollama](#ollama)
 *   [Settings](#settings)
+*   [Contributing](#contributing)
+    *   [Local Development Setup](#local-development-setup)
+    *   [Building the Extension Package](#building-the-extension-package)
 *   [License](#license)
 
 ## Features
@@ -82,9 +85,55 @@ In the settings, you can configure:
 
 ## Contributing
 
-Help with development is always welcome. localwriter has a number of outstanding feature requests by users. Feel free to work on any of them, and you can help improve freedom-respecting local AI. 
+Help with development is always welcome. localwriter has a number of outstanding feature requests by users. Feel free to work on any of them, and you can help improve freedom-respecting local AI.
 
-### Building localwriter
+### Local Development Setup
+
+For developers who want to modify or contribute to Localwriter, you can run and test the extension directly from your source code without packaging it into an `.oxt` file. This allows for quick iteration and seeing changes reflected in the LibreOffice UI.
+
+1. **Clone the Repository (if not already done):**
+   - Clone the Localwriter repository to your local machine if you haven't already:
+     ```
+     git clone https://github.com/balis-john/localwriter.git
+     cd localwriter
+     ```
+
+2. **Register the Extension Temporarily:**
+   - Use the `unopkg` tool to register the extension directly from your repository folder. This avoids the need to package the extension as an `.oxt` file during development.
+   - Run the following command, replacing `/path/to/localwriter/` with the path to your cloned repository:
+     ```
+     unopkg add /path/to/localwriter/
+     ```
+   - On Linux, `unopkg` is often located at `/usr/lib/libreoffice/program/unopkg`. Adjust the command if needed:
+     ```
+     /usr/lib/libreoffice/program/unopkg add /path/to/localwriter/
+     ```
+
+3. **Restart LibreOffice:**
+   - Close and reopen LibreOffice Writer or Calc. You should see the "localwriter" menu with options like "Extend Selection", "Edit Selection", and "Settings" in the menu bar.
+
+4. **Make and Test Changes:**
+   - Edit the source files (e.g., `main.py`) directly in your repository folder using your preferred editor.
+   - After making changes, restart LibreOffice to reload the updated code. Test the functionality and UI elements (dialogs, menu actions) directly in LibreOffice.
+   - Note: Restarting is often necessary for Python script changes to take effect, as LibreOffice caches modules.
+
+5. **Commit Changes to Git:**
+   - Since you're working directly in your Git repository, commit your changes as needed:
+     ```
+     git add main.py
+     git commit -m "Updated extension logic for ExtendSelection"
+     ```
+
+6. **Unregister the Extension (Optional):**
+   - If you need to remove the temporary registration, use:
+     ```
+     unopkg remove org.extension.sample
+     ```
+   - Replace `org.extension.sample` with the identifier from `description.xml` if different.
+
+### Building the Extension Package
+
+To create a distributable `.oxt` package:
 
 In a terminal, change directory into the localwriter repository top-level directory, then run the following command:
 
@@ -100,7 +149,7 @@ zip -r localwriter.oxt \
   README.md
 ````
 
-This will create the file `localwriter.oxt` which you can open with libreoffice to install the localwriter extension. You can also change the file extension to .zip and manually unzip the extension file, if you want to inspect a localwriter `.oxt` file yourself. It is all human-readable, since python is an interpreted language. 
+This will create the file `localwriter.oxt` which you can open with libreoffice to install the localwriter extension. You can also change the file extension to .zip and manually unzip the extension file, if you want to inspect a localwriter `.oxt` file yourself. It is all human-readable, since python is an interpreted language.
 
 
 
