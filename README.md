@@ -46,7 +46,7 @@ This extension provides two powerful commands for LibreOffice Writer:
 
 ### LibreOffice Extension Installation
 
-1.  Download the latest version of Localwriter via the [releases page](https://github.com/balis-john/localwriter/releases).
+1.  Download the latest version of Localwriter via the [releases page](https://github.com/balisujohn/localwriter/releases).
 2.  Open LibreOffice.
 3.  Navigate to `Tools > Extensions`.
 4.  Click `Add` and select the downloaded `.oxt` file.
