@@ -323,7 +323,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                         
                         
                         headers = {
-                            'Content-Type': 'application/json'
+                            'Content-Type': 'application/json',
+                            'method' :'POST'
                         }
 
                         prompt = None
@@ -337,7 +338,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                             'max_tokens': self.get_config("extend_selection_max_tokens", 70),
                             'temperature': 1,
                             'top_p': 0.9,
-                            'seed': 10
+                            'seed': 10,
+                            'stream': True
                         }
 
                         model = self.get_config("model", "")
@@ -351,20 +353,34 @@ class MainJob(unohelper.Base, XJobExecutor):
                         # Create a request object with the URL, data, and headers
                         request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
 
+
+                        toolkit = self.ctx.getServiceManager().createInstanceWithContext(
+                            "com.sun.star.awt.Toolkit", self.ctx
+                        )
+
                         # Send the request and read the response
                         with urllib.request.urlopen(request) as response:
-                            response_data = response.read()
+                            for line in response:
+                                try:
+                                    if line.strip():  # skip empty keep-alive lines
+                                        if line.startswith(b"data: "):
+                                            payload = line[len(b"data: "):].decode("utf-8")
+                                            chunk = json.loads(payload)
+                                            if chunk["choices"][0]["finish_reason"] != None:
+                                                break
+                                            selected_text = text_range.getString()
+                                            new_text = selected_text + str(chunk["choices"][0]["text"])
+                                            text_range.setString(new_text)
+                                            toolkit.processEventsToIdle()   # let the UI catch up      
+                                except Exception as e:
+                                    selected_text = text_range.getString()
+                                    new_text = selected_text + str(e)
+                                    text_range.setString(new_text)
+                                    toolkit.processEventsToIdle()   # let the UI catch up      
 
-                        # If needed, decode the response data
-                        response = json.loads(response_data.decode('utf-8'))
-
-                        # Append completion to selection
-                        selected_text = text_range.getString()
-                        new_text = selected_text + response["choices"][0]["text"]
-
-                        # Set the new text
-                        text_range.setString(new_text)
-                
+                                    # ignore parse errors
+                                    pass 
+                                      
                     except Exception as e:
                         text_range = selection.getByIndex(0)
                         # Append the user input to the selected text
@@ -392,7 +408,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                         'max_tokens': len(text_range.getString()) + self.get_config("edit_selection_max_new_tokens", 0), # this is a bit hacky, it's actually number of characters + max new tokens, so even if max new tokens is zero, max_tokens will often end up with more tokens than the selected text actually contains.
                         'temperature': 1,
                         'top_p': 0.9,
-                        'seed': 10
+                        'seed': 10,
+                        'stream':True
                     }
 
                     model = self.get_config("model", "")
@@ -405,20 +422,36 @@ class MainJob(unohelper.Base, XJobExecutor):
                     # Create a request object with the URL, data, and headers
                     request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
 
-                    # Send the request and read the response
+                    
+                    toolkit = self.ctx.getServiceManager().createInstanceWithContext(
+                                            "com.sun.star.awt.Toolkit", self.ctx
+                                        )
+
+
+
+                     # Send the request and read the response
+                    text_range.setString("")
                     with urllib.request.urlopen(request) as response:
-                        response_data = response.read()
+                        for line in response:
+                            try:
+                                if line.strip():  # skip empty keep-alive lines
+                                    if line.startswith(b"data: "):
+                                        payload = line[len(b"data: "):].decode("utf-8")
+                                        chunk = json.loads(payload)
+                                        if chunk["choices"][0]["finish_reason"] != None:
+                                            break
+                                        selected_text = text_range.getString()
+                                        new_text = selected_text + str(chunk["choices"][0]["text"])
+                                        text_range.setString(new_text)
+                                        toolkit.processEventsToIdle()   # let the UI catch up      
+                            except Exception as e:
+                                selected_text = text_range.getString()
+                                new_text = selected_text + str(e)
+                                text_range.setString(new_text)
+                                toolkit.processEventsToIdle()   # let the UI catch up      
 
-                    # If needed, decode the response data
-                    response = json.loads(response_data.decode('utf-8'))
-
-
-                    # replace selection with completion
-                    selected_text = text_range.getString()
-                    new_text = response["choices"][0]["text"]
-
-                    # Set the new text
-                    text_range.setString(new_text)
+                                # ignore parse errors
+                                pass 
 
                 except Exception as e:
                     text_range = selection.getByIndex(0)
@@ -506,7 +539,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                                         'max_tokens': self.get_config("extend_selection_max_tokens", 70),
                                         'temperature': 1,
                                         'top_p': 0.9,
-                                        'seed': 10
+                                        'seed': 10,
+                                        'stream': True
                                     }
 
                                     model = self.get_config("model", "")
@@ -521,18 +555,32 @@ class MainJob(unohelper.Base, XJobExecutor):
                                     request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
 
                                     # Send the request and read the response
+                                    toolkit = self.ctx.getServiceManager().createInstanceWithContext(
+                                        "com.sun.star.awt.Toolkit", self.ctx
+                                    )
+
+                                    # Send the request and read the response
                                     with urllib.request.urlopen(request) as response:
-                                        response_data = response.read()
+                                        for line in response:
+                                            try:
+                                                if line.strip():  # skip empty keep-alive lines
+                                                    if line.startswith(b"data: "):
+                                                        payload = line[len(b"data: "):].decode("utf-8")
+                                                        chunk = json.loads(payload)
+                                                        if chunk["choices"][0]["finish_reason"] != None:
+                                                            break
+                                                        selected_text = cell.getString()
+                                                        new_text = selected_text + str(chunk["choices"][0]["text"])
+                                                        cell.setString(new_text)
+                                                        toolkit.processEventsToIdle()   # let the UI catch up      
+                                            except Exception as e:
+                                                selected_text = cell.getString()
+                                                new_text = selected_text + str(e)
+                                                cell.setString(new_text)
+                                                toolkit.processEventsToIdle()   # let the UI catch up      
+                                                # ignore parse errors
+                                                pass 
 
-                                    # If needed, decode the response data
-                                    response = json.loads(response_data.decode('utf-8'))
-
-                                    # Append completion to selection
-                                    selected_text = cell.getString()
-                                    new_text = selected_text + response["choices"][0]["text"]
-
-                                    # Set the new text
-                                    cell.setString(new_text)
                                 except Exception as e:
                                     # Append the user input to the selected text
                                     cell.setString(cell.getString() + ": " + str(e))
@@ -546,7 +594,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                                     'Content-Type': 'application/json'
                                 }
 
-                                prompt =  "ORIGINAL VERSION:\n" + cell.getString() + "\n Below is an edited version according to the following instructions. Don't waste time thinking, be as fast as you can. There are no comments in the edited version. USER INSTRUCTIONS: \n" + user_input + "\nEDITED VERSION:\n"
+                                prompt =  "ORIGINAL VERSION:\n" + cell.getString() + "\n Below is an edited version according to the following instructions. Don't waste time thinking, be as fast as you can. The edited text does not end with a newline. There are no comments in the edited version. USER INSTRUCTIONS: \n" + user_input + "\nEDITED VERSION:\n"
 
                                 if self.get_config("edit_selection_system_prompt", "") != "":
                                     prompt = "SYSTEM PROMPT\n" + self.get_config("edit_selection_system_prompt","") + "\nEND SYSTEM PROMPT\n" + prompt
@@ -557,7 +605,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                                     'max_tokens': len(cell.getString()) + self.get_config("edit_selection_max_new_tokens", 0), # this is a bit hacky, it's actually number of characters + max new tokens, so even if max new tokens is zero, max_tokens will often end up with more tokens than the selected text actually contains.
                                     'temperature': 1,
                                     'top_p': 0.9,
-                                    'seed': 10
+                                    'seed': 10,
+                                    'stream': True
                                 }
 
                                 model = self.get_config("model", "")
@@ -570,25 +619,34 @@ class MainJob(unohelper.Base, XJobExecutor):
                                 # Create a request object with the URL, data, and headers
                                 request = urllib.request.Request(url, data=json_data, headers=headers, method='POST')
 
+   # Send the request and read the response
+                                toolkit = self.ctx.getServiceManager().createInstanceWithContext(
+                                    "com.sun.star.awt.Toolkit", self.ctx
+                                )
+
+                                cell.setString("")
+
                                 # Send the request and read the response
                                 with urllib.request.urlopen(request) as response:
-                                    response_data = response.read()
-
-                                # If needed, decode the response data
-                                response = json.loads(response_data.decode('utf-8'))
-
-
-                                # get previous selected text
-                                selected_text = cell.getString()
-
-                    
-                                raw_response = response["choices"][0]["text"]
-
-                                #action, rather than thought
-                                new_text = re.sub(r'<think>.*?</think>', '', raw_response, flags=re.DOTALL)
-
-                                # Set the new text for the cell
-                                cell.setString(new_text)
+                                    for line in response:
+                                        try:
+                                            if line.strip():  # skip empty keep-alive lines
+                                                if line.startswith(b"data: "):
+                                                    payload = line[len(b"data: "):].decode("utf-8")
+                                                    chunk = json.loads(payload)
+                                                    if chunk["choices"][0]["finish_reason"] != None:
+                                                        break
+                                                    selected_text = cell.getString()
+                                                    new_text = selected_text + str(chunk["choices"][0]["text"])
+                                                    cell.setString(new_text)
+                                                    toolkit.processEventsToIdle()   # let the UI catch up      
+                                        except Exception as e:
+                                            selected_text = cell.getString()
+                                            new_text = selected_text + str(e)
+                                            cell.setString(new_text)
+                                            toolkit.processEventsToIdle()   # let the UI catch up      
+                                            # ignore parse errors
+                                            pass 
 
 
                             except Exception as e:
