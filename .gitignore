@@ -3,6 +3,7 @@ localwriter.json
 
 # Build artifacts
 *.oxt
+!dist/*.oxt
 *.pyc
 __pycache__/
 
