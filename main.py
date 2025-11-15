@@ -139,6 +139,13 @@ class MainJob(unohelper.Base, XJobExecutor):
         api_type = "chat" if api_type == "chat" else "completions"
         model = str(self.get_config("model", ""))
         
+        # Add default system prompt to ensure plain text output
+        default_system_prompt = "You must return only plain text without any formatting, markdown, code blocks, or special characters. Do not use **, *, _, `, #, or any other formatting symbols. Return natural, simple text only."
+        if system_prompt:
+            system_prompt = default_system_prompt + " " + system_prompt
+        else:
+            system_prompt = default_system_prompt
+        
         log_to_file(f"=== API Request Debug ===")
         log_to_file(f"Endpoint: {endpoint}")
         log_to_file(f"API Type: {api_type}")
