@@ -34,21 +34,24 @@ def log_to_file(message):
 # and also the XJobExecutor, the implemented interface
 class MainJob(unohelper.Base, XJobExecutor):
     def __init__(self, ctx):
+        log_to_file("=== MainJob.__init__ called ===")
         self.ctx = ctx
         # handling different situations (inside LibreOffice or other process)
         try:
             self.sm = ctx.getServiceManager()
             self.desktop = XSCRIPTCONTEXT.getDesktop()
             self.document = XSCRIPTCONTEXT.getDocument()
+            log_to_file("MainJob initialized with XSCRIPTCONTEXT")
         except NameError:
             self.sm = ctx.ServiceManager
             self.desktop = self.ctx.getServiceManager().createInstanceWithContext(
                 "com.sun.star.frame.Desktop", self.ctx)
+            log_to_file("MainJob initialized without XSCRIPTCONTEXT")
     
 
     def get_config(self,key,default):
   
-        name_file ="localwriter.json"
+        name_file ="mirai.json"
         #path_settings = create_instance('com.sun.star.util.PathSettings')
         
         
@@ -77,7 +80,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         return config_data.get(key, default)
 
     def set_config(self, key, value):
-        name_file = "localwriter.json"
+        name_file = "mirai.json"
         
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
         user_config_path = getattr(path_settings, "UserConfig")
@@ -446,13 +449,16 @@ class MainJob(unohelper.Base, XJobExecutor):
     #end sharealike section 
 
     def trigger(self, args):
+        log_to_file(f"=== trigger called with args: {args} ===")
         desktop = self.ctx.ServiceManager.createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.ctx)
         model = desktop.getCurrentComponent()
+        log_to_file(f"Current component type: {type(model)}")
         #if not hasattr(model, "Text"):
         #    model = self.desktop.loadComponentFromURL("private:factory/swriter", "_blank", 0, ())
 
         if hasattr(model, "Text"):
+            log_to_file("Processing Writer document")
             text = model.Text
             selection = model.CurrentController.getSelection()
             text_range = selection.getByIndex(0)
@@ -483,7 +489,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             elif args == "EditSelection":
                 # Access the current selection
                 try:
-                    user_input = self.input_box("Please enter edit instructions!", "Input", "")
+                    user_input = self.input_box("Saisissez votre prompt d'édition !", "Input", "")
                     
                     # Prepare the prompt for editing
                     prompt = "ORIGINAL VERSION:\n" + text_range.getString() + "\n Below is an edited version according to the following instructions. There are no comments in the edited version. The edited version is followed by the end of the document. The original version will be edited as follows to create the edited version:\n" + user_input + "\nEDITED VERSION:\n"
@@ -549,6 +555,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                     # Append the user input to the selected text
                     text_range.setString(text_range.getString() + ":error: " + str(e))
         elif hasattr(model, "Sheets"):
+            log_to_file("Processing Calc document")
             try:
                 sheet = model.CurrentController.ActiveSheet
                 selection = model.CurrentController.Selection
@@ -665,9 +672,11 @@ def main():
 if __name__ == "__main__":
     main()
 # pythonloader loads a static g_ImplementationHelper variable
+log_to_file("=== Loading Mirai extension module ===")
 g_ImplementationHelper = unohelper.ImplementationHelper()
 g_ImplementationHelper.addImplementation(
     MainJob,  # UNO object class
-    "org.extension.sample.do",  # implementation name (customize for yourself)
-    ("com.sun.star.task.Job",), )  # implemented services (only 1)
+    "fr.gouv.interieur.mirai.do",  # implementation name
+    ("com.sun.star.task.JobExecutor",), )  # implemented services
+log_to_file("=== Mirai extension registered successfully ===")
 # vim: set shiftwidth=4 softtabstop=4 expandtab:
