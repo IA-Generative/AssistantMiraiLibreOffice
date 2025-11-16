@@ -19,9 +19,11 @@ Key repositories:
 
 *   [About](#about)
 *   [Table of Contents](#table-of-contents)
-*   [Features](#features)
-    *   [Extend Selection](#extend-selection)
-    *   [Edit Selection](#edit-selection)
+*   [Fonctionnalités](#fonctionnalités)
+    *   [Générer la suite de la sélection](#-générer-la-suite-de-la-sélection)
+    *   [Modifier la sélection](#-modifier-la-sélection)
+    *   [Résumer la sélection](#-résumer-la-sélection)
+    *   [Reformuler la sélection](#-reformuler-la-sélection)
 *   [Setup](#setup)
     *   [LibreOffice Extension Installation](#libreoffice-extension-installation)
     *   [Backend Setup](#backend-setup)
@@ -34,23 +36,150 @@ Key repositories:
     *   [Building the Extension Package](#building-the-extension-package)
 *   [License](#license)
 
-## Features
+## Fonctionnalités
 
-This extension provides two powerful commands for LibreOffice Writer:
+Cette extension fournit quatre fonctionnalités puissantes pour LibreOffice Writer, vous permettant d'intégrer l'intelligence artificielle directement dans votre flux de travail d'écriture :
 
-### Extend Selection
+### ✨ Générer la suite de la sélection
 
-**Hotkey:** `CTRL + q`
+**Raccourci clavier :** `CTRL + Q`
 
-*   This uses a language model to predict what comes after the selected text. There are a lot of ways to use this.
-*   Some example use cases for this include: writing a story or an email given a particular prompt, adding additional possible items to a grocery list, or summarizing the selected text.
+Cette fonctionnalité utilise un modèle de langage pour prédire et générer ce qui suit le texte sélectionné. Les possibilités d'utilisation sont nombreuses :
 
-### Edit Selection
+*   **Rédaction créative** : Continuer une histoire, un récit ou développer une idée
+*   **Assistance à l'écriture** : Compléter un email, une lettre ou un document professionnel
+*   **Génération de listes** : Ajouter des éléments à une liste de courses, d'actions ou d'idées
+*   **Brainstorming** : Explorer différentes façons de poursuivre un texte
 
-**Hotkey:** `CTRL + e`
+**Résultat :** Le texte généré est ajouté immédiatement après votre sélection, en conservant la mise en forme.
 
-*   A dialog box appears to prompt the user for instructions about how to edit the selected text, then the selected text is replaced by the edited text.
-*   Some examples for use cases for this include changing the tone of an email, translating text to a different language, and semantically editing a scene in a story.
+---
+
+### ✏️ Modifier la sélection
+
+**Raccourci clavier :** `CTRL + E`
+
+Cette commande ouvre une boîte de dialogue où vous pouvez donner des instructions sur la façon de modifier le texte sélectionné. L'IA transforme ensuite votre texte selon vos directives.
+
+**Cas d'usage courants :**
+
+*   **Ajustement du ton** : Rendre un email plus formel ou plus décontracté
+*   **Traduction** : Traduire le texte dans une autre langue
+*   **Correction stylistique** : Améliorer la grammaire, l'orthographe ou le style
+*   **Adaptation** : Modifier le niveau de langage (technique, vulgarisé, académique)
+*   **Révision créative** : Réécrire une scène dans un autre style ou point de vue
+
+**Comment l'utiliser :**
+1. Sélectionnez le texte à modifier
+2. Appuyez sur `CTRL + E`
+3. Entrez vos instructions (ex: "Traduis en anglais", "Rends ce texte plus professionnel", "Corrige les fautes")
+4. Le texte modifié est ajouté après votre sélection avec des délimiteurs clairs
+
+**Résultat :** Le texte original est conservé, et la modification est ajoutée juste en dessous avec des délimiteurs visibles :
+```
+---modification-de-la-sélection---
+[Votre texte modifié apparaît ici]
+---fin-de-la-modification---
+```
+
+---
+
+### 📝 Résumer la sélection
+
+**Raccourci clavier :** `CTRL + R`
+
+Cette fonctionnalité génère un résumé concis du texte sélectionné. Idéale pour extraire les points clés d'un long document, préparer une synthèse ou obtenir une vue d'ensemble rapide.
+
+**Cas d'usage :**
+
+*   **Synthèse de documents** : Résumer un rapport, un article ou une note de réunion
+*   **Extraction d'informations** : Obtenir les points essentiels d'un texte long
+*   **Préparation de présentations** : Créer des points de présentation à partir d'un contenu détaillé
+*   **Révision rapide** : Vérifier rapidement le contenu principal d'un texte
+
+**Comment l'utiliser :**
+1. Sélectionnez le texte à résumer
+2. Appuyez sur `CTRL + R`
+3. Le résumé est automatiquement généré et ajouté après votre sélection
+
+**Résultat :** Le résumé est ajouté avec des délimiteurs distincts :
+```
+---début-du-résumé---
+[Le résumé concis de votre texte apparaît ici]
+---fin-du-résumé---
+```
+
+---
+
+### 💬 Reformuler la sélection
+
+**Raccourci clavier :** `CTRL + L`
+
+Cette fonctionnalité reformule le texte sélectionné dans un langage plus clair et accessible, tout en conservant le sens original. Parfait pour améliorer la lisibilité et la compréhension.
+
+**Cas d'usage :**
+
+*   **Simplification** : Rendre un texte technique accessible au grand public
+*   **Clarification** : Améliorer la compréhension d'un texte complexe
+*   **Vulgarisation** : Adapter un contenu spécialisé pour un public non-expert
+*   **Amélioration de la communication** : Rendre vos écrits plus directs et compréhensibles
+
+**Comment l'utiliser :**
+1. Sélectionnez le texte à reformuler
+2. Appuyez sur `CTRL + L`
+3. La reformulation est automatiquement générée dans la même langue que votre texte
+
+**Résultat :** La reformulation est ajoutée avec des délimiteurs :
+```
+---début-de-la-reformulation---
+[Votre texte reformulé de manière plus claire apparaît ici]
+---fin-de-la-reformulation---
+```
+
+---
+
+### 🌐 Accéder au site MirAI
+
+Accédez directement au site web officiel de MirAI (https://mirai.interieur.gouv.fr) depuis le menu de l'extension pour obtenir plus d'informations sur le programme et les outils disponibles.
+
+---
+
+### ⚙️ Paramètres
+
+Configurez l'extension selon vos besoins : point de terminaison de l'API, modèle de langage, clé API, et options avancées.
+
+---
+
+## Comportement des fonctionnalités
+
+### Conservation du texte original
+
+**Important :** Les fonctionnalités "Modifier", "Résumer" et "Reformuler" **n'effacent jamais** votre texte original. Elles ajoutent le résultat généré juste après votre sélection, avec des délimiteurs clairs. Cela vous permet de :
+
+- Comparer facilement l'original et la version générée
+- Choisir la version qui vous convient
+- Conserver une trace de vos modifications
+- Supprimer manuellement ce qui ne vous convient pas
+
+Seule la fonction "Générer la suite" ajoute directement du texte sans délimiteur, car elle est conçue pour prolonger naturellement votre texte.
+
+### Conservation de la mise en forme
+
+L'extension **préserve autant que possible la mise en forme** de votre texte (gras, italique, couleurs, etc.). Cependant, selon le modèle de langage utilisé (OpenAI, Mistral, Ollama, OpenWebUI, etc.), la mise en forme peut légèrement varier.
+
+### ⚠️ Limitations connues
+
+- **Mise en forme** : Certains modèles peuvent modifier les sauts de lignes ou la ponctuation
+- **Comportement des modèles** : L'IA peut parfois poser des questions au lieu de suivre les instructions. L'extension détecte automatiquement ces cas et vous demande de reformuler votre demande
+- **Langue** : Les modèles fonctionnent mieux dans les langues sur lesquelles ils ont été entraînés (généralement l'anglais et le français)
+
+---
+
+## Feuille de route
+
+- ⏳ **À venir** : Automatisation de l'intégration avec Mirai Chat
+- ⏳ **À venir** : Lecture de la configuration depuis un serveur réseau (gestion de versions via GitLab/GitHub)
+- ⏳ **À venir** : Intégration d'OpenTelemetry pour le monitoring
 
 ---
 

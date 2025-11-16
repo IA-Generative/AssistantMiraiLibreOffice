@@ -126,14 +126,14 @@ class MainJob(unohelper.Base, XJobExecutor):
         compatibility_flag = self._as_bool(self.get_config("openai_compatibility", False))
         return compatibility_flag or ("api.openai.com" in endpoint.lower())
 
-    def make_api_request(self, prompt, system_prompt="", max_tokens=70, api_type=None):
+    def make_api_request(self, prompt, system_prompt="", max_tokens=15000, api_type=None):
         """
         Build a streaming completion/chat request that can target local or OpenAI-compatible endpoints.
         """
         try:
             max_tokens = int(max_tokens)
         except (TypeError, ValueError):
-            max_tokens = 70
+            max_tokens = 15000
 
         endpoint = str(self.get_config("endpoint", "http://127.0.0.1:5000")).rstrip("/")
         api_key = str(self.get_config("api_key", ""))
@@ -374,9 +374,9 @@ class MainJob(unohelper.Base, XJobExecutor):
             {"name": "api_type", "label": "API Type (completions/chat):", "value": str(self.get_config("api_type","completions"))},
             {"name": "is_openwebui", "label": "Is OpenWebUI endpoint? (true/false):", "value": is_openwebui_value, "type": "bool"},
             {"name": "openai_compatibility", "label": "OpenAI Compatible Endpoint? (true/false):", "value": openai_compatibility_value, "type": "bool"},
-            {"name": "extend_selection_max_tokens", "label": "Extend Selection Max Tokens:", "value": str(self.get_config("extend_selection_max_tokens","70")), "type": "int"},
+            {"name": "extend_selection_max_tokens", "label": "Extend Selection Max Tokens:", "value": str(self.get_config("extend_selection_max_tokens","15000")), "type": "int"},
             {"name": "extend_selection_system_prompt", "label": "Extend Selection System Prompt:", "value": str(self.get_config("extend_selection_system_prompt",""))},
-            {"name": "edit_selection_max_new_tokens", "label": "Edit Selection Max New Tokens:", "value": str(self.get_config("edit_selection_max_new_tokens","0")), "type": "int"},
+            {"name": "edit_selection_max_new_tokens", "label": "Edit Selection Max New Tokens:", "value": str(self.get_config("edit_selection_max_new_tokens","15000")), "type": "int"},
             {"name": "edit_selection_system_prompt", "label": "Edit Selection System Prompt:", "value": str(self.get_config("edit_selection_system_prompt",""))},
         ]
 
@@ -471,7 +471,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                         # Prepare request using the new unified method
                         system_prompt = self.get_config("extend_selection_system_prompt", "")
                         prompt = text_range.getString()
-                        max_tokens = self.get_config("extend_selection_max_tokens", 70)
+                        max_tokens = self.get_config("extend_selection_max_tokens", 15000)
                         
                         api_type = str(self.get_config("api_type", "completions")).lower()
                         request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
@@ -517,7 +517,7 @@ EDITED VERSION:
 """
                     
                     system_prompt = self.get_config("edit_selection_system_prompt", "You are a text editor. You follow instructions precisely and output only the edited text without any questions, explanations, or meta-commentary.")
-                    max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 0)
+                    max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 15000)
                     
                     api_type = str(self.get_config("api_type", "completions")).lower()
                     request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
@@ -709,7 +709,7 @@ REFORMULATED VERSION:
 """
                     
                     system_prompt = "You are a plain language expert. Rewrite complex text in clear, simple language accessible to all readers. ALWAYS use the same language as the input text. Use short sentences and common words."
-                    max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 100)
+                    max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 15000)
                     
                     api_type = str(self.get_config("api_type", "completions")).lower()
                     request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
