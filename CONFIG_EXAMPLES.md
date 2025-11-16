@@ -81,6 +81,59 @@ On macOS, the configuration file is located at:
 
 You can copy one of the examples above to this location, replacing `YOUR_API_KEY_HERE` with your actual API key if needed.
 
+## Configuration avec télémétrie OpenTelemetry
+
+Pour activer la télémétrie et le monitoring avec OpenTelemetry :
+
+```json
+{
+    "endpoint": "http://localhost:3000",
+    "model": "llama2",
+    "api_key": "",
+    "api_type": "chat",
+    "is_openwebui": true,
+    "openai_compatibility": false,
+    "extend_selection_max_tokens": 15000,
+    "extend_selection_system_prompt": "",
+    "edit_selection_max_new_tokens": 15000,
+    "edit_selection_system_prompt": "",
+    
+    "telemetryEnabled": true,
+    "telemetryEndpoint": "https://traces.cpin.numerique-interieur.com/v1/traces",
+    "telemetrySel": "mirai_salt",
+    "telemetryAuthorizationType": "Basic",
+    "telemetryKey": "dGVzdC1lcmljOnRlc3QtZXJpYw==",
+    "telemetryHost": "",
+    "telemetrylogJson": false,
+    "telemetryFormatProtobuf": false
+}
+```
+
+### Paramètres de télémétrie
+
+- **telemetryEnabled**: Active ou désactive la télémétrie (true/false)
+- **telemetryEndpoint**: URL de l'endpoint OpenTelemetry Tempo
+- **telemetryAuthorizationType**: Type d'authentification ("Basic" ou "Bearer")
+- **telemetryKey**: Clé d'authentification encodée en base64
+- **telemetrylogJson**: Active les logs JSON détaillés (pour debug)
+- **telemetrySel**: Salt pour la télémétrie
+- **telemetryHost**: Hôte personnalisé (optionnel)
+- **telemetryFormatProtobuf**: Format protobuf (non implémenté)
+
+### UUID d'extension
+
+L'extension génère automatiquement un UUID unique au premier lancement. Cet UUID est stocké dans le fichier de configuration sous la clé `extensionUUID` et est utilisé pour identifier de manière anonyme l'instance de l'extension dans les traces.
+
+### Désactiver la télémétrie
+
+Pour désactiver la télémétrie, ajoutez simplement :
+
+```json
+{
+    "telemetryEnabled": false
+}
+```
+
 ## Environment Variables (Alternative)
 
 If you want to keep secrets out of the config file entirely, you could use environment variables. However, this would require modifying the extension code to read from environment variables as a fallback.
