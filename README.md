@@ -6,7 +6,7 @@ This is a LibreOffice Writer extension that enables inline generative editing wi
 
 **Origin and Attribution:**
 
-This application is an experimental version developed as part of the French Ministry of Interior's MirAI program. It is based on the work of **John Balis**, author of the **LocalWriter extension**, which served as the technical foundation for this adaptation.
+This application is an Béta version developed as part of the French Ministry of Interior's MirAI program. It is based on the work of **John Balis**, author of the **LocalWriter extension**, which served as the technical foundation for this adaptation.
 
 For complete information about sources and attributions, please refer to `registration/license.txt`.
 
@@ -175,11 +175,124 @@ L'extension **préserve autant que possible la mise en forme** de votre texte (g
 
 ---
 
+## Télémétrie et monitoring
+
+### OpenTelemetry
+
+L'extension intègre désormais **OpenTelemetry** pour le suivi d'utilisation et le monitoring. Cette fonctionnalité permet de collecter des traces anonymisées sur l'utilisation des différentes fonctionnalités.
+
+**⚡ Télémétrie asynchrone (non-bloquante) :**
+
+Les appels de télémétrie sont **entièrement asynchrones** et s'exécutent dans des threads séparés (daemon threads). Cela garantit que :
+
+- ✅ Le plug-in **ne se bloque jamais** en attendant une réponse du serveur de télémétrie
+- ✅ Les fonctionnalités restent **totalement réactives** même si le backend Tempo est indisponible
+- ✅ L'utilisateur ne subit **aucun ralentissement** lié à la télémétrie (timeout de 5s dans un thread séparé)
+- ✅ Les erreurs de télémétrie n'affectent pas le fonctionnement normal de l'extension
+- ✅ Les threads se terminent automatiquement à la fermeture de LibreOffice
+
+**Configuration de la télémétrie :**
+
+Dans votre fichier `mirai.json`, vous pouvez configurer :
+
+```json
+{
+  "telemetryEnabled": true,
+  "telemetryEndpoint": "https://traces.cpin.numerique-interieur.com/v1/traces",
+  "telemetryAuthorizationType": "Basic",
+  "telemetryKey": "votre-clé-encodée-en-base64",
+  "telemetrylogJson": false
+}
+```
+
+**Paramètres disponibles :**
+
+| Paramètre | Description | Valeur par défaut |
+|-----------|-------------|-------------------|
+| `telemetryEnabled` | Activer/désactiver la télémétrie | `true` |
+| `telemetryEndpoint` | URL de l'endpoint OpenTelemetry/Tempo | `https://traces.cpin.numerique-interieur.com/v1/traces` |
+| `telemetryAuthorizationType` | Type d'authentification | `Basic` ou `Bearer` |
+| `telemetryKey` | Clé d'authentification base64 | `""` (utilise la clé obfusquée) |
+| `telemetrylogJson` | Logs détaillés avec headers HTTP complets | `false` (activez pour debug) |
+| `telemetrySel` | Salt pour la télémétrie | `mirai_salt` |
+| `telemetryHost` | Hôte personnalisé | `""` (optionnel) |
+| `telemetryFormatProtobuf` | Format protobuf | `false` (non implémenté) |
+
+**🔒 Sécurité et authentification :**
+
+L'extension utilise un système d'authentification robuste pour la télémétrie :
+
+- **Clé par défaut obfusquée** : Une clé de télémétrie est intégrée dans le code, protégée par un système de double encodage (inversion + Base64)
+- **Décodage automatique** : Si `telemetryKey` est vide dans `mirai.json`, la clé obfusquée est automatiquement décodée et utilisée
+- **Clé personnalisée** : Vous pouvez fournir votre propre clé encodée en base64 dans `telemetryKey`
+- **Logs détaillés** : Avec `telemetrylogJson: true`, tous les headers HTTP sont loggés (y compris la clé d'authentification pour le debug)
+
+Pour encoder votre propre clé d'authentification :
+```bash
+echo -n "username:password" | base64
+```
+
+Pour plus de détails sur le système d'obfuscation, consultez [SECURITY.md](SECURITY.md).
+
+**UUID d'extension :**
+
+Au premier lancement, l'extension génère automatiquement un UUID unique qui est stocké dans la configuration. Cet identifiant permet de suivre l'utilisation sans identifier personnellement l'utilisateur.
+
+**Événements tracés :**
+
+- `ExtensionLoaded` : Chargement de l'extension
+- `ExtendSelection` : Utilisation de la génération de texte
+- `EditSelection` : Utilisation de la modification de texte
+- `SummarizeSelection` : Utilisation du résumé
+- `SimplifySelection` : Utilisation de la reformulation
+- `OpenMiraiWebsite` : Accès au site web
+- `OpenSettings` : Ouverture des paramètres
+
+**Données collectées :**
+
+Les traces incluent uniquement :
+
+- L'UUID de l'extension (anonyme)
+- Le nom de l'action effectuée
+- La longueur du texte traité (pas le contenu)
+- Les métadonnées techniques (timestamps, IDs de trace)
+
+**⚠️ Aucun contenu textuel n'est jamais envoyé** dans les traces de télémétrie.
+
+**Debug et logs :**
+
+Pour activer les logs détaillés de télémétrie (utile pour déboguer l'authentification) :
+
+```json
+{
+  "telemetrylogJson": true
+}
+```
+
+Cela affichera dans `~/log.txt` :
+
+- Les payloads JSON complets envoyés à Tempo
+- Tous les headers HTTP (y compris Authorization)
+- Les réponses complètes du serveur
+- Les erreurs détaillées avec codes HTTP
+
+**Désactiver la télémétrie :**
+
+Pour désactiver complètement la télémétrie, ajoutez dans votre configuration :
+
+```json
+{
+  "telemetryEnabled": false
+}
+```
+
+---
+
 ## Feuille de route
 
+- ✅ **Implémenté** : Intégration d'OpenTelemetry pour le monitoring
 - ⏳ **À venir** : Automatisation de l'intégration avec Mirai Chat
 - ⏳ **À venir** : Lecture de la configuration depuis un serveur réseau (gestion de versions via GitLab/GitHub)
-- ⏳ **À venir** : Intégration d'OpenTelemetry pour le monitoring
 
 ---
 

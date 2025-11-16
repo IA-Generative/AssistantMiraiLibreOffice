@@ -11,6 +11,10 @@ import uno
 import os 
 import logging
 import re
+import uuid
+import time
+import base64
+import threading
 
 from com.sun.star.beans import PropertyValue
 from com.sun.star.container import XNamed
@@ -30,6 +34,195 @@ def log_to_file(message):
     logging.info(message)
 
 
+def generate_trace_id():
+    """Generate a random 16-byte trace ID in hexadecimal format."""
+    return uuid.uuid4().hex[:32]
+
+
+def generate_span_id():
+    """Generate a random 8-byte span ID in hexadecimal format."""
+    return uuid.uuid4().hex[:16]
+
+
+def send_telemetry_trace_async(config, span_name, attributes=None):
+    """
+    Send OpenTelemetry trace asynchronously in a separate thread.
+    This function returns immediately and does not block the extension execution.
+    
+    Args:
+        config: Configuration object with telemetry settings
+        span_name: Name of the span (e.g., "ExtendSelection", "EditSelection")
+        attributes: Optional dictionary of additional attributes
+    """
+    thread = threading.Thread(
+        target=_send_telemetry_trace_impl,
+        args=(config, span_name, attributes),
+        daemon=True  # Daemon thread won't prevent the program from exiting
+    )
+    thread.start()
+    log_to_file(f"Telemetry trace '{span_name}' scheduled asynchronously")
+
+
+def _send_telemetry_trace_impl(config, span_name, attributes=None):
+    """
+    Internal implementation of telemetry trace sending.
+    This runs in a separate thread to avoid blocking the extension.
+    
+    Args:
+        config: MainJob object with get_config() method
+        span_name: Name of the span (e.g., "ExtendSelection", "EditSelection")
+        attributes: Optional dictionary of additional attributes
+    """
+    endpoint = "unknown"  # Initialize endpoint for error handling
+    try:
+        telemetry_enabled = config.get_config("telemetryEnabled", True)
+        if not telemetry_enabled:
+            log_to_file("Telemetry disabled, skipping trace")
+            return
+        
+        endpoint = config.get_config("telemetryEndpoint", None)
+        auth_type = config.get_config("telemetryAuthorizationType", None)
+        auth_key = config.get_config("telemetryKey", None)
+        log_json = config.get_config("telemetrylogJson", None)
+        
+        # Generate or retrieve extension UUID
+        extension_uuid = config.get_config("extensionUUID", "")
+        if not extension_uuid:
+            extension_uuid = str(uuid.uuid4())
+            config.set_config("extensionUUID", extension_uuid)
+            log_to_file(f"Generated new extension UUID: {extension_uuid}")
+        
+        # Generate trace and span IDs
+        trace_id = generate_trace_id()
+        span_id = generate_span_id()
+        
+        # Get current timestamp in nanoseconds
+        timestamp_ns = int(time.time() * 1e9)
+        
+        # Build span attributes
+        span_attributes = {
+            "extension.uuid": extension_uuid,
+            "extension.name": "mirai",
+            "extension.version": "1.0.0"
+        }
+        
+        if attributes:
+            span_attributes.update(attributes)
+        
+        # Convert attributes to OpenTelemetry format
+        otel_attributes = []
+        for key, value in span_attributes.items():
+            otel_attributes.append({
+                "key": key,
+                "value": {"stringValue": str(value)}
+            })
+        
+        # Build OpenTelemetry JSON payload
+        payload = {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": [
+                            {"key": "service.name", "value": {"stringValue": "mirai-libreoffice"}},
+                            {"key": "service.version", "value": {"stringValue": "1.0.0"}},
+                            {"key": "extension.uuid", "value": {"stringValue": extension_uuid}}
+                        ]
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {
+                                "name": "mirai-extension",
+                                "version": "1.0.0"
+                            },
+                            "spans": [
+                                {
+                                    "traceId": trace_id,
+                                    "spanId": span_id,
+                                    "name": span_name,
+                                    "kind": 1,  # SPAN_KIND_INTERNAL
+                                    "startTimeUnixNano": str(timestamp_ns),
+                                    "endTimeUnixNano": str(timestamp_ns + 1000000),  # Add 1ms duration
+                                    "attributes": otel_attributes,
+                                    "status": {"code": 1}  # STATUS_CODE_OK
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+        
+        if log_json:
+            log_to_file(f"=== Telemetry Request ===")
+            log_to_file(f"URL: {endpoint}")
+            log_to_file(f"Method: POST")
+            log_to_file(f"Span Name: {span_name}")
+            log_to_file(f"Trace ID: {trace_id}")
+            log_to_file(f"Span ID: {span_id}")
+            log_to_file(f"Payload: {json.dumps(payload, indent=2)}")
+        
+        # Send the request
+        json_data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(endpoint, data=json_data, method='POST')
+        req.add_header('Content-Type', 'application/json')
+        
+        # Add authentication header
+        if auth_key:
+            if auth_type == "Basic":
+                req.add_header('Authorization', f'Basic {auth_key}')
+            elif auth_type == "Bearer":
+                req.add_header('Authorization', f'Bearer {auth_key}')
+        
+        # Log request headers
+        if log_json:
+            log_to_file(f"=== Request Headers ===")
+            for header_name, header_value in req.headers.items():
+                if header_name.lower() == 'authorization':
+                    # Show full authorization header for debugging
+                    log_to_file(f"{header_name}: {header_value}")
+                    log_to_file(f"  └─ Type: {auth_type}")
+                    log_to_file(f"  └─ Key (first 20 chars): {auth_key[:20]}..." if len(auth_key) > 20 else f"  └─ Key: {auth_key}")
+                else:
+                    log_to_file(f"{header_name}: {header_value}")
+            log_to_file(f"Content-Length: {len(json_data)}")
+            log_to_file(f"===")
+        
+        # Create SSL context that doesn't verify certificates (for internal endpoints)
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        with urllib.request.urlopen(req, context=ssl_context, timeout=5) as response:
+            response_status = response.status
+            response_headers = dict(response.headers)
+            response_body = response.read().decode('utf-8') if response.readable() else ""
+            
+            if log_json:
+                log_to_file(f"=== Telemetry Response ===")
+                log_to_file(f"Status: {response_status}")
+                log_to_file(f"Headers: {json.dumps(response_headers, indent=2)}")
+                log_to_file(f"Body: {response_body if response_body else '(empty)'}")
+                log_to_file(f"=== End Telemetry Response ===")
+            
+            log_to_file(f"Telemetry trace sent successfully: {span_name}, status: {response_status}")
+            
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode('utf-8') if hasattr(e, 'read') else ""
+        log_to_file(f"=== Telemetry HTTP Error ===")
+        log_to_file(f"URL: {endpoint}")
+        log_to_file(f"Status: {e.code}")
+        log_to_file(f"Reason: {e.reason}")
+        log_to_file(f"Headers: {dict(e.headers) if hasattr(e, 'headers') else 'N/A'}")
+        log_to_file(f"Body: {error_body if error_body else '(empty)'}")
+        log_to_file(f"=== End Telemetry Error ===")
+    except Exception as e:
+        log_to_file(f"=== Telemetry Exception ===")
+        log_to_file(f"URL: {endpoint}")
+        log_to_file(f"Error: {str(e)}")
+        log_to_file(f"Type: {type(e).__name__}")
+        log_to_file(f"=== End Telemetry Exception ===")
+
+
 # The MainJob is a UNO component derived from unohelper.Base class
 # and also the XJobExecutor, the implemented interface
 class MainJob(unohelper.Base, XJobExecutor):
@@ -47,10 +240,61 @@ class MainJob(unohelper.Base, XJobExecutor):
             self.desktop = self.ctx.getServiceManager().createInstanceWithContext(
                 "com.sun.star.frame.Desktop", self.ctx)
             log_to_file("MainJob initialized without XSCRIPTCONTEXT")
+        
+        # Send telemetry trace on extension load
+        try:
+            self._ensure_extension_uuid()
+            send_telemetry_trace_async(self, "ExtensionLoaded", {
+                "event.type": "extension_loaded",
+                "extension.context": "libreoffice_writer"
+            })
+        except Exception as e:
+            log_to_file(f"Failed to send extension load telemetry: {str(e)}")
     
+    def _ensure_extension_uuid(self):
+        """Ensure extension has a unique UUID, generate if missing."""
+        extension_uuid = self.get_config("extensionUUID", "")
+        if not extension_uuid:
+            extension_uuid = str(uuid.uuid4())
+            self.set_config("extensionUUID", extension_uuid)
+            log_to_file(f"Generated new extension UUID: {extension_uuid}")
+        return extension_uuid
+    
+    def _decode_default_key(self):
+        """
+        Decode the default telemetry key using base64 decoding.
+        The key is stored in an obfuscated format and decoded at runtime.
+        """
+        # Obfuscated key - reversed string then base64 encoded
+        obfuscated = "PT13WXBKWFp0UTNjbFJuT2psbWNsMUNkelZHZA=="
+        try:
+            # Decode the obfuscated string
+            decoded = base64.b64decode(obfuscated).decode('utf-8')
+            # Reverse the string to get the original key
+            return decoded[::-1]
+        except Exception as e:
+            log_to_file(f"Error decoding telemetry key: {str(e)}")
+            return ""
+    
+    def _get_telemetry_defaults(self):
+        """Return default values for telemetry configuration."""
+        return {
+            "telemetryEnabled": True,
+            "telemetryEndpoint": "https://traces.cpin.numerique-interieur.com/v1/traces",
+            "telemetrySel": "mirai_salt",
+            "telemetryAuthorizationType": "Basic",
+            "telemetryKey": self._decode_default_key(),
+            "telemetryHost": "",
+            "telemetrylogJson": False,
+            "telemetryFormatProtobuf": False
+        }
 
     def get_config(self,key,default):
-  
+        # Check for telemetry defaults first
+        telemetry_defaults = self._get_telemetry_defaults()
+        if key in telemetry_defaults and default is None:
+            default = telemetry_defaults[key]
+        
         name_file ="mirai.json"
         #path_settings = create_instance('com.sun.star.util.PathSettings')
         
@@ -76,8 +320,14 @@ class MainJob(unohelper.Base, XJobExecutor):
         except (IOError, json.JSONDecodeError):
             return default
 
-        # Return the value corresponding to the key, or the default value if the key is not found
-        return config_data.get(key, default)
+        # Get the value from config file
+        value = config_data.get(key, default)
+        
+        # If telemetry key is empty string and we have a default from telemetry_defaults, use it
+        if key == "telemetryKey" and (value == "" or value is None) and key in telemetry_defaults:
+            return telemetry_defaults[key]
+        
+        return value
 
     def set_config(self, key, value):
         name_file = "mirai.json"
@@ -465,6 +715,12 @@ class MainJob(unohelper.Base, XJobExecutor):
 
             
             if args == "ExtendSelection":
+                # Send telemetry trace
+                send_telemetry_trace_async(self, "ExtendSelection", {
+                    "action": "extend_selection",
+                    "text_length": str(len(text_range.getString()))
+                })
+                
                 # Access the current selection
                 if len(text_range.getString()) > 0:
                     try:
@@ -492,6 +748,12 @@ class MainJob(unohelper.Base, XJobExecutor):
                         text_range.setString(text_range.getString() + ": " + str(e))
 
             elif args == "EditSelection":
+                # Send telemetry trace
+                send_telemetry_trace_async(self, "EditSelection", {
+                    "action": "edit_selection",
+                    "text_length": str(len(text_range.getString()))
+                })
+                
                 # Access the current selection
                 try:
                     user_input = self.input_box("Saisissez votre prompt d'édition !", "Input", "")
@@ -611,6 +873,12 @@ EDITED VERSION:
                     text_range.setString(text_range.getString() + ": " + str(e))
             
             elif args == "SummarizeSelection":
+                # Send telemetry trace
+                send_telemetry_trace_async(self, "SummarizeSelection", {
+                    "action": "summarize_selection",
+                    "text_length": str(len(text_range.getString()))
+                })
+                
                 # Create a concise summary of the selected text
                 try:
                     # Save the original text
@@ -678,6 +946,12 @@ SUMMARY:
                     text_range.setString(text_range.getString() + ": " + str(e))
             
             elif args == "SimplifySelection":
+                # Send telemetry trace
+                send_telemetry_trace_async(self, "SimplifySelection", {
+                    "action": "simplify_selection",
+                    "text_length": str(len(text_range.getString()))
+                })
+                
                 # Reformulate the selected text in clearer language
                 try:
                     # Save the original text
@@ -773,6 +1047,11 @@ REFORMULATED VERSION:
                     text_range.setString(text_range.getString() + ": " + str(e))
             
             elif args == "OpenMiraiWebsite":
+                # Send telemetry trace
+                send_telemetry_trace_async(self, "OpenMiraiWebsite", {
+                    "action": "open_website"
+                })
+                
                 # Open MirAI website in default browser
                 try:
                     import webbrowser
@@ -781,6 +1060,11 @@ REFORMULATED VERSION:
                     log_to_file(f"Error opening website: {str(e)}")
             
             elif args == "settings":
+                # Send telemetry trace
+                send_telemetry_trace_async(self, "OpenSettings", {
+                    "action": "open_settings"
+                })
+                
                 try:
                     result = self.settings_box("Settings")
                                     
