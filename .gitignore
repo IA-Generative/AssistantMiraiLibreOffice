@@ -1,5 +1,5 @@
 # Configuration files with secrets
-localwriter.json
+mirai.json
 
 # Build artifacts
 *.oxt
