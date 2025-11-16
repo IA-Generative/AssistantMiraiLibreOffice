@@ -3,8 +3,8 @@
   xmlns="http://openoffice.org/extensions/description/2006"
   xmlns:dep="http://openoffice.org/extensions/description/2006"
   xmlns:xlink="http://www.w3.org/1999/xlink">
-    <identifier value="org.extension.sample"/>
-    <version value="0.0.9"/>
+    <identifier value="fr.gouv.interieur.mirai"/>
+    <version value="0.1.0"/>
     <registration>
         <simple-license accept-by="admin" default-license-id="ID0" suppress-on-update="true" >
             <license-text xlink:href="registration/license.txt" lang="en" license-id="ID0" />
@@ -14,7 +14,7 @@
         <name xlink:href="mailto:mylastnameumyfirstname@gmail.com">Developer</name>
     </publisher>
     <display-name>
-        <name>localwriter</name>
+        <name>Mirai</name>
     </display-name>
 
   <icon>

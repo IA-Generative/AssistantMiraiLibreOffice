@@ -1,0 +1,12 @@
+{
+    "endpoint": "https://chat.mirai.interieur.gouv.fr/",
+    "model": "self-hosted.mistral-small-24b",
+    "api_key": "",
+    "api_type": "chat",
+    "is_openwebui": true,
+    "openai_compatibility": false,
+    "extend_selection_max_tokens": 70,
+    "extend_selection_system_prompt": "",
+    "edit_selection_max_new_tokens": 0,
+    "edit_selection_system_prompt": ""
+}

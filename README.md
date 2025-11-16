@@ -1,10 +1,8 @@
-# localwriter: A LibreOffice Writer extension for local generative AI
-
-Consider donating to support development: https://ko-fi.com/johnbalis
+# Mirai: A LibreOffice Writer extension for generative AI
 
 ## About
 
-This is a LibreOffice Writer extension that enables inline generative editing with local inference. It's compatible with language models supported by `text-generation-webui` and `ollama`.
+This is a LibreOffice Writer extension that enables inline generative editing with AI language models. It's compatible with OpenAI API, OpenWebUI, Ollama, and other OpenAI-compatible endpoints.
 
 ## Table of Contents
 
