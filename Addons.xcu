@@ -3,7 +3,7 @@
     <node oor:name="OfficeMenuBar">
       <node oor:name="fr.gouv.interieur.mirai.menubar" oor:op="replace">
         <prop oor:name="Title" oor:type="xs:string">
-          <value xml:lang="en-US">Mirai</value>
+          <value xml:lang="en-US">🤖 Mirai</value>
         </prop>
         <prop oor:name="Context" oor:type="xs:string">
           <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument</value>
@@ -11,7 +11,7 @@
         <node oor:name="Submenu">
           <node oor:name="M1" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">Etendre la selection</value>
+              <value xml:lang="en-US">✨ Générer la suite (de la selection)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?ExtendSelection</value>
@@ -22,7 +22,7 @@
           </node>
            <node oor:name="M2" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">Modifier la selection</value>
+              <value xml:lang="en-US">✏️ Modifier la selection</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?EditSelection</value>
@@ -31,9 +31,53 @@
               <value>_self</value>
             </prop>
           </node>
-            <node oor:name="M3" oor:op="replace">
+          <node oor:name="M3" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">Parametres</value>
+              <value xml:lang="en-US">📝 Résumer la sélection</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?SummarizeSelection</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M4" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">💬 Reformuler la sélection</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?SimplifySelection</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M4_sep" oor:op="replace">
+            <prop oor:name="Title" oor:type="xs:string">
+              <value>────────────────────</value>
+            </prop>
+            <prop oor:name="URL" oor:type="xs:string">
+              <value></value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M5" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🌐 Accéder au site MirAI</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?OpenMiraiWebsite</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M6" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">⚙️ Parametres</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?settings</value>

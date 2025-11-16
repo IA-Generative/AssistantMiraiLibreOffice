@@ -58,7 +58,7 @@ This extension provides two powerful commands for LibreOffice Writer:
 
 Cette extension offre deux commandes puissantes pour LibreOffice Writer, permettant d'intégrer l'intelligence artificielle directement dans votre flux de travail d'écriture :
 
-### Étendre la sélection
+### Generer la suite (de la sélection )
 
 **Raccourci clavier :** `CTRL + q`
 
@@ -90,6 +90,16 @@ Cette commande ouvre une boîte de dialogue où vous pouvez donner des instructi
 2. Appuyez sur `CTRL + e`
 3. Entrez vos instructions (ex: "Traduis en anglais", "Rends ce texte plus professionnel", "Simplifie ce paragraphe")
 4. Le texte est automatiquement remplacé par la version modifiée
+
+### ⚠️ Limitation connue
+
+Selon le modèle de langage utilisé (OpenAI, Mistral, Ollama, OpenWebUI, etc.), la **mise en forme du texte généré peut varier**.  
+Certains modèles peuvent modifier légèrement les sauts de lignes, la ponctuation, ou la structure des paragraphes.  
+Cela ne relève pas d’un dysfonctionnement de l’extension, mais du comportement propre au modèle choisi.
+Les évolutions du plug-in à venir tâcheront de corriger ce défaut.
+todo : automatiser l'enrollement du plug-in dans Mirai Chat.
+todo : lecture de la configuration sur un serveur de configuration réseau (géré en version via gitlab/hub)
+todo : ajouter opentelemetry
 
 ---
 

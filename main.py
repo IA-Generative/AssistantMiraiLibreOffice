@@ -201,8 +201,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         if model:
             data["model"] = model
 
-        json_data = json.dumps(data).encode('utf-8')
-        log_to_file(f"Request data: {json.dumps(data, indent=2)}")
+        json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
+        log_to_file(f"Request data: {json.dumps(data, ensure_ascii=False, indent=2)}")
         log_to_file(f"Headers: {headers}")
         
         # Note: method='POST' is implicit when data is provided
@@ -476,8 +476,13 @@ class MainJob(unohelper.Base, XJobExecutor):
                         api_type = str(self.get_config("api_type", "completions")).lower()
                         request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
 
+                        # Create cursor at the end of selection to preserve formatting
+                        cursor = text.createTextCursorByRange(text_range)
+                        cursor.collapseToEnd()
+
                         def append_text(chunk_text):
-                            text_range.setString(text_range.getString() + chunk_text)
+                            # Insert text at cursor position (preserves formatting)
+                            text.insertString(cursor, chunk_text, False)
 
                         self.stream_request(request, api_type, append_text)
                                       
@@ -491,26 +496,289 @@ class MainJob(unohelper.Base, XJobExecutor):
                 try:
                     user_input = self.input_box("Saisissez votre prompt d'édition !", "Input", "")
                     
-                    # Prepare the prompt for editing
-                    prompt = "ORIGINAL VERSION:\n" + text_range.getString() + "\n Below is an edited version according to the following instructions. There are no comments in the edited version. The edited version is followed by the end of the document. The original version will be edited as follows to create the edited version:\n" + user_input + "\nEDITED VERSION:\n"
+                    # Save the original text range properties for style preservation
+                    original_text = text_range.getString()
                     
-                    system_prompt = self.get_config("edit_selection_system_prompt", "")
-                    max_tokens = len(text_range.getString()) + self.get_config("edit_selection_max_new_tokens", 0)
+                    # Prepare the prompt for editing - using a clearer stop instruction
+                    # Add explicit instructions to prevent the model from asking questions
+                    prompt = """ORIGINAL VERSION:
+""" + original_text + """
+
+INSTRUCTIONS: """ + user_input + """
+
+IMPORTANT RULES:
+- Do NOT ask any questions
+- Do NOT add explanations or comments
+- Do NOT include phrases like "Here is..." or "I've made..."
+- Output ONLY the edited text directly
+- Start immediately with the edited content
+
+EDITED VERSION:
+"""
+                    
+                    system_prompt = self.get_config("edit_selection_system_prompt", "You are a text editor. You follow instructions precisely and output only the edited text without any questions, explanations, or meta-commentary.")
+                    max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 0)
                     
                     api_type = str(self.get_config("api_type", "completions")).lower()
                     request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
                     
-                    text_range.setString("")
+                    # Get cursor position at the END of selection (not replacing, but adding after)
+                    cursor = text.createTextCursorByRange(text_range)
+                    cursor.collapseToEnd()
+                    
+                    # Insert opening delimiter
+                    text.insertString(cursor, "\n\n---modification-de-la-sélection---\n", False)
+                    
+                    # Track accumulated text for stop phrase detection
+                    accumulated_text = ""
+
+                    # Stop phrases to detect and remove
+                    stop_phrases = [
+                        "end of document",
+                        "end of the document",
+                        "[END]",
+                        "---END---"
+                    ]
+                    
+                    # Question patterns that indicate the model is asking instead of editing
+                    question_patterns = [
+                        # English patterns
+                        "would you like",
+                        "do you want",
+                        "should i",
+                        "can i help",
+                        "what would you prefer",
+                        "could you clarify",
+                        "please specify",
+                        "here is",
+                        "here's",
+                        "i've made",
+                        "i have made",
+                        # French patterns
+                        "voulez-vous",
+                        "souhaitez-vous",
+                        "aimeriez-vous",
+                        "préférez-vous",
+                        "dois-je",
+                        "devrais-je",
+                        "puis-je",
+                        "est-ce que vous",
+                        "pouvez-vous préciser",
+                        "pourriez-vous clarifier",
+                        "veuillez préciser",
+                        "voici",
+                        "voilà",
+                        "j'ai modifié",
+                        "j'ai changé",
+                        "j'ai fait",
+                        "que souhaitez",
+                        "quelle version",
+                        "quel style"
+                    ]
 
                     def append_text(chunk_text):
-                        text_range.setString(text_range.getString() + chunk_text)
+                        nonlocal accumulated_text
+                        accumulated_text += chunk_text
+                        
+                        # Check if model is asking questions or adding meta-commentary
+                        lower_text = accumulated_text.lower()
+                        for pattern in question_patterns:
+                            if pattern in lower_text:
+                                # Stop generation and show warning
+                                text.insertString(cursor, "[Le modèle a tenté de poser une question au lieu d'éditer. Veuillez reformuler votre demande de manière plus directive.]", False)
+                                accumulated_text = ""
+                                return
+                        
+                        # Check if any stop phrase appears in the text
+                        for stop_phrase in stop_phrases:
+                            if stop_phrase.lower() in accumulated_text.lower():
+                                # Find the position and truncate
+                                pos = accumulated_text.lower().find(stop_phrase.lower())
+                                accumulated_text = accumulated_text[:pos].rstrip()
+                                return
+                        
+                        # Insert text at cursor position (preserves formatting)
+                        text.insertString(cursor, chunk_text, False)
 
                     self.stream_request(request, api_type, append_text)
+                    
+                    # Add closing delimiter
+                    text.insertString(cursor, "\n---fin-de-modification---\n", False)
 
                 except Exception as e:
                     text_range = selection.getByIndex(0)
                     # Append the user input to the selected text
                     text_range.setString(text_range.getString() + ": " + str(e))
+            
+            elif args == "SummarizeSelection":
+                # Create a concise summary of the selected text
+                try:
+                    # Save the original text
+                    original_text = text_range.getString()
+                    
+                    if len(original_text.strip()) == 0:
+                        return
+                    
+                    # Prepare the prompt for summarization
+                    prompt = """TEXT TO SUMMARIZE:
+""" + original_text + """
+
+Create the shortest possible summary that captures the essential information. 
+Be extremely concise - use the minimum words necessary.
+Output ONLY the summary text without any introduction or explanation.
+
+SUMMARY:
+"""
+                    
+                    system_prompt = "You are a professional summarizer. Create ultra-concise summaries using the minimum words necessary while preserving key information."
+                    max_tokens = max(100, len(original_text) // 4)  # Summary should be much shorter
+                    
+                    api_type = str(self.get_config("api_type", "completions")).lower()
+                    request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
+                    
+                    # Create cursor at the end of selection
+                    cursor = text.createTextCursorByRange(text_range)
+                    cursor.collapseToEnd()
+                    
+                    # Insert the summary markers
+                    text.insertString(cursor, "\n\n---début-du-résumé---\n", False)
+                    
+                    # Track accumulated summary text
+                    summary_text = ""
+                    
+                    # Stop phrases
+                    stop_phrases = [
+                        "end of document",
+                        "end of the document",
+                        "[END]",
+                        "---END---"
+                    ]
+
+                    def append_summary(chunk_text):
+                        nonlocal summary_text
+                        summary_text += chunk_text
+                        
+                        # Check for stop phrases
+                        for stop_phrase in stop_phrases:
+                            if stop_phrase.lower() in summary_text.lower():
+                                pos = summary_text.lower().find(stop_phrase.lower())
+                                summary_text = summary_text[:pos].rstrip()
+                                return
+                        
+                        # Insert summary text
+                        text.insertString(cursor, chunk_text, False)
+
+                    self.stream_request(request, api_type, append_summary)
+                    
+                    # Add closing marker
+                    text.insertString(cursor, "\n---fin-du-résumé---\n", False)
+
+                except Exception as e:
+                    text_range = selection.getByIndex(0)
+                    text_range.setString(text_range.getString() + ": " + str(e))
+            
+            elif args == "SimplifySelection":
+                # Reformulate the selected text in clearer language
+                try:
+                    # Save the original text
+                    original_text = text_range.getString()
+                    
+                    if len(original_text.strip()) == 0:
+                        return
+                    
+                    # Prepare the prompt for simplification
+                    prompt = """TEXT TO REFORMULATE:
+""" + original_text + """
+
+IMPORTANT: Rewrite this text in the SAME LANGUAGE as the original text.
+Rewrite in clear, simple language that everyone can understand.
+Use:
+- Short sentences
+- Common words (avoid jargon and technical terms)
+- Active voice
+- Concrete examples when possible
+
+CRITICAL: 
+- Keep the SAME LANGUAGE as the original text
+- Do NOT translate to another language
+- Do NOT ask questions
+- Do NOT add explanations
+- Output ONLY the reformulated text
+
+REFORMULATED VERSION:
+"""
+                    
+                    system_prompt = "You are a plain language expert. Rewrite complex text in clear, simple language accessible to all readers. ALWAYS use the same language as the input text. Use short sentences and common words."
+                    max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 100)
+                    
+                    api_type = str(self.get_config("api_type", "completions")).lower()
+                    request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
+                    
+                    # Create cursor at the end of selection
+                    cursor = text.createTextCursorByRange(text_range)
+                    cursor.collapseToEnd()
+                    
+                    # Insert the opening marker with proper formatting
+                    text.insertString(cursor, "\n\n---reformulation-du-texte---\n", False)
+                    
+                    # Track accumulated simplified text
+                    simplified_text = ""
+                    
+                    # Stop phrases
+                    stop_phrases = [
+                        "end of document",
+                        "end of the document",
+                        "[END]",
+                        "---END---"
+                    ]
+                    
+                    # Question patterns
+                    question_patterns = [
+                        "would you like", "do you want", "should i", "can i help",
+                        "voulez-vous", "souhaitez-vous", "dois-je", "puis-je",
+                        "here is", "here's", "voici", "voilà"
+                    ]
+
+                    def append_simplified(chunk_text):
+                        nonlocal simplified_text
+                        simplified_text += chunk_text
+                        
+                        # Check for questions
+                        lower_text = simplified_text.lower()
+                        for pattern in question_patterns:
+                            if pattern in lower_text:
+                                cursor.gotoStart(False)
+                                cursor.gotoEnd(True)
+                                text.insertString(cursor, "[Le modèle a posé une question. Veuillez réessayer.]", False)
+                                simplified_text = ""
+                                return
+                        
+                        # Check for stop phrases
+                        for stop_phrase in stop_phrases:
+                            if stop_phrase.lower() in simplified_text.lower():
+                                pos = simplified_text.lower().find(stop_phrase.lower())
+                                simplified_text = simplified_text[:pos].rstrip()
+                                return
+                        
+                        # Insert simplified text (preserves formatting)
+                        text.insertString(cursor, chunk_text, False)
+
+                    self.stream_request(request, api_type, append_simplified)
+                    
+                    # Add closing marker
+                    text.insertString(cursor, "\n---fin-de-reformulation---\n", False)
+
+                except Exception as e:
+                    text_range = selection.getByIndex(0)
+                    text_range.setString(text_range.getString() + ": " + str(e))
+            
+            elif args == "OpenMiraiWebsite":
+                # Open MirAI website in default browser
+                try:
+                    import webbrowser
+                    webbrowser.open("https://mirai.interieur.gouv.fr")
+                except Exception as e:
+                    log_to_file(f"Error opening website: {str(e)}")
             
             elif args == "settings":
                 try:
