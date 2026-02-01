@@ -8,7 +8,7 @@ import urllib.error
 import ssl
 from com.sun.star.task import XJobExecutor
 from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
-from com.sun.star.awt import XActionListener, XItemListener, XMouseListener
+from com.sun.star.awt import XActionListener, XItemListener, XMouseListener, XWindowListener, XTopWindowListener
 import uno
 import os 
 import logging
@@ -242,6 +242,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._models_cache_ttl = 60
         self._auth_prompt_in_progress = False
         self._auth_prompted_at = 0
+        self._edit_dialog = None
         # handling different situations (inside LibreOffice or other process)
         try:
             self.sm = ctx.getServiceManager()
@@ -1719,7 +1720,7 @@ class MainJob(unohelper.Base, XJobExecutor):
     #License: Creative Commons Attribution-ShareAlike 3.0 Unported License,
     #License: The Document Foundation  https://creativecommons.org/licenses/by-sa/3.0/
     #begin sharealike section 
-    def input_box(self,message, title="", default="", x=None, y=None):
+    def input_box(self,message, title="", default="", x=None, y=None, ok_label="OK", cancel_label="Annuler", always_on_top=False):
         """ Shows dialog with input box.
             @param message message to show on the dialog
             @param title window title
@@ -1728,14 +1729,14 @@ class MainJob(unohelper.Base, XJobExecutor):
             @param y optional dialog position in twips
             @return string if OK button pushed, otherwise zero length string
         """
-        WIDTH = 600
+        WIDTH = 720
         HORI_MARGIN = VERT_MARGIN = 8
         BUTTON_WIDTH = 100
         BUTTON_HEIGHT = 26
         HORI_SEP = VERT_SEP = 8
         LABEL_HEIGHT = BUTTON_HEIGHT * 2 + 5
-        EDIT_HEIGHT = 24
-        HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT
+        EDIT_HEIGHT = 80
+        HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT + VERT_SEP + BUTTON_HEIGHT
         import uno
         from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
         from com.sun.star.awt.PushButtonType import OK, CANCEL
@@ -1750,9 +1751,22 @@ class MainJob(unohelper.Base, XJobExecutor):
             dialog_model.BackgroundColor = 0xFFFFFF
         except Exception:
             pass
+        if always_on_top:
+            try:
+                dialog_model.AlwaysOnTop = True
+            except Exception:
+                pass
+            try:
+                dialog_model.Closeable = True
+            except Exception:
+                pass
         dialog.setVisible(False)
         dialog.setTitle(title)
         dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+        try:
+            dialog.getModel().Sizeable = True
+        except Exception:
+            pass
         def add(name, type, x_, y_, width_, height_, props):
             try:
                 model = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type + "Model")
@@ -1779,9 +1793,11 @@ class MainJob(unohelper.Base, XJobExecutor):
         add("label", "FixedText", HORI_MARGIN, VERT_MARGIN, label_width, LABEL_HEIGHT, 
             {"Label": str(message), "NoLabel": True})
         add("btn_ok", "Button", HORI_MARGIN + label_width + HORI_SEP, VERT_MARGIN, 
-                BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": OK, "DefaultButton": True})
+                BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": OK, "DefaultButton": True, "Label": ok_label})
         add("edit", "Edit", HORI_MARGIN, LABEL_HEIGHT + VERT_MARGIN + VERT_SEP, 
-                WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": str(default)})
+                WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": str(default), "MultiLine": True})
+        add("btn_cancel", "Button", HORI_MARGIN + label_width + HORI_SEP, VERT_MARGIN + BUTTON_HEIGHT + VERT_SEP, 
+                BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": CANCEL, "Label": cancel_label})
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
         dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
@@ -1799,6 +1815,330 @@ class MainJob(unohelper.Base, XJobExecutor):
         ret = edit.getModel().Text if dialog.execute() else ""
         dialog.dispose()
         return ret
+
+    def _run_edit_selection(self, text, text_range, user_input):
+        original_text = text_range.getString()
+        if len(original_text.strip()) == 0:
+            return
+
+        try:
+            path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
+            user_config_path = getattr(path_settings, "UserConfig")
+            if user_config_path.startswith('file://'):
+                user_config_path = str(uno.fileUrlToSystemPath(user_config_path))
+            prompt_log_path = os.path.join(user_config_path, "prompt.txt")
+            with open(prompt_log_path, "a", encoding="utf-8") as f:
+                f.write(user_input.strip() + "\n")
+                f.write("-" * 40 + "\n")
+        except Exception:
+            pass
+
+        prompt = """ORIGINAL VERSION:
+""" + original_text + """
+
+INSTRUCTIONS: """ + user_input + """
+
+IMPORTANT RULES:
+- Do NOT ask any questions
+- Do NOT add explanations or comments
+- Do NOT include phrases like "Here is..." or "I've made..."
+- Output ONLY the edited text directly
+- Start immediately with the edited content
+
+EDITED VERSION:
+"""
+
+        system_prompt = self.get_config(
+            "edit_selection_system_prompt",
+            "You are a text editor. You follow instructions precisely and output only the edited text without any questions, explanations, or meta-commentary."
+        )
+        max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 15000)
+
+        api_type = str(self.get_config("api_type", "completions")).lower()
+        request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
+
+        cursor = text.createTextCursorByRange(text_range)
+        cursor.collapseToEnd()
+        text.insertString(cursor, "\n\n---modification-de-la-sélection---\n", False)
+
+        accumulated_text = ""
+        stop_phrases = [
+            "end of document",
+            "end of the document",
+            "[END]",
+            "---END---"
+        ]
+        question_patterns = [
+            "would you like",
+            "do you want",
+            "should i",
+            "can i help",
+            "what would you prefer",
+            "could you clarify",
+            "please specify",
+            "here is",
+            "here's",
+            "i've made",
+            "i have made",
+            "voulez-vous",
+            "souhaitez-vous",
+            "aimeriez-vous",
+            "préférez-vous",
+            "dois-je",
+            "devrais-je",
+            "puis-je",
+            "est-ce que vous",
+            "pouvez-vous préciser",
+            "pourriez-vous clarifier",
+            "veuillez préciser",
+            "voici",
+            "voilà",
+            "j'ai modifié",
+            "j'ai changé",
+            "j'ai fait",
+            "que souhaitez",
+            "quelle version",
+            "quel style"
+        ]
+
+        def append_text(chunk_text):
+            nonlocal accumulated_text
+            accumulated_text += chunk_text
+            lower_text = accumulated_text.lower()
+            for pattern in question_patterns:
+                if pattern in lower_text:
+                    text.insertString(cursor, "[Le modèle a tenté de poser une question au lieu d'éditer. Veuillez reformuler votre demande de manière plus directive.]", False)
+                    accumulated_text = ""
+                    return
+            for stop_phrase in stop_phrases:
+                if stop_phrase.lower() in accumulated_text.lower():
+                    pos = accumulated_text.lower().find(stop_phrase.lower())
+                    accumulated_text = accumulated_text[:pos].rstrip()
+                    return
+            text.insertString(cursor, chunk_text, False)
+
+        self.stream_request(request, api_type, append_text)
+        text.insertString(cursor, "\n---fin-de-modification---\n", False)
+
+    def _show_edit_selection_dialog(self, text, text_range):
+        if self._edit_dialog:
+            try:
+                self._edit_dialog.setVisible(True)
+            except Exception:
+                pass
+            return
+
+        WIDTH = 720
+        HORI_MARGIN = VERT_MARGIN = 8
+        BUTTON_WIDTH = 110
+        BUTTON_HEIGHT = 26
+        HORI_SEP = VERT_SEP = 8
+        LABEL_HEIGHT = 22
+        EDIT_HEIGHT = 120
+        HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT + VERT_SEP + BUTTON_HEIGHT
+
+        from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+        ctx = uno.getComponentContext()
+        def create(name):
+            return ctx.getServiceManager().createInstanceWithContext(name, ctx)
+
+        dialog = create("com.sun.star.awt.UnoControlDialog")
+        dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
+        dialog.setModel(dialog_model)
+        dialog.setVisible(False)
+        dialog.setTitle("Modifier la sélection")
+        dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+        try:
+            dialog_model.BackgroundColor = 0xFFFFFF
+        except Exception:
+            pass
+        try:
+            dialog_model.AlwaysOnTop = True
+        except Exception:
+            pass
+        try:
+            dialog_model.Sizeable = True
+        except Exception:
+            pass
+        try:
+            dialog_model.Closeable = True
+        except Exception:
+            pass
+
+        def add(name, type, x_, y_, width_, height_, props):
+            try:
+                model = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type + "Model")
+            except Exception as e:
+                log_to_file(f"Dialog control type unsupported: name={name} type={type} error={str(e)}")
+                return None
+            try:
+                dialog_model.insertByName(name, model)
+            except Exception as e:
+                log_to_file(f"Dialog insert failed: name={name} type={type} error={str(e)}")
+                return None
+            control = dialog.getControl(name)
+            try:
+                control.setPosSize(x_, y_, width_, height_, POSSIZE)
+            except Exception as e:
+                log_to_file(f"Dialog size failed: name={name} type={type} error={str(e)}")
+            for key, value in props.items():
+                try:
+                    setattr(model, key, value)
+                except Exception as e:
+                    log_to_file(f"Dialog prop unsupported: control={name} type={type} prop={key} error={str(e)}")
+            return control
+
+        add("label_edit", "FixedText", HORI_MARGIN, VERT_MARGIN, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+            {"Label": "Saisissez votre prompt d'édition :", "NoLabel": True})
+        edit_control = add("edit_prompt", "Edit", HORI_MARGIN, VERT_MARGIN + LABEL_HEIGHT + VERT_SEP,
+            WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": "", "MultiLine": True})
+        if edit_control:
+            try:
+                edit_control.getModel().BackgroundColor = 0xF2F2F2
+            except Exception:
+                pass
+
+        link_control = add(
+            "link_prompt_file",
+            "Button",
+            HORI_MARGIN,
+            HEIGHT - VERT_MARGIN - LABEL_HEIGHT,
+            160,
+            LABEL_HEIGHT,
+            {"Label": "Ouvrir prompt.txt"}
+        )
+
+        btn_send = add("btn_send", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH, HEIGHT - VERT_MARGIN - BUTTON_HEIGHT,
+            BUTTON_WIDTH, BUTTON_HEIGHT, {"Label": "Envoyer 🤖✨"})
+
+        frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
+        window = frame.getContainerWindow() if frame else None
+        dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
+        if window:
+            ps = window.getPosSize()
+            _x = ps.Width / 2 - WIDTH / 2
+            _y = ps.Height / 2 - HEIGHT / 2
+            dialog.setPosSize(_x, _y, 0, 0, POS)
+
+        class EditDialogListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, event):
+                source = getattr(event, "Source", None)
+                if source == btn_send:
+                    try:
+                        user_input = edit_control.getModel().Text.strip()
+                    except Exception:
+                        user_input = ""
+                    if not user_input:
+                        return
+                    try:
+                        self.outer._run_edit_selection(text, text_range, user_input)
+                    except Exception as e:
+                        log_to_file(f"EditSelection dialog failed: {str(e)}")
+
+            def __init__(self, outer):
+                self.outer = outer
+
+            def disposing(self, event):
+                return
+
+        listener = EditDialogListener(self)
+        if btn_send:
+            try:
+                btn_send.addActionListener(listener)
+            except Exception:
+                pass
+
+        class EditDialogWindowListener(unohelper.Base, XWindowListener):
+            def __init__(self, outer):
+                self.outer = outer
+            def windowClosing(self, event):
+                try:
+                    dialog.setVisible(False)
+                    dialog.dispose()
+                except Exception:
+                    pass
+                self.outer._edit_dialog = None
+            def windowOpened(self, event):
+                return
+            def windowClosed(self, event):
+                return
+            def windowMinimized(self, event):
+                return
+            def windowNormalized(self, event):
+                return
+            def windowActivated(self, event):
+                return
+            def windowDeactivated(self, event):
+                return
+            def disposing(self, event):
+                return
+
+        class EditDialogTopWindowListener(unohelper.Base, XTopWindowListener):
+            def __init__(self, outer):
+                self.outer = outer
+            def windowClosing(self, event):
+                try:
+                    dialog.setVisible(False)
+                    dialog.dispose()
+                except Exception:
+                    pass
+                self.outer._edit_dialog = None
+            def windowOpened(self, event):
+                return
+            def windowClosed(self, event):
+                return
+            def windowMinimized(self, event):
+                return
+            def windowNormalized(self, event):
+                return
+            def windowActivated(self, event):
+                return
+            def windowDeactivated(self, event):
+                return
+            def disposing(self, event):
+                return
+
+        try:
+            dialog.addWindowListener(EditDialogWindowListener(self))
+        except Exception:
+            pass
+        try:
+            peer = dialog.getPeer()
+            if peer:
+                peer.addTopWindowListener(EditDialogTopWindowListener(self))
+        except Exception:
+            pass
+
+        class PromptLinkActionListener(unohelper.Base, XActionListener):
+            def __init__(self, outer):
+                self.outer = outer
+            def actionPerformed(self, event):
+                try:
+                    path_settings = self.outer.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.outer.ctx)
+                    user_config_path = getattr(path_settings, "UserConfig")
+                    if user_config_path.startswith('file://'):
+                        user_config_path = str(uno.fileUrlToSystemPath(user_config_path))
+                    prompt_log_path = os.path.join(user_config_path, "prompt.txt")
+                    if not os.path.exists(prompt_log_path):
+                        with open(prompt_log_path, "a", encoding="utf-8") as f:
+                            f.write("")
+                    shell = self.outer.ctx.getServiceManager().createInstanceWithContext(
+                        "com.sun.star.system.SystemShellExecute", self.outer.ctx
+                    )
+                    shell.execute(uno.systemPathToFileUrl(prompt_log_path), "", 0)
+                except Exception as e:
+                    log_to_file(f"Failed to open prompt.txt: {str(e)}")
+            def disposing(self, event):
+                return
+
+        if link_control:
+            try:
+                link_control.addActionListener(PromptLinkActionListener(self))
+            except Exception:
+                pass
+
+        dialog.setVisible(True)
+        self._edit_dialog = dialog
 
     def credentials_box(self, title="Device Management", login_label="Login", password_label="Mot de passe"):
         """Dialog with login + password and a show/hide toggle."""
@@ -2662,7 +3002,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                 
                 # Access the current selection
                 try:
-                    user_input = self.input_box("Saisissez votre prompt d'édition !", "Input", "")
+                    self._show_edit_selection_dialog(text, text_range)
+                    return
                     
                     # Save the original text range properties for style preservation
                     original_text = text_range.getString()
@@ -3013,7 +3354,7 @@ REFORMULATED VERSION:
 
                 user_input = ""
                 if args == "EditSelection":
-                    user_input = self.input_box("Please enter edit instructions!", "Input", "")
+                    user_input = self.input_box("Saisissez vos instructions d'édition !", "Modifier la sélection", "", ok_label="Envoyer", cancel_label="Fermer", always_on_top=True)
 
                 area = selection.getRangeAddress()
                 start_row = area.StartRow
