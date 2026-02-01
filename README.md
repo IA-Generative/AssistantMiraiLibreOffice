@@ -1,4 +1,4 @@
-# Mirai: A LibreOffice Writer extension for generative AI
+# mirai: A LibreOffice Writer extension for generative AI
 
 ## About
 
@@ -6,14 +6,14 @@ This is a LibreOffice Writer extension that enables inline generative editing wi
 
 **Origin and Attribution:**
 
-This application is an Béta version developed as part of the French Ministry of Interior's MirAI program. It is based on the work of **John Balis**, author of the **LocalWriter extension**, which served as the technical foundation for this adaptation.
+This application is an Béta version developed as part of the French Ministry of Interior's mirai program. It is based on the work of **John Balis**, author of the **mirai extension**, which served as the technical foundation for this adaptation.
 
 For complete information about sources and attributions, please refer to `registration/license.txt`.
 
 Key repositories:
-- Original LocalWriter project by John Balis: [https://github.com/balisujohn/localwriter](https://github.com/balisujohn/localwriter)
+- Original mirai project by John Balis: [https://github.com/balisujohn/mirai](https://github.com/balisujohn/mirai)
 - LibreOffice code portions (MPL 2.0): [https://gerrit.libreoffice.org/c/core/+/159938](https://gerrit.libreoffice.org/c/core/+/159938)
-- MirAI experimental version source code: [https://github.com/IA-Generative/AssistantMiraiLibreOffice](https://github.com/IA-Generative/AssistantMiraiLibreOffice)
+- mirai experimental version source code: [https://github.com/IA-Generative/AssistantmiraiLibreOffice](https://github.com/IA-Generative/AssistantmiraiLibreOffice)
 
 ## Table of Contents
 
@@ -138,9 +138,9 @@ Cette fonctionnalité reformule le texte sélectionné dans un langage plus clai
 
 ---
 
-### 🌐 Accéder au site MirAI
+### 🌐 Accéder au site mirai
 
-Accédez directement au site web officiel de MirAI (https://mirai.interieur.gouv.fr) depuis le menu de l'extension pour obtenir plus d'informations sur le programme et les outils disponibles.
+Accédez directement au site web officiel de mirai (https://mirai.interieur.gouv.fr) depuis le menu de l'extension pour obtenir plus d'informations sur le programme et les outils disponibles.
 
 ---
 
@@ -245,7 +245,7 @@ Au premier lancement, l'extension génère automatiquement un UUID unique qui es
 - `EditSelection` : Utilisation de la modification de texte
 - `SummarizeSelection` : Utilisation du résumé
 - `SimplifySelection` : Utilisation de la reformulation
-- `OpenMiraiWebsite` : Accès au site web
+- `OpenmiraiWebsite` : Accès au site web
 - `OpenSettings` : Ouverture des paramètres
 
 **Données collectées :**
@@ -291,7 +291,7 @@ Pour désactiver complètement la télémétrie, ajoutez dans votre configuratio
 ## Feuille de route
 
 - ✅ **Implémenté** : Intégration d'OpenTelemetry pour le monitoring
-- ⏳ **À venir** : Automatisation de l'intégration avec Mirai Chat
+- ⏳ **À venir** : Automatisation de l'intégration avec mirai Chat
 - ⏳ **À venir** : Lecture de la configuration depuis un serveur réseau (gestion de versions via GitLab/GitHub)
 
 ---
@@ -339,7 +339,7 @@ Selon le modèle de langage utilisé (OpenAI, Mistral, Ollama, OpenWebUI, etc.),
 Certains modèles peuvent modifier légèrement les sauts de lignes, la ponctuation, ou la structure des paragraphes.  
 Cela ne relève pas d’un dysfonctionnement de l’extension, mais du comportement propre au modèle choisi.
 Les évolutions du plug-in à venir tâcheront de corriger ce défaut.
-todo : automatiser l'enrollement du plug-in dans Mirai Chat.
+todo : automatiser l'enrollement du plug-in dans mirai Chat.
 todo : lecture de la configuration sur un serveur de configuration réseau (géré en version via gitlab/hub)
 todo : ajouter opentelemetry
 
@@ -349,7 +349,7 @@ todo : ajouter opentelemetry
 
 ### LibreOffice Extension Installation
 
-1. Download the latest version of Mirai via the (https://github.com/IA-Generative/AssistantMiraiLibreOffice/dist).
+1. Download the latest version of mirai via the (https://github.com/IA-Generative/AssistantmiraiLibreOffice/dist).
 2.  Open LibreOffice.
 3.  Navigate to `Tools > Extensions`.
 4.  Click `Add` and select the downloaded `.oxt` file.
@@ -357,7 +357,7 @@ todo : ajouter opentelemetry
 
 ### Backend Setup
 
-To use Mirai, you need a backend model runner.  Options include `text-generation-webui` and `Ollama`. Choose the backend that best suits your needs. Ollama is generally easier to set up. In either of these options, you will have to download and set a model. 
+To use mirai, you need a backend model runner.  Options include `text-generation-webui` and `Ollama`. Choose the backend that best suits your needs. Ollama is generally easier to set up. In either of these options, you will have to download and set a model. 
 
 #### text-generation-webui
 
@@ -368,15 +368,15 @@ After installation and model setup:
 
 1.  Enable the local OpenAI API (this ensures the API responds in a format similar to OpenAI).
 2.  Verify that the intended model is working (e.g., openchat3.5, suitable for 8GB VRAM setups).
-3.  Set the endpoint in Mirai to `localhost:5000` (or the configured port).
+3.  Set the endpoint in mirai to `localhost:5000` (or the configured port).
 
 #### Ollama
 
 *   Installation instructions are available [here](https://ollama.com/).
 *   Download and use a model (gemma3 isn't bad)
 *   Ensure the API is enabled.
-*   Set the endpoint in Mirai to `localhost:11434` (or the configured port).
-*   Manually set the model name. ([This is required for Ollama to work](https://ask.libreoffice.org/t/localwriter-0-0-5-installation-and-usage/122241/5?u=jbalis))
+*   Set the endpoint in mirai to `localhost:11434` (or the configured port).
+*   Manually set the model name. ([This is required for Ollama to work](https://ask.libreoffice.org/t/mirai-0-0-5-installation-and-usage/122241/5?u=jbalis))
 
 #### OpenWebUI
 
@@ -388,9 +388,9 @@ After installation and model setup:
 *   OpenWebUI typically runs on `http://localhost:3000` by default.
 *   You can connect OpenWebUI to various backends (Ollama, OpenAI API, etc.).
 
-**Configuring Mirai for OpenWebUI:**
+**Configuring mirai for OpenWebUI:**
 
-1.  **Enable the OpenWebUI checkbox**: In Mirai settings, check **"Is OpenWebUI endpoint?"**
+1.  **Enable the OpenWebUI checkbox**: In mirai settings, check **"Is OpenWebUI endpoint?"**
 2.  **Set the endpoint**: Use `http://localhost:3000` (or your custom port)
 3.  **API Type**: Select `chat` (OpenWebUI uses the chat format)
 4.  **Model Name**: Enter the exact model name as it appears in OpenWebUI (e.g., `llama2`, `mistral:latest`)
@@ -398,10 +398,10 @@ After installation and model setup:
 
 **OpenWebUI Specifics:**
 
-*   **API Path Difference**: OpenWebUI uses `/api/` instead of the standard OpenAI `/v1/` path. Mirai automatically handles this when the OpenWebUI checkbox is enabled.
+*   **API Path Difference**: OpenWebUI uses `/api/` instead of the standard OpenAI `/v1/` path. mirai automatically handles this when the OpenWebUI checkbox is enabled.
 *   **Model Selection**: Unlike OpenAI, the model name must match exactly what's available in your OpenWebUI instance. You can find available models in the OpenWebUI interface under Models.
 *   **Authentication**: OpenWebUI can be configured with or without authentication. For local use, authentication is often disabled. For remote access, you should enable it and use the generated API key.
-*   **Backend Flexibility**: Since OpenWebUI can connect to multiple backends, you can easily switch between different LLM providers without changing Mirai settings—just change the model name.
+*   **Backend Flexibility**: Since OpenWebUI can connect to multiple backends, you can easily switch between different LLM providers without changing mirai settings—just change the model name.
 
 **Example Configuration:**
 ```json
@@ -419,7 +419,7 @@ After installation and model setup:
 
 ### Configuration Priority
 
-Mirai loads configuration in the following order (highest priority first):
+mirai loads configuration in the following order (highest priority first):
 
 1. **Environment Variables** (prefixed with `MIRAI_`) - useful for keeping secrets out of files
 2. **Configuration File** (`mirai.json`)
@@ -492,17 +492,17 @@ Uses a simple text prompt:
 
 ## Contributing
 
-Help with development is always welcome. Mirai has a number of outstanding feature requests by users. Feel free to work on any of them, and you can help improve freedom-respecting local AI.
+Help with development is always welcome. mirai has a number of outstanding feature requests by users. Feel free to work on any of them, and you can help improve freedom-respecting local AI.
 
 ### Local Development Setup
 
-For developers who want to modify or contribute to Mirai, you can run and test the extension directly from your source code without packaging it into an `.oxt` file. This allows for quick iteration and seeing changes reflected in the LibreOffice UI.
+For developers who want to modify or contribute to mirai, you can run and test the extension directly from your source code without packaging it into an `.oxt` file. This allows for quick iteration and seeing changes reflected in the LibreOffice UI.
 
 1. **Clone the Repository (if not already done):**
-   - Clone the Mirai repository to your local machine if you haven't already:
+   - Clone the mirai repository to your local machine if you haven't already:
      ```
-     git clone https://github.com/IA-Generative/localwriter.git
-     cd localwriter
+     git clone https://github.com/IA-Generative/mirai.git
+     cd mirai
      ```
 
 2. **Register the Extension Temporarily:**
@@ -517,7 +517,7 @@ For developers who want to modify or contribute to Mirai, you can run and test t
      ```
 
 3. **Restart LibreOffice:**
-   - Close and reopen LibreOffice Writer or Calc. You should see the "Mirai" menu with options like "Extend Selection", "Edit Selection", and "Settings" in the menu bar.
+   - Close and reopen LibreOffice Writer or Calc. You should see the "mirai" menu with options like "Extend Selection", "Edit Selection", and "Settings" in the menu bar.
 
 4. **Make and Test Changes:**
    - Edit the source files (e.g., `main.py`) directly in your repository folder using your preferred editor.
@@ -542,7 +542,7 @@ For developers who want to modify or contribute to Mirai, you can run and test t
 
 To create a distributable `.oxt` package:
 
-In a terminal, change directory into the Mirai repository top-level directory, then run the following command:
+In a terminal, change directory into the mirai repository top-level directory, then run the following command:
 
 ````
 zip -r mirai.oxt \
@@ -556,7 +556,7 @@ zip -r mirai.oxt \
   README.md
 ````
 
-This will create the file `mirai.oxt` which you can open with libreoffice to install the Mirai extension. You can also change the file extension to .zip and manually unzip the extension file, if you want to inspect a Mirai `.oxt` file yourself. It is all human-readable, since python is an interpreted language.
+This will create the file `mirai.oxt` which you can open with libreoffice to install the mirai extension. You can also change the file extension to .zip and manually unzip the extension file, if you want to inspect a mirai `.oxt` file yourself. It is all human-readable, since python is an interpreted language.
 
 
 

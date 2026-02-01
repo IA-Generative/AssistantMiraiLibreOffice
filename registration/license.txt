@@ -1,10 +1,10 @@
-Ce logiciel constitue une version expérimentale développée dans le cadre du programme MirAI du Ministère de l’Intérieur. Il s’appuie en partie sur le travail réalisé par John Balis, auteur de l’extension LocalWriter, qui a servi de base technique pour cette adaptation.
+Ce logiciel constitue une version expérimentale développée dans le cadre du programme mirai du Ministère de l’Intérieur. Il s’appuie en partie sur le travail réalisé par John Balis, auteur de l’extension mirai, qui a servi de base technique pour cette adaptation.
 
 Sources et inspirations :
-- Projet original LocalWriter de John Balis : https://github.com/balisujohn/localwriter
+- Projet original mirai de John Balis : https://github.com/balisujohn/mirai
 - Portions de code issues du projet LibreOffice (MPL 2.0) : https://gerrit.libreoffice.org/c/core/+/159938
-- Code source de la version expérimentale dédiée à MirAI : https://github.com/IA-Generative/AssistantMiraiLibreOffice
+- Code source de la version expérimentale dédiée à mirai : https://github.com/IA-Generative/AssistantmiraiLibreOffice
 
-Conformément à la licence MPL 2.0, l’ensemble des modifications réalisées dans cette version MirAI est distribué sous la même licence, et les portions dérivées conservent leurs mentions d’origine.
+Conformément à la licence MPL 2.0, l’ensemble des modifications réalisées dans cette version mirai est distribué sous la même licence, et les portions dérivées conservent leurs mentions d’origine.
 
 ----

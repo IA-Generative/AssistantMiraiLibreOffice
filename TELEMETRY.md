@@ -2,7 +2,7 @@
 
 ## Vue d'ensemble
 
-L'extension Mirai intègre OpenTelemetry (Tempo) pour collecter des traces anonymisées sur l'utilisation des fonctionnalités. Cette documentation décrit l'implémentation technique et la configuration.
+L'extension mirai intègre OpenTelemetry (Tempo) pour collecter des traces anonymisées sur l'utilisation des fonctionnalités. Cette documentation décrit l'implémentation technique et la configuration.
 
 ## Architecture
 
@@ -74,8 +74,8 @@ Envoyé lors de l'utilisation de la reformulation (CTRL+L).
 - `action`: "simplify_selection"
 - `text_length`: Longueur du texte sélectionné
 
-### OpenMiraiWebsite
-Envoyé lors de l'accès au site web MirAI.
+### OpenmiraiWebsite
+Envoyé lors de l'accès au site web mirai.
 
 **Attributs :**
 - `action`: "open_website"
