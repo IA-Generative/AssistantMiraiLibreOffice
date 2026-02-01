@@ -2262,7 +2262,7 @@ EDITED VERSION:
         VERT_SEP = 6
         LABEL_HEIGHT = 18
         EDIT_HEIGHT = 24
-        IMAGE_HEIGHT = 90
+        IMAGE_HEIGHT = 126
         EXTRA_BOTTOM = 30
         DESC_HEIGHT = EDIT_HEIGHT * 2
         import uno
@@ -2439,7 +2439,7 @@ EDITED VERSION:
                 image_url = uno.systemPathToFileUrl(image_path)
                 available_width = WIDTH - HORI_MARGIN * 2
                 image_width = int(min(available_width, IMAGE_HEIGHT * (1505.0 / 400.0)))
-                image_x = HORI_MARGIN + int((available_width - image_width) / 2)
+                image_x = HORI_MARGIN + int((available_width - image_width) / 2) - int(available_width * 0.10)
                 add("img_splash", "ImageControl", image_x, current_y,
                     image_width, IMAGE_HEIGHT, {
                         "ImageURL": image_url,
@@ -2678,10 +2678,14 @@ EDITED VERSION:
                     dialog.setVisible(False)
                     dialog.setTitle("")
                     dialog.setPosSize(0, 0, 320, 110, SIZE)
+                    try:
+                        dialog_model.AlwaysOnTop = True
+                    except Exception:
+                        pass
 
                     label_model = dialog_model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
                     dialog_model.insertByName("reload_label", label_model)
-                    label_model.Label = "Récupération de la configuration..."
+                    label_model.Label = "Connexion à Mirai..."
                     label_model.NoLabel = True
                     label = dialog.getControl("reload_label")
                     label.setPosSize(10, 20, 300, 20, POSSIZE)
@@ -2702,8 +2706,14 @@ EDITED VERSION:
                         _y = ps.Height / 2 - 55
                         dialog.setPosSize(_x, _y, 0, 0, POS)
                     dialog.setVisible(True)
+                    try:
+                        toolkit.processEventsToIdle()
+                    except Exception:
+                        pass
+                    log_to_file("Reload config dialog shown")
                     return dialog, label, btn, toolkit
-                except Exception:
+                except Exception as e:
+                    log_to_file(f"Reload config dialog failed: {str(e)}")
                     return None, None, None, None
 
             class CancelListener(unohelper.Base, XActionListener):
@@ -2735,7 +2745,7 @@ EDITED VERSION:
                     dots_i += 1
                     dots = "." * ((dots_i % 3) + 1)
                     if label:
-                        label.getModel().Label = f"Récupération de la configuration{dots}"
+                        label.getModel().Label = f"Connexion à Mirai{dots}"
                     if toolkit:
                         toolkit.processEventsToIdle()
                 except Exception:
