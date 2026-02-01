@@ -1,4 +1,4 @@
-# Guide de débogage pour LocalWriter
+# Guide de débogage pour mirai
 
 ## 1. Fichier de log automatique
 
@@ -75,13 +75,13 @@ curl -X POST https://api.openai.com/v1/chat/completions \
 
 Les paramètres sont stockés dans :
 ```
-~/Library/Application Support/LibreOffice/4/user/localwriter.json
+~/Library/Application Support/LibreOffice/4/user/mirai.json
 ```
 
 ### Voir la configuration actuelle :
 
 ```bash
-cat ~/Library/Application\ Support/LibreOffice/4/user/localwriter.json
+cat ~/Library/Application\ Support/LibreOffice/4/user/mirai.json
 ```
 
 ### Exemple de configuration pour OpenWebUI :
@@ -136,9 +136,9 @@ cat ~/Library/Application\ Support/LibreOffice/4/user/localwriter.json
 ## 7. Réinstaller l'extension
 
 ```bash
-cd /Users/etiquet/Documents/GitHub/localwriter
+cd /Users/etiquet/Documents/GitHub/mirai
 unopkg remove org.extension.sample
-unopkg add localwriter.oxt
+unopkg add mirai.oxt
 ```
 
 Puis redémarrez LibreOffice.
@@ -148,18 +148,18 @@ Puis redémarrez LibreOffice.
 Pour modifier et tester rapidement :
 
 ```bash
-cd /Users/etiquet/Documents/GitHub/localwriter
+cd /Users/etiquet/Documents/GitHub/mirai
 
 # Modifier le code
 nano main.py
 
 # Recréer le package
-rm -f localwriter.oxt && \
-zip -r localwriter.oxt Accelerators.xcu Addons.xcu description.xml main.py META-INF/ registration/ assets/
+rm -f mirai.oxt && \
+zip -r mirai.oxt Accelerators.xcu Addons.xcu description.xml main.py META-INF/ registration/ assets/
 
 # Réinstaller
 unopkg remove org.extension.sample
-unopkg add localwriter.oxt
+unopkg add mirai.oxt
 
 # Relancer LibreOffice
 ```

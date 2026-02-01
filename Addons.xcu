@@ -3,7 +3,7 @@
     <node oor:name="OfficeMenuBar">
       <node oor:name="fr.gouv.interieur.mirai.menubar" oor:op="replace">
         <prop oor:name="Title" oor:type="xs:string">
-          <value xml:lang="en-US">🤖 Mirai</value>
+          <value xml:lang="en-US">🤖 mirai</value>
         </prop>
         <prop oor:name="Context" oor:type="xs:string">
           <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument</value>
@@ -66,10 +66,10 @@
           </node>
           <node oor:name="M5" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">🌐 Accéder au site MirAI</value>
+              <value xml:lang="en-US">🌐 Accéder au site mirai</value>
             </prop>
             <prop oor:name="URL">
-              <value>service:fr.gouv.interieur.mirai.do?OpenMiraiWebsite</value>
+              <value>service:fr.gouv.interieur.mirai.do?OpenmiraiWebsite</value>
             </prop>
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>

@@ -18,7 +18,7 @@
 - ✅ `EditSelection` - Modification de texte (CTRL+E)
 - ✅ `SummarizeSelection` - Résumé (CTRL+R)
 - ✅ `SimplifySelection` - Reformulation (CTRL+L)
-- ✅ `OpenMiraiWebsite` - Accès au site web
+- ✅ `OpenmiraiWebsite` - Accès au site web
 - ✅ `OpenSettings` - Ouverture des paramètres
 
 ### 4. Configuration complète
@@ -136,7 +136,7 @@
 Pour créer le package avec les nouvelles fonctionnalités :
 
 ```bash
-cd /Users/etiquet/Documents/GitHub/AssistantMiraiLibreOffice
+cd /Users/etiquet/Documents/GitHub/AssistantmiraiLibreOffice
 rm -f mirai.oxt
 zip -r mirai.oxt Accelerators.xcu Addons.xcu description.xml main.py META-INF/ registration/ assets/ icons/ -x "*.git*" -x "*.DS_Store"
 ```
