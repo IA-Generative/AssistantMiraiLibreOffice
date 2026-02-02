@@ -233,9 +233,9 @@ class MainJob(unohelper.Base, XJobExecutor):
     def __init__(self, ctx):
         log_to_file("=== MainJob.__init__ called ===")
         self.ctx = ctx
-        self._dm_config_cache = None
-        self._dm_config_loaded_at = 0
-        self._dm_config_ttl = 300
+        self.config_cache = None
+        self.config_loaded_at = 0
+        self.config_ttl = 300
         self._models_cache = None
         self._models_cache_key = None
         self._models_cache_loaded_at = 0
@@ -274,8 +274,8 @@ class MainJob(unohelper.Base, XJobExecutor):
             })
         except Exception as e:
             log_to_file(f"Failed to send extension load telemetry: {str(e)}")
+
         try:
-            self._log_keycloak_redirect_coherence()
             self._ensure_device_management_state()
         except Exception as e:
             log_to_file(f"Failed to initialize device management: {str(e)}")
@@ -371,6 +371,24 @@ class MainJob(unohelper.Base, XJobExecutor):
         if isinstance(user_config_data, dict):
             config_data.update(user_config_data)
 
+        # Debug: log where token is read from (masked)
+        if key == "llm_api_tokens":
+            try:
+                raw_value = config_data.get(key, default)
+                masked = ""
+                if raw_value:
+                    text = str(raw_value)
+                    masked = text[:2] + "***" + text[-2:] if len(text) > 4 else "*" * len(text)
+                log_to_file(
+                    "Config read llm_api_tokens "
+                    f"path={config_file_path} "
+                    f"user_present={bool(user_config_data)} "
+                    f"package_present={bool(package_config_data)} "
+                    f"value={masked}"
+                )
+            except Exception:
+                pass
+
         # Upgrade user config if package has higher configVersion
         pkg_version = None
         user_version = None
@@ -410,30 +428,30 @@ class MainJob(unohelper.Base, XJobExecutor):
         return value
 
     def _device_management_enabled(self):
-        return self._as_bool(self._get_config_from_file("dm_enabled", False))
+        return self._as_bool(self._get_config_from_file("enabled", False))
 
-    def _select_dm_settings(self, dm_config):
-        if not isinstance(dm_config, dict):
+    def _select_settings(self, config_data):
+        if not isinstance(config_data, dict):
             return None
-        for candidate in ("settings", "config", "parameters", "mirai", "mirai_config", "miraiConfig"):
-            value = dm_config.get(candidate)
+        for candidate in ("config", "settings", "parameters", "mirai", "mirai_config", "miraiConfig"):
+            value = config_data.get(candidate)
             if isinstance(value, dict):
                 return value
         return None
 
-    def _fetch_dm_config(self, force=False):
+    def _fetch_config(self, force=False):
         if not force and not self._device_management_enabled():
             log_to_file("DM config fetch skipped: device management disabled")
             return None
         now = time.time()
-        if self._dm_config_cache and (now - self._dm_config_loaded_at) < self._dm_config_ttl:
-            return self._dm_config_cache
+        if self.config_cache and (now - self.config_loaded_at) < self.config_ttl:
+            return self.config_cache
 
-        base_url = str(self._get_config_from_file("dm_bootstrap_url", "")).strip()
+        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
         if not base_url:
-            log_to_file("DM config fetch skipped: dm_bootstrap_url is empty")
+            log_to_file("DM config fetch skipped: bootstrap_url is empty")
             return None
-        config_path = str(self._get_config_from_file("dm_config_path", "/config/config.json"))
+        config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
         url = base_url.rstrip("/") + "/" + config_path.lstrip("/")
         log_to_file(f"DM bootstrap URL: {url}")
 
@@ -442,11 +460,11 @@ class MainJob(unohelper.Base, XJobExecutor):
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 payload = response.read().decode("utf-8")
             log_to_file(f"DM bootstrap raw response: {payload[:2000]}")
-            dm_config = json.loads(payload)
-            if isinstance(dm_config, dict):
-                self._dm_config_cache = dm_config
-                self._dm_config_loaded_at = now
-                return dm_config
+            config_data = json.loads(payload)
+            if isinstance(config_data, dict):
+                self.config_cache = config_data
+                self.config_loaded_at = now
+                return config_data
         except urllib.error.HTTPError as e:
             try:
                 body = e.read().decode("utf-8")
@@ -459,11 +477,11 @@ class MainJob(unohelper.Base, XJobExecutor):
             log_to_file(f"Failed to fetch device management config: {str(e)}")
         return None
 
-    def _get_dm_setting(self, key):
-        dm_config = self._fetch_dm_config()
-        if not dm_config:
+    def _get_setting(self, key):
+        config_data = self._fetch_config()
+        if not config_data:
             return None
-        settings = self._select_dm_settings(dm_config)
+        settings = self._select_settings(config_data)
         if isinstance(settings, dict) and key in settings:
             return settings.get(key)
         return None
@@ -474,13 +492,29 @@ class MainJob(unohelper.Base, XJobExecutor):
         if key in telemetry_defaults and default is None:
             default = telemetry_defaults[key]
 
-        if key == "model":
-            local_model = str(self._get_config_from_file("model", "", telemetry_defaults=telemetry_defaults)).strip()
-            dm_model = self._get_dm_setting("model")
-            dm_model = str(dm_model).strip() if dm_model is not None else ""
+        if key == "llm_base_urls":
+            config_value = self._get_setting("llm_base_urls")
+            if config_value is not None:
+                if len(str(config_value)) >= 6:
+                    return config_value
+            return self._get_config_from_file("llm_base_urls", default, telemetry_defaults=telemetry_defaults)
 
-            endpoint = self._get_dm_setting("owuiEndpoint") or self._get_config_from_file("owuiEndpoint", "http://127.0.0.1:5000")
-            api_key = self._get_dm_setting("tokenOWUI") or self._get_config_from_file("tokenOWUI", "")
+        if key == "llm_api_tokens":
+            config_value = self._get_setting("llm_api_tokens")
+            if config_value is not None:
+                if len(str(config_value)) >= 6:
+                    return config_value
+            return self._get_config_from_file("llm_api_tokens", default, telemetry_defaults=telemetry_defaults)
+
+        if key == "llm_default_models":
+            local_model = str(self._get_config_from_file("llm_default_models", "", telemetry_defaults=telemetry_defaults)).strip()
+            config_model = self._get_setting("llm_default_models")
+            config_model = str(config_model).strip() if config_model is not None else ""
+            if config_model and len(config_model) < 6:
+                config_model = ""
+
+            endpoint = self.get_config("llm_base_urls", "http://127.0.0.1:5000")
+            api_key = self.get_config("llm_api_tokens", "")
             is_openwebui = True
             if not is_openwebui:
                 endpoint_lower = str(endpoint).lower()
@@ -495,24 +529,24 @@ class MainJob(unohelper.Base, XJobExecutor):
                     return local_model
                 log_to_file(f"Model not found in list (local): {local_model}")
 
-            if dm_model:
-                if not models or dm_model in models:
-                    log_to_file(f"Model selection (dm): {dm_model}")
-                    return dm_model
-                log_to_file(f"Model not found in list (dm): {dm_model}")
+            if config_model:
+                if not models or config_model in models:
+                    log_to_file(f"Model selection (dm): {config_model}")
+                    return config_model
+                log_to_file(f"Model not found in list (dm): {config_model}")
 
             if models:
                 log_to_file(f"Model selection (fallback first): {models[0]}")
                 return models[0]
 
-            fallback = local_model or dm_model or default
+            fallback = local_model or config_model or default
             if fallback:
                 log_to_file(f"Model selection (fallback): {fallback}")
             return fallback
 
-        dm_value = self._get_dm_setting(key)
-        if dm_value is not None:
-            return dm_value
+        config_value = self._get_setting(key)
+        if config_value is not None:
+            return config_value
 
         return self._get_config_from_file(key, default, telemetry_defaults=telemetry_defaults)
 
@@ -540,7 +574,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         # Update the configuration with the new key-value pair
         config_data[key] = value
-        if key == "model":
+        if key == "llm_default_models":
             log_to_file(f"Model saved (local): {value}")
 
         # Write the updated configuration back to the file
@@ -673,13 +707,13 @@ class MainJob(unohelper.Base, XJobExecutor):
         except Exception as e:
             log_to_file(f"Failed to show message box: {str(e)}")
 
-    def _keycloak_config(self, dm_config):
-        if not isinstance(dm_config, dict):
+    def _keycloak_config(self, config_data):
+        if not isinstance(config_data, dict):
             return {}
-        endpoints = dm_config.get("endpoints", {})
+        endpoints = config_data.get("endpoints", {})
         if not isinstance(endpoints, dict):
             endpoints = {}
-        keycloak = dm_config.get("keycloak") or endpoints.get("keycloak") or {}
+        keycloak = config_data.get("keycloak") or endpoints.get("keycloak") or {}
         return keycloak if isinstance(keycloak, dict) else {}
 
     def _keycloak_endpoint(self, keycloak_config, *names):
@@ -702,8 +736,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                 return f"{base}/realms/{realm_value}"
         return base
 
-    def _keycloak_endpoints(self, dm_config):
-        keycloak = self._keycloak_config(dm_config)
+    def _keycloak_endpoints(self, config_data):
+        keycloak = self._keycloak_config(config_data)
         auth_endpoint = self._keycloak_endpoint(
             keycloak,
             "authorization_endpoint",
@@ -725,8 +759,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         if auth_endpoint and token_endpoint:
             return auth_endpoint, token_endpoint
 
-        base_url = self._get_config_from_file("keycloakIssuerUrl", "") or self._get_config_from_file("dm_keycloak_base_url", "")
-        realm = self._get_config_from_file("keycloakRealm", "") or self._get_config_from_file("dm_keycloak_realm", "")
+        base_url = self._get_config_from_file("keycloakIssuerUrl", "") or self._get_config_from_file("keycloak_base_url", "")
+        realm = self._get_config_from_file("keycloakRealm", "") or self._get_config_from_file("keycloak_realm", "")
         realm_base = self._normalize_keycloak_realm_base(base_url, realm)
         if realm_base:
             auth_endpoint = f"{realm_base}/protocol/openid-connect/auth"
@@ -737,13 +771,20 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not token_endpoint:
             return None
         try:
+            log_to_file(
+                "Keycloak token request: "
+                f"url={token_endpoint} "
+                f"grant_type={data.get('grant_type','')} "
+                f"client_id={data.get('client_id','')} "
+                f"redirect_uri={data.get('redirect_uri','')}"
+            )
             encoded = urllib.parse.urlencode(data).encode("utf-8")
             request = urllib.request.Request(
                 token_endpoint,
                 data=encoded,
                 headers={"Content-Type": "application/x-www-form-urlencoded"}
             )
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
+            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
                 payload = response.read().decode("utf-8")
             return json.loads(payload)
         except Exception as e:
@@ -756,18 +797,18 @@ class MainJob(unohelper.Base, XJobExecutor):
         access_token = token_response.get("access_token", "")
         refresh_token = token_response.get("refresh_token", "")
         if access_token:
-            self.set_config("dm_access_token", access_token)
+            self.set_config("access_token", access_token)
         if refresh_token:
-            self.set_config("dm_refresh_token", refresh_token)
+            self.set_config("refresh_token", refresh_token)
         expires_in = token_response.get("expires_in")
         if isinstance(expires_in, (int, float)):
-            self.set_config("dm_access_token_expires_at", int(time.time() + int(expires_in)))
+            self.set_config("access_token_expires_at", int(time.time() + int(expires_in)))
 
     def _clear_tokens(self):
         try:
-            self.set_config("dm_access_token", "")
-            self.set_config("dm_refresh_token", "")
-            self.set_config("dm_access_token_expires_at", 0)
+            self.set_config("access_token", "")
+            self.set_config("refresh_token", "")
+            self.set_config("access_token_expires_at", 0)
             log_to_file("Keycloak tokens cleared")
         except Exception:
             pass
@@ -824,13 +865,17 @@ class MainJob(unohelper.Base, XJobExecutor):
 
             def do_GET(self):
                 parsed_path = urllib.parse.urlparse(self.path)
-                if parsed_path.path != path:
+                request_path = parsed_path.path or "/"
+                expected_path = path or "/"
+                log_to_file(f"PKCE callback received: path={request_path} query={parsed_path.query}")
+                if request_path.rstrip("/") != expected_path.rstrip("/"):
                     self.send_response(404)
                     self.end_headers()
                     return
                 params = urllib.parse.parse_qs(parsed_path.query)
                 code = params.get("code", [None])[0]
                 error = params.get("error", [None])[0]
+                log_to_file(f"PKCE callback parsed: code={'set' if code else 'none'} error={error or 'none'}")
                 result["code"] = code
                 result["error"] = error
                 self.send_response(200)
@@ -842,39 +887,34 @@ class MainJob(unohelper.Base, XJobExecutor):
     <meta charset="utf-8"/>
     <title>Authentification terminée</title>
     <style>
-      body { font-family: Arial, sans-serif; margin: 24px; color: #222; }
+      body { font-family: Arial, sans-serif; margin: 28px; color: #222; background: #f7f8fb; }
+      .card { background: #fff; border: 1px solid #e3e6ef; border-radius: 10px; padding: 18px 20px; max-width: 560px; box-shadow: 0 2px 10px rgba(0,0,0,0.04); }
       .muted { color: #666; }
-      button { padding: 8px 12px; }
+      .ok { display: inline-block; margin-top: 6px; padding: 6px 10px; background: #e8f5e9; color: #1b5e20; border-radius: 6px; font-weight: 600; }
+      .small { font-size: 12px; color: #778; margin-top: 10px; }
     </style>
   </head>
   <body>
-    <h2>Authentification terminée</h2>
-    <p>Vous pouvez fermer cette fenêtre.</p>
-    <p class="muted">Fermeture automatique dans <span id="count">10</span> secondes.</p>
-    <button onclick="window.close()">Fermer le navigateur</button>
-    <script>
-      let n = 10;
-      const el = document.getElementById('count');
-      const timer = setInterval(() => {
-        n -= 1;
-        if (el) el.textContent = n;
-        if (n <= 0) {
-          clearInterval(timer);
-          window.close();
-        }
-      }, 1000);
-    </script>
+    <div class="card">
+      <h2>Authentification terminée</h2>
+      <div class="ok">Connexion validée</div>
+      <p>Vous pouvez fermer cet onglet et revenir à LibreOffice.</p>
+      <p class="muted">Si LibreOffice ne réagit pas, attendez quelques secondes puis relancez l’action.</p>
+      <div class="small">Aucune action supplémentaire n’est requise ici.</div>
+    </div>
   </body>
 </html>
 """
                 self.wfile.write(html.encode("utf-8"))
 
+        bind_host = "" if host in ("localhost", "127.0.0.1") else host
         try:
-            httpd = HTTPServer((host, port), Handler)
+            httpd = HTTPServer((bind_host, port), Handler)
             httpd.timeout = 1
         except Exception as e:
             log_to_file(f"Failed to start local callback server: {str(e)}")
             return None, "callback_server_error"
+        log_to_file(f"Local callback server listening on http://{bind_host or '0.0.0.0'}:{port}{path}")
 
         start = time.time()
         while time.time() - start < timeout_seconds and not result["code"] and not result["error"]:
@@ -890,7 +930,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             return None, result["error"]
         return result["code"], None
 
-    def _validate_redirect_uri(self, redirect_uri, show_busy_message=True):
+    def _validate_redirect_uri(self, redirect_uri):
         try:
             parsed = urllib.parse.urlparse(redirect_uri)
             if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1"):
@@ -900,75 +940,30 @@ class MainJob(unohelper.Base, XJobExecutor):
             path = parsed.path or "/"
         except Exception:
             return redirect_uri
-
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-                sock.bind((host, port))
-        except Exception:
-            log_to_file(f"Redirect port busy: {port}")
-            if show_busy_message:
-                self._show_message(
-                    "Port occupé",
-                    f"Le port {port} est déjà utilisé.\n\n"
-                    "Keycloak exige un redirect_uri exact.\n"
-                    "Libérez ce port ou modifiez keycloak_redirect_uri."
-                )
-            return None
         return f"http://{host}:{port}{path}"
 
     def _select_redirect_uri(self):
-        redirect_uris = self._get_config_from_file("keycloak_redirect_uris", [])
-        if isinstance(redirect_uris, str):
-            redirect_uris = [u.strip() for u in redirect_uris.split(",") if u.strip()]
-        if isinstance(redirect_uris, list) and redirect_uris:
-            for uri in redirect_uris:
-                valid = self._validate_redirect_uri(uri, show_busy_message=False)
-                if valid:
-                    log_to_file(f"Keycloak redirect_uri selected: {valid}")
-                    return valid
-            self._show_message(
-                "Port occupé",
-                "Aucun redirect_uri disponible : tous les ports sont occupés.\n\n"
-                "Libérez un port ou modifiez keycloak_redirect_uris."
-            )
-            return None
-
         redirect_uri = self._get_config_from_file("keycloak_redirect_uri", "")
         if not redirect_uri:
             return None
+        allowed = self._get_config_from_file("keycloak_allowed_redirect_uri", [])
+        if isinstance(allowed, str):
+            allowed = [u.strip() for u in allowed.split(",") if u.strip()]
+        if isinstance(allowed, list) and allowed:
+            if redirect_uri not in allowed:
+                self._show_message(
+                    "Configuration Keycloak invalide",
+                    "redirect_uri n'est pas autorisé.\n\n"
+                    "Vérifiez keycloak_allowed_redirect_uri."
+                )
+                return None
         valid = self._validate_redirect_uri(redirect_uri)
         if valid:
             log_to_file(f"Keycloak redirect_uri selected: {valid}")
         return valid
 
-    def _log_keycloak_redirect_coherence(self):
-        try:
-            configured = self._get_config_from_file("keycloak_redirect_uris", [])
-            if isinstance(configured, str):
-                configured = [u.strip() for u in configured.split(",") if u.strip()]
-            if not isinstance(configured, list):
-                configured = []
-            allowed = self._get_config_from_file("keycloak_allowed_redirect_uris", [])
-            if isinstance(allowed, str):
-                allowed = [u.strip() for u in allowed.split(",") if u.strip()]
-            if not isinstance(allowed, list):
-                allowed = []
-            if not allowed:
-                return
-            configured_set = set(configured)
-            allowed_set = set(allowed)
-            missing = sorted(list(configured_set - allowed_set))
-            extra = sorted(list(allowed_set - configured_set))
-            log_to_file(
-                "Keycloak redirect URIs coherence "
-                f"configured={len(configured_set)} allowed={len(allowed_set)} "
-                f"missing={missing} extra={extra}"
-            )
-        except Exception as e:
-            log_to_file(f"Keycloak redirect coherence check failed: {str(e)}")
-
-    def _authorization_code_flow(self, dm_config):
-        auth_endpoint, token_endpoint = self._keycloak_endpoints(dm_config)
+    def _authorization_code_flow(self, config_data):
+        auth_endpoint, token_endpoint = self._keycloak_endpoints(config_data)
         if not auth_endpoint or not token_endpoint:
             log_to_file("Keycloak auth endpoints missing; cannot open browser")
             self._show_message(
@@ -1010,6 +1005,11 @@ class MainJob(unohelper.Base, XJobExecutor):
             "state": state
         })
         auth_url = f"{auth_endpoint}?{query}"
+        log_to_file(
+            "Keycloak auth URL built: "
+            f"auth_endpoint={auth_endpoint} client_id={client_id} redirect_uri={redirect_uri} "
+            f"code_challenge={code_challenge} state={state} url={auth_url}"
+        )
         try:
             import webbrowser
             webbrowser.open(auth_url)
@@ -1095,26 +1095,26 @@ class MainJob(unohelper.Base, XJobExecutor):
             return token_response.get("access_token")
         return None
 
-    def _ensure_dm_access_token(self, dm_config):
-        access_token = str(self._get_config_from_file("dm_access_token", "")).strip()
+    def _ensure_access_token(self, config_data):
+        access_token = str(self._get_config_from_file("access_token", "")).strip()
         if access_token and not self._token_is_expired(access_token):
             return access_token
 
-        refresh_token = str(self._get_config_from_file("dm_refresh_token", "")).strip()
-        keycloak = self._keycloak_config(dm_config)
-        _, token_endpoint = self._keycloak_endpoints(dm_config)
+        refresh_token = str(self._get_config_from_file("refresh_token", "")).strip()
+        keycloak = self._keycloak_config(config_data)
+        _, token_endpoint = self._keycloak_endpoints(config_data)
         client_id = (
             keycloak.get("client_id")
             or keycloak.get("clientId")
             or self._get_config_from_file("keycloakClientId", "")
-            or self._get_config_from_file("dm_keycloak_client_id", "")
-            or self._get_config_from_file("dm_client_id", "")
+            or self._get_config_from_file("keycloak_client_id", "")
+            or self._get_config_from_file("client_id", "")
         )
         client_secret = (
             keycloak.get("client_secret")
             or keycloak.get("clientSecret")
-            or self._get_config_from_file("dm_keycloak_client_secret", "")
-            or self._get_config_from_file("dm_client_secret", "")
+            or self._get_config_from_file("keycloak_client_secret", "")
+            or self._get_config_from_file("client_secret", "")
         )
 
         if refresh_token:
@@ -1148,11 +1148,11 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not confirm:
             return None
 
-        auth_code_token = self._authorization_code_flow(dm_config)
+        auth_code_token = self._authorization_code_flow(config_data)
         if auth_code_token:
             return auth_code_token
 
-        allow_password_fallback = self._as_bool(self._get_config_from_file("dm_password_fallback", False))
+        allow_password_fallback = self._as_bool(self._get_config_from_file("password_fallback", False))
         if not allow_password_fallback:
             log_to_file("Password fallback disabled; authentication aborted")
             return None
@@ -1178,12 +1178,12 @@ class MainJob(unohelper.Base, XJobExecutor):
     def _ensure_device_management_state(self):
         if not self._device_management_enabled():
             return
-        dm_config = self._fetch_dm_config()
-        if not dm_config:
+        config_data = self._fetch_config()
+        if not config_data:
             return
 
-        access_token = self._ensure_dm_access_token(dm_config)
-        keycloak = self._keycloak_config(dm_config)
+        access_token = self._ensure_access_token(config_data)
+        keycloak = self._keycloak_config(config_data)
         userinfo_endpoint = self._keycloak_endpoint(
             keycloak,
             "userinfo_endpoint",
@@ -1198,19 +1198,19 @@ class MainJob(unohelper.Base, XJobExecutor):
             return
 
         enroll_endpoint = ""
-        endpoints = dm_config.get("endpoints", {}) if isinstance(dm_config, dict) else {}
+        endpoints = config_data.get("endpoints", {}) if isinstance(config_data, dict) else {}
         if isinstance(endpoints, dict):
             enroll_endpoint = endpoints.get("enroll") or endpoints.get("enroll_endpoint") or endpoints.get("enrollEndpoint") or ""
         if not enroll_endpoint:
-            enroll_endpoint = dm_config.get("enroll") or dm_config.get("enroll_endpoint") or dm_config.get("enrollEndpoint") or ""
+            enroll_endpoint = config_data.get("enroll") or config_data.get("enroll_endpoint") or config_data.get("enrollEndpoint") or ""
 
         if not enroll_endpoint:
             return
 
-        if self._as_bool(self._get_config_from_file("dm_enrolled", False)):
+        if self._as_bool(self._get_config_from_file("enrolled", False)):
             return
 
-        device_name = dm_config.get("device_name") or dm_config.get("deviceName") or self._get_config_from_file("dm_device_name", "")
+        device_name = config_data.get("device_name") or config_data.get("deviceName") or self._get_config_from_file("device_name", "")
         plugin_uuid = self._ensure_extension_uuid()
 
         enroll_payload = {
@@ -1227,17 +1227,17 @@ class MainJob(unohelper.Base, XJobExecutor):
             request.get_method = lambda: 'POST'
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 response.read()
-            self.set_config("dm_enrolled", True)
+            self.set_config("enrolled", True)
         except Exception as e:
             log_to_file(f"Device management enroll failed: {str(e)}")
 
     def _get_openwebui_access_token(self):
         if not self._device_management_enabled():
             return ""
-        dm_config = self._fetch_dm_config()
-        if not dm_config:
+        config_data = self._fetch_config()
+        if not config_data:
             return ""
-        return self._ensure_dm_access_token(dm_config) or ""
+        return self._ensure_access_token(config_data) or ""
 
     def _auth_header(self):
         name = str(self.get_config("authHeaderName", "Authorization")).strip() or "Authorization"
@@ -1381,32 +1381,54 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         return models, descriptions
 
-    def _refresh_dm_config_to_local(self, cancel_flag=None):
+    def _refresh_config_to_local(self, cancel_flag=None):
         if cancel_flag and cancel_flag.get("cancel"):
             log_to_file("Reload config: canceled before fetch")
             return {}
-        dm_config = self._fetch_dm_config(force=True)
-        if not dm_config:
-            log_to_file("Reload config: failed to fetch dm_config")
+        config_data = self._fetch_config(force=True)
+        if not config_data:
+            log_to_file("Reload config: failed to fetch config_data")
             return {}
         if cancel_flag and cancel_flag.get("cancel"):
             log_to_file("Reload config: canceled after fetch")
             return {}
-        settings = self._select_dm_settings(dm_config)
+        config_obj = config_data.get("config") if isinstance(config_data, dict) else None
+        if isinstance(config_obj, dict):
+            settings = config_obj
+            log_to_file("Reload config: using config object")
+        else:
+            settings = self._select_settings(config_data)
+
         if not isinstance(settings, dict):
-            if isinstance(dm_config, dict):
-                settings = dm_config
+            if isinstance(config_data, dict):
+                settings = config_data
                 log_to_file("Reload config: using top-level config (no settings wrapper)")
             else:
-                log_to_file(f"Reload config: no settings dict found (type={type(dm_config).__name__})")
+                log_to_file(f"Reload config: no settings dict found (type={type(config_data).__name__})")
                 return {}
-        config_path = str(self._get_config_from_file("dm_config_path", "/config/config.json"))
-        bootstrap_url = str(self._get_config_from_file("dm_bootstrap_url", "")).strip()
+        if "model" in settings:
+            settings.pop("model", None)
+        if "owuiEndpoint" in settings:
+            settings.pop("owuiEndpoint", None)
+        if "tokenOWUI" in settings:
+            settings.pop("tokenOWUI", None)
+        config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
+        bootstrap_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
         normalized_url = f"{bootstrap_url.rstrip('/')}/{config_path.lstrip('/')}"
         log_to_file(f"Reload config URL computed: {normalized_url}")
         log_to_file(f"Reload config: url={normalized_url} keys={list(settings.keys())}")
         synced = []
         skipped = []
+        for meta_key in ("lastversion", "updateUrl", "configVersion"):
+            if isinstance(config_data, dict) and meta_key in config_data:
+                meta_val = config_data.get(meta_key)
+                if meta_val is None or (isinstance(meta_val, str) and meta_val.strip() == ""):
+                    continue
+                try:
+                    self.set_config(meta_key, meta_val)
+                    synced.append(meta_key)
+                except Exception:
+                    pass
         for key, value in settings.items():
             if value is None or (isinstance(value, str) and value.strip() == ""):
                 skipped.append(key)
@@ -1477,7 +1499,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not models:
             return None
 
-        current_model = str(self.get_config("model", "")).strip()
+        current_model = str(self.get_config("llm_default_models", "")).strip()
         model_for_request = current_model or models[0]
         endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
         if api_path:
@@ -1538,7 +1560,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
 
     def _is_openai_compatible(self):
-        endpoint = str(self.get_config("owuiEndpoint", "http://127.0.0.1:5000"))
+        endpoint = str(self.get_config("llm_base_urls", "http://127.0.0.1:5000"))
         compatibility_flag = self._as_bool(self.get_config("openai_compatibility", False))
         return compatibility_flag or ("api.openai.com" in endpoint.lower())
 
@@ -1551,15 +1573,15 @@ class MainJob(unohelper.Base, XJobExecutor):
         except (TypeError, ValueError):
             max_tokens = 15000
 
-        endpoint = str(self.get_config("owuiEndpoint", "http://127.0.0.1:5000")).rstrip("/")
-        api_key = str(self.get_config("tokenOWUI", ""))
+        endpoint = str(self.get_config("llm_base_urls", "http://127.0.0.1:5000")).rstrip("/")
+        api_key = str(self.get_config("llm_api_tokens", ""))
         if api_type is None:
             api_type = str(self.get_config("api_type", "completions")).lower()
         api_type = "chat" if api_type == "chat" else "completions"
-        model = str(self.get_config("model", ""))
+        model = str(self.get_config("llm_default_models", ""))
         
         # Add default system prompt to ensure plain text output
-        default_system_prompt = "You must return only plain text without any formatting, markdown, code blocks, or special characters. Do not use **, *, _, #, or any other formatting symbols except french symbols. Return natural, simple text only."
+        default_system_prompt = "Return only plain text. Do not use markdown, code blocks, or formatting symbols like **, *, _, or #. French characters and punctuation are allowed (accents, apostrophes, guillemets « », etc.). Return natural, simple text only."
         if system_prompt:
             system_prompt = default_system_prompt + " " + system_prompt
         else:
@@ -1620,6 +1642,25 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         if model:
             data["model"] = model
+            try:
+                model_lower = model.lower()
+                model_limits = {
+                    "deepseek-r1-distill-llama-70b": 8196,
+                    "llama-3.3-70b-instruct": 4096,
+                }
+                limit = None
+                for key, value in model_limits.items():
+                    if key in model_lower:
+                        limit = value
+                        break
+                if limit:
+                    if max_tokens > limit:
+                        max_tokens = limit
+                        data["max_tokens"] = limit
+                    data["max_completion_tokens"] = min(int(data.get("max_tokens", limit)), limit)
+                    log_to_file(f"Max tokens clamped for {model}: {data['max_completion_tokens']}")
+            except Exception:
+                pass
 
         json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
         log_to_file(f"Request data: {json.dumps(data, ensure_ascii=False, indent=2)}")
@@ -2262,9 +2303,10 @@ EDITED VERSION:
         VERT_SEP = 6
         LABEL_HEIGHT = 18
         EDIT_HEIGHT = 24
-        IMAGE_HEIGHT = 126
+        IMAGE_HEIGHT = 132
         EXTRA_BOTTOM = 30
         DESC_HEIGHT = EDIT_HEIGHT * 2
+        TEST_ROW_HEIGHT = BUTTON_HEIGHT + VERT_SEP
         import uno
         from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
         from com.sun.star.awt.PushButtonType import OK, CANCEL
@@ -2312,8 +2354,8 @@ EDITED VERSION:
                 "Config loaded "
                 f"path={config_file_path} user_exists={user_exists} user_size={user_size} "
                 f"package_path={package_config_path} package_exists={package_exists} package_size={package_size} "
-                f"owuiEndpoint={self._get_config_from_file('owuiEndpoint','')} "
-                f"tokenOWUI={_mask_value(self._get_config_from_file('tokenOWUI',''))} "
+                f"llm_base_urls={self._get_config_from_file('llm_base_urls','')} "
+                f"llm_api_tokens={_mask_value(self._get_config_from_file('llm_api_tokens',''))} "
                 f"authHeaderName={self._get_config_from_file('authHeaderName','')} "
                 f"authHeaderPrefix={self._get_config_from_file('authHeaderPrefix','')} "
                 f"keycloakIssuerUrl={self._get_config_from_file('keycloakIssuerUrl','')} "
@@ -2323,10 +2365,10 @@ EDITED VERSION:
                 f"telemetryEndpoint={self._get_config_from_file('telemetryEndpoint','')} "
                 f"telemetryAuthorizationType={self._get_config_from_file('telemetryAuthorizationType','')} "
                 f"telemetryKey={_mask_value(self._get_config_from_file('telemetryKey',''))} "
-                f"dm_bootstrap_url={self._get_config_from_file('dm_bootstrap_url','')} "
-                f"dm_config_path={self._get_config_from_file('dm_config_path','')} "
-                f"dm_enabled={self._get_config_from_file('dm_enabled', False)} "
-                f"model={self._get_config_from_file('model','')}"
+                f"bootstrap_url={self._get_config_from_file('bootstrap_url','')} "
+                f"config_path={self._get_config_from_file('config_path','')} "
+                f"enabled={self._get_config_from_file('enabled', False)} "
+                f"llm_default_models={self._get_config_from_file('llm_default_models','')}"
             )
 
         _log_launch_config()
@@ -2378,9 +2420,10 @@ EDITED VERSION:
         wait_dialog, wait_label, wait_toolkit = show_wait_dialog()
         try:
             animate_wait(wait_label, wait_toolkit, steps=4, delay=0.15)
-            endpoint_value = str(self.get_config("owuiEndpoint","http://127.0.0.1:5000/api"))
-            api_key_value = str(self.get_config("tokenOWUI",""))
-            current_model = str(self.get_config("model","")).strip()
+            endpoint_value = str(self.get_config("llm_base_urls","http://127.0.0.1:5000/api"))
+            api_key_value = str(self.get_config("llm_api_tokens",""))
+            log_to_file(f"Settings open: llm_api_tokens length={len(api_key_value)}")
+            current_model = str(self.get_config("llm_default_models","")).strip()
             is_openwebui = True
             models, model_descriptions = self._fetch_models_info(endpoint_value, api_key_value, is_openwebui)
             if current_model and current_model not in models:
@@ -2402,7 +2445,7 @@ EDITED VERSION:
         ]
 
         num_fields = len(field_specs)
-        total_field_height = num_fields * (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP * 2)
+        total_field_height = num_fields * (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP * 2) + TEST_ROW_HEIGHT
         desc_block_height = LABEL_HEIGHT + VERT_SEP + DESC_HEIGHT + VERT_SEP * 2
         HEIGHT = VERT_MARGIN * 2 + IMAGE_HEIGHT + VERT_SEP + total_field_height + desc_block_height + LABEL_HEIGHT + BUTTON_HEIGHT + VERT_SEP * 4 + EXTRA_BOTTOM
         dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
@@ -2439,7 +2482,7 @@ EDITED VERSION:
                 image_url = uno.systemPathToFileUrl(image_path)
                 available_width = WIDTH - HORI_MARGIN * 2
                 image_width = int(min(available_width, IMAGE_HEIGHT * (1505.0 / 400.0)))
-                image_x = HORI_MARGIN + int((available_width - image_width) / 2) - int(available_width * 0.10)
+                image_x = HORI_MARGIN + int((available_width - image_width) / 2)
                 add("img_splash", "ImageControl", image_x, current_y,
                     image_width, IMAGE_HEIGHT, {
                         "ImageURL": image_url,
@@ -2459,7 +2502,7 @@ EDITED VERSION:
             add(label_name, "FixedText", HORI_MARGIN, current_y, label_width, LABEL_HEIGHT,
                 {"Label": field["label"], "NoLabel": True})
             if field.get("name") == "api_key":
-                add("toggle_api_key", "Button", HORI_MARGIN + label_width + 6, current_y, 54, LABEL_HEIGHT,
+                add("toggle_api_key", "Button", HORI_MARGIN + label_width - 9, current_y, 70, LABEL_HEIGHT,
                     {"Label": "Révéler"})
             current_y += LABEL_HEIGHT + VERT_SEP
             if field.get("type") == "list":
@@ -2490,6 +2533,10 @@ EDITED VERSION:
                         except Exception:
                             pass
             current_y += EDIT_HEIGHT + VERT_SEP * 2
+            if field.get("name") == "api_key":
+                add("btn_test_token", "Button", HORI_MARGIN, current_y - VERT_SEP, 120, BUTTON_HEIGHT,
+                    {"Label": "♻️ Rafraîchir", "Name": "test_token"})
+                current_y += TEST_ROW_HEIGHT
 
         description_label = "Description du modèle:"
         add("label_model_desc", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
@@ -2500,34 +2547,40 @@ EDITED VERSION:
             {"Text": "", "ReadOnly": True, "MultiLine": True})
         current_y += DESC_HEIGHT + VERT_SEP * 2
 
-        access_token = str(self._get_config_from_file("dm_access_token", "")).strip()
+        access_token = str(self._get_config_from_file("access_token", "")).strip()
         email = self._token_email(access_token) if access_token else None
         anon_ok, auth_ok = self._api_status(endpoint_value, api_key_value, is_openwebui)
-        if anon_ok and auth_ok:
-            status_value = "API: ok (anonyme) / ok (loggué)"
-        elif anon_ok and not auth_ok:
-            status_value = "API: ok (anonyme) / erreur (loggué)"
-        elif not anon_ok and auth_ok:
-            status_value = "API: erreur (anonyme) / ok (loggué)"
-        else:
-            status_value = "API: erreur (anonyme) / erreur (loggué)"
 
-        email_label_value = f"Keycloak: {email}" if email else "Keycloak: Non connecté"
-        half_width = (WIDTH - HORI_MARGIN * 2 - HORI_SEP) / 2
-        add("label_keycloak_email", "FixedText", HORI_MARGIN, current_y,
-            half_width, LABEL_HEIGHT, {"Label": email_label_value, "NoLabel": True})
-        add("label_api_status", "FixedText", HORI_MARGIN + half_width + HORI_SEP, current_y,
-            half_width, LABEL_HEIGHT, {"Label": status_value, "NoLabel": True})
+        def _status_style(anon_ok, auth_ok, email_value):
+            if auth_ok:
+                return ("Connecté", 0x2ECC71)
+            if anon_ok and not auth_ok:
+                return ("Anonyme OK", 0xF39C12)
+            if not anon_ok and not auth_ok and email_value is None:
+                return ("Non testé", 0x888888)
+            return ("Non accessible", 0x111111)
+
+        status_label, status_color = _status_style(anon_ok, auth_ok, email)
+        status_text = f"{status_label}" + (f" ({email})" if email else "")
+
+        add("label_status_dot", "FixedText", HORI_MARGIN, current_y,
+            12, LABEL_HEIGHT, {"Label": "●", "NoLabel": True, "TextColor": status_color})
+        add("label_status_text", "FixedText", HORI_MARGIN + 16, current_y,
+            WIDTH - HORI_MARGIN * 2 - 16, LABEL_HEIGHT, {"Label": status_text, "NoLabel": True})
         current_y += LABEL_HEIGHT + VERT_SEP * 2
 
         add("btn_ok", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
             {"PushButtonType": OK, "DefaultButton": True, "Label": "OK"})
         add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
             {"PushButtonType": CANCEL, "Label": "Annuler"})
-        add("btn_keycloak", "Button", HORI_MARGIN + (BUTTON_WIDTH + HORI_SEP) * 2, current_y,
-            BUTTON_WIDTH + 20, BUTTON_HEIGHT, {"Label": "Keycloak (re)login", "Name": "keycloak_login", "Tabstop": True, "Enabled": True})
-        add("btn_reload_config", "Button", HORI_MARGIN + (BUTTON_WIDTH + HORI_SEP) * 2 + BUTTON_WIDTH + 20 + HORI_SEP,
-            current_y, BUTTON_WIDTH + 20, BUTTON_HEIGHT, {"Label": "Recharge la conf", "Name": "reload_config", "Tabstop": True, "Enabled": True})
+        keycloak_width = BUTTON_WIDTH - 12
+        reload_width = BUTTON_WIDTH + 52
+        keycloak_x = HORI_MARGIN + (BUTTON_WIDTH + HORI_SEP) * 2
+        reload_x = keycloak_x + keycloak_width + HORI_SEP
+        add("btn_keycloak", "Button", keycloak_x, current_y,
+            keycloak_width, BUTTON_HEIGHT, {"Label": "🔐 Login", "Name": "keycloak_login", "Tabstop": True, "Enabled": True})
+        add("btn_reload_config", "Button", reload_x,
+            current_y, reload_width, BUTTON_HEIGHT, {"Label": "🔄 Recharge configuration", "Name": "reload_config", "Tabstop": True, "Enabled": True})
 
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
@@ -2550,23 +2603,110 @@ EDITED VERSION:
 
         field_controls["endpoint"].setFocus()
 
-        keycloak_email_label = dialog.getControl("label_keycloak_email")
+        status_dot_label = dialog.getControl("label_status_dot")
+        status_text_label = dialog.getControl("label_status_text")
         model_desc_control = dialog.getControl("edit_model_desc")
         btn_keycloak = dialog.getControl("btn_keycloak")
         toggle_api_key = dialog.getControl("toggle_api_key")
         if not api_key_plain_control:
             api_key_plain_control = dialog.getControl("edit_api_key_plain")
         btn_reload_config = dialog.getControl("btn_reload_config")
+        btn_test_token = dialog.getControl("btn_test_token")
         if not btn_reload_config:
             log_to_file("Reload config button not found in dialog")
         else:
             log_to_file("Reload config button created")
 
+        def _read_api_key_value():
+            try:
+                if api_key_plain_control and api_key_plain_control.isVisible():
+                    return str(api_key_plain_control.getModel().Text)
+            except Exception:
+                pass
+            try:
+                return str(field_controls["api_key"].getModel().Text)
+            except Exception:
+                return ""
+
+        def _update_api_status_label(endpoint_val, api_key_val, email_value=None):
+            anon_ok, auth_ok = self._api_status(endpoint_val, api_key_val, True)
+            label, color = _status_style(anon_ok, auth_ok, email_value)
+            status_text = label + (f" ({email_value})" if email_value else "")
+            if status_dot_label:
+                try:
+                    status_dot_label.getModel().TextColor = color
+                except Exception:
+                    pass
+            if status_text_label:
+                try:
+                    status_text_label.getModel().Label = status_text
+                except Exception:
+                    pass
+            return anon_ok, auth_ok
+
+        def _test_token_and_refresh():
+            nonlocal model_descriptions
+            try:
+                endpoint_val = str(field_controls["endpoint"].getModel().Text)
+            except Exception:
+                endpoint_val = ""
+            api_key_val = _read_api_key_value()
+            log_to_file("Token test: start")
+            anon_ok, auth_ok = _update_api_status_label(endpoint_val, api_key_val)
+            if not auth_ok:
+                self._show_message(
+                    "API",
+                    "Token invalide ou refusé."
+                )
+                log_to_file("Token test: auth failed")
+                return
+            try:
+                if endpoint_val.startswith("http"):
+                    self.set_config("llm_base_urls", endpoint_val)
+                self.set_config("llm_api_tokens", api_key_val)
+                log_to_file("Token test: token saved")
+            except Exception:
+                pass
+            models, model_descriptions_local = self._fetch_models_info(endpoint_val, api_key_val, True)
+            if not models:
+                self._show_message(
+                    "API",
+                    "Aucun modèle disponible (vérifiez l'endpoint et le token)."
+                )
+                log_to_file("Token test: models empty")
+                return
+            model_descriptions = model_descriptions_local
+            model_control = field_controls.get("model")
+            if model_control:
+                try:
+                    model_control.removeItems(0, model_control.getItemCount())
+                except Exception:
+                    pass
+                try:
+                    model_control.addItems(tuple(models), 0)
+                except Exception:
+                    pass
+            selected = models[0]
+            try:
+                if model_control:
+                    model_control.selectItem(selected, True)
+            except Exception:
+                pass
+            try:
+                self.set_config("llm_default_models", selected)
+            except Exception:
+                pass
+            desc = model_descriptions.get(selected) or f"ID: {selected}"
+            try:
+                model_desc_control.getModel().Text = desc
+            except Exception:
+                pass
+            log_to_file(f"Token test: ok, models={len(models)}")
+
         class SettingsActionListener(unohelper.Base, XActionListener):
-            def __init__(self, outer, model_control, email_label_control, desc_control, descriptions, endpoint_control, api_key_control, api_key_plain_control, toggle_control):
+            def __init__(self, outer, model_control, desc_control, descriptions, endpoint_control, api_key_control, api_key_plain_control, toggle_control):
                 self.outer = outer
                 self.model_control = model_control
-                self.email_label_control = email_label_control
                 self.desc_control = desc_control
                 self.descriptions = descriptions
                 self.endpoint_control = endpoint_control
@@ -2619,21 +2759,21 @@ EDITED VERSION:
                 if not command:
                     log_to_file("SettingsActionListener: empty ActionCommand")
                 if command == "keycloak_login":
-                    dm_config = self.outer._fetch_dm_config()
-                    if not dm_config:
+                    config_data = self.outer._fetch_config()
+                    if not config_data:
                         self.outer._show_message(
                             "Device Management",
                             "Impossible de récupérer la configuration Device Management."
                         )
                         return
                     self.outer._clear_tokens()
-                    access_token = self.outer._authorization_code_flow(dm_config)
+                    access_token = self.outer._authorization_code_flow(config_data)
                     email = self.outer._token_email(access_token) if access_token else None
-                    label_value = f"Keycloak: {email}" if email else "Keycloak: Non connecté"
-                    try:
-                        self.email_label_control.getModel().Label = label_value
-                    except Exception:
-                        pass
+                    _update_api_status_label(
+                        str(self.endpoint_control.getModel().Text) if self.endpoint_control else "",
+                        _read_api_key_value(),
+                        email_value=email
+                    )
                 elif command == "toggle_api_key":
                     self.api_key_masked = not self.api_key_masked
                     try:
@@ -2660,6 +2800,8 @@ EDITED VERSION:
                             self.toggle_control.getModel().Label = "Révéler" if self.api_key_masked else "Masquer"
                     except Exception:
                         pass
+                elif command == "test_token":
+                    _test_token_and_refresh()
                 elif command == "reload_config":
                     pass
 
@@ -2732,7 +2874,7 @@ EDITED VERSION:
             result_holder = {"settings": None}
 
             def _worker():
-                result_holder["settings"] = self._refresh_dm_config_to_local(cancel_flag=cancel_flag)
+                    result_holder["settings"] = self._refresh_config_to_local(cancel_flag=cancel_flag)
 
             worker = threading.Thread(target=_worker, daemon=True)
             worker.start()
@@ -2771,9 +2913,9 @@ EDITED VERSION:
                 )
                 return
             try:
-                endpoint_val = str(self.get_config("owuiEndpoint", ""))
-                api_key_val = str(self.get_config("tokenOWUI", ""))
-                model_val = str(self.get_config("model", ""))
+                endpoint_val = str(self.get_config("llm_base_urls", ""))
+                api_key_val = str(self.get_config("llm_api_tokens", ""))
+                model_val = str(self.get_config("llm_default_models", ""))
                 is_openwebui = True
                 models, model_descriptions_local = self._fetch_models_info(endpoint_val, api_key_val, is_openwebui)
                 if not models:
@@ -2826,7 +2968,6 @@ EDITED VERSION:
         listener = SettingsActionListener(
             self,
             field_controls.get("model"),
-            keycloak_email_label,
             model_desc_control,
             model_descriptions,
             field_controls.get("endpoint"),
@@ -2850,6 +2991,16 @@ EDITED VERSION:
                 pass
             try:
                 toggle_api_key.getModel().Name = "toggle_api_key"
+            except Exception:
+                pass
+
+        if btn_test_token:
+            try:
+                btn_test_token.addActionListener(listener)
+            except Exception:
+                pass
+            try:
+                btn_test_token.getModel().ActionCommand = "test_token"
             except Exception:
                 pass
 
@@ -2905,7 +3056,7 @@ EDITED VERSION:
                     try:
                         value = self.control.getSelectedItem()
                         if value:
-                            self.outer.set_config("model", value)
+                            self.outer.set_config("llm_default_models", value)
                             desc = self.descriptions.get(value)
                             if not desc:
                                 desc = f"ID: {value}"
@@ -2937,7 +3088,7 @@ EDITED VERSION:
                     log_to_file(f"Model dialog selection text='{selected}' current='{current_model}'")
                     result[field["name"]] = selected
                     if selected:
-                        self.set_config("model", selected)
+                        self.set_config("llm_default_models", selected)
                 else:
                     if field.get("name") == "api_key" and api_key_plain_control:
                         try:
@@ -2992,11 +3143,15 @@ EDITED VERSION:
                         cursor = text.createTextCursorByRange(text_range)
                         cursor.collapseToEnd()
 
+                        # Add separators around generated text
+                        text.insertString(cursor, "\n\n---début-du-texte-généré---\n", False)
+
                         def append_text(chunk_text):
                             # Insert text at cursor position (preserves formatting)
                             text.insertString(cursor, chunk_text, False)
 
                         self.stream_request(request, api_type, append_text)
+                        text.insertString(cursor, "\n---fin-du-texte-généré---\n", False)
                                       
                     except Exception as e:
                         text_range = selection.getByIndex(0)
@@ -3316,6 +3471,8 @@ REFORMULATED VERSION:
                     webbrowser.open("https://mirai.interieur.gouv.fr")
                 except Exception as e:
                     log_to_file(f"Error opening website: {str(e)}")
+            elif args == "MenuSeparator":
+                return
             
             elif args == "settings":
                 # Send telemetry trace
@@ -3327,13 +3484,14 @@ REFORMULATED VERSION:
                     result = self.settings_box("Settings")
                                     
                     if "endpoint" in result and result["endpoint"].startswith("http"):
-                        self.set_config("owuiEndpoint", result["endpoint"])
+                        self.set_config("llm_base_urls", result["endpoint"])
 
                     if "api_key" in result:
-                        self.set_config("tokenOWUI", result["api_key"])
+                        self.set_config("llm_api_tokens", result["api_key"])
+                        log_to_file("Settings saved: llm_api_tokens updated")
 
                     if "model" in result:                
-                        self.set_config("model", result["model"])
+                        self.set_config("llm_default_models", result["model"])
 
 
                 except Exception as e:
@@ -3351,13 +3509,14 @@ REFORMULATED VERSION:
                         result = self.settings_box("Settings")
                                         
                         if "endpoint" in result and result["endpoint"].startswith("http"):
-                            self.set_config("owuiEndpoint", result["endpoint"])
+                            self.set_config("llm_base_urls", result["endpoint"])
 
                         if "api_key" in result:
-                            self.set_config("tokenOWUI", result["api_key"])
+                            self.set_config("llm_api_tokens", result["api_key"])
+                            log_to_file("Settings saved: llm_api_tokens updated")
 
                         if "model" in result:                
-                            self.set_config("model", result["model"])
+                            self.set_config("llm_default_models", result["model"])
                     except Exception:
                         pass
                     return

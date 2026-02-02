@@ -2,7 +2,7 @@
 
 ## About
 
-This LibreOffice extension integrates a writing assistant directly into Writer: it can **continue a text**, **edit a selection**, **summarize**, and **rephrase** without leaving the document. It connects to an OpenAI‑compatible backend (OpenWebUI, Ollama, etc.) and preserves formatting as much as possible. It also includes a **simplified enrollment mechanism** via Device Management to preconfigure key parameters (endpoint, token, models, etc.).
+This LibreOffice extension integrates a writing assistant directly into Writer: it can **continue a text**, **edit a selection**, **summarize**, and **rephrase** without leaving the document. It connects to an OpenAI‑compatible backend (OpenWebUI, Ollama, etc.) and preserves formatting as much as possible. It also includes a **simplified enrollment mechanism** via Device Management to preconfigure key parameters (base URLs, API tokens, default models, etc.).
 
 This is a LibreOffice Writer extension that enables inline generative editing with AI language models. It's compatible with OpenAI API, OpenWebUI, Ollama, and other OpenAI-compatible endpoints.
 
@@ -158,7 +158,7 @@ Access the official mirai website (https://mirai.interieur.gouv.fr) from the ext
 
 ### ⚙️ Settings
 
-Configure the extension to your needs: API endpoint, model, API key, and advanced options.
+Configure the extension to your needs: LLM base URL(s), default model(s), API token(s), and advanced options.
 
 ---
 
@@ -238,7 +238,7 @@ This project has gone through many iterations. Here is a summary of the most rec
 
 - **Configuration**: `config.default.json` is now packaged with the extension, with auto‑init of the user `config.json` if missing or empty, and merge/upgrade based on `configVersion`.
 - **Device Management**: bootstrap `/config/...` integration with local sync; empty values no longer overwrite local config.
-- **OpenWebUI**: full support for OWUI settings (endpoint, token, headers). Added diagnostics (logs/curl) for model and chat calls.
+- **OpenWebUI**: full support for LLM settings (base URLs, API tokens, headers). Added diagnostics (logs/curl) for model and chat calls.
 - **Keycloak/SSO**: Authorization Code + PKCE flow with local redirect; multi‑URI handling; improved re‑login UX.
 - **Preferences UI**: simplified dialog, model dropdown, dynamic description, API status indicator, reload button, splash image, masked token with reveal toggle.
 - **Editing**: new “Edit selection” dialog always on top, resizable, with send button and system close handling.
@@ -253,4 +253,3 @@ Device Management integration is in place, but several items remain:
 - Implement **automatic OpenWebUI token retrieval**.
 - **Externalize all prompts** via Device Management (all prompts must become configurable).
 - Implement the **automatic update mechanism** for the extension.
-
