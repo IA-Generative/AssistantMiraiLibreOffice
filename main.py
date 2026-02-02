@@ -1742,12 +1742,12 @@ class MainJob(unohelper.Base, XJobExecutor):
                 body = e.read().decode("utf-8")
             except Exception:
                 body = ""
-            if e.code == 401:
+            if e.code == 401 or ("\"401\"" in body or "status\":401" in body or "code\":401" in body):
                 try:
                     self._show_message_and_open_settings(
-                        "Token expiré",
-                        "Votre token a expiré.\n\n"
-                        "Allez dans les préférences pour le renouveler ou annulez."
+                        "Token invalide",
+                        "Votre token n'est plus valide.\n\n"
+                        "Voulez-vous ouvrir les préférences pour le vérifier ?"
                     )
                 except Exception:
                     pass
@@ -1862,6 +1862,90 @@ class MainJob(unohelper.Base, XJobExecutor):
         if len(original_text.strip()) == 0:
             original_text = ""
 
+        wait_dialog = {"dialog": None, "bg": None}
+        wait_buffer = {"text": ""}
+        def _show_wait():
+            try:
+                from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+                WIDTH = 420
+                HEIGHT = 140
+                HORI_MARGIN = VERT_MARGIN = 8
+                LABEL_HEIGHT = 18
+                BG_HEIGHT = HEIGHT - VERT_MARGIN * 2 - LABEL_HEIGHT - 6
+                ctx = uno.getComponentContext()
+                def create(name):
+                    return ctx.getServiceManager().createInstanceWithContext(name, ctx)
+                dialog = create("com.sun.star.awt.UnoControlDialog")
+                dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
+                dialog.setModel(dialog_model)
+                dialog.setVisible(False)
+                dialog.setTitle("MIrAI")
+                dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+                try:
+                    dialog_model.BackgroundColor = 0xFFFFFF
+                except Exception:
+                    pass
+                def add(name, type, x_, y_, width_, height_, props):
+                    try:
+                        model = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type + "Model")
+                        dialog_model.insertByName(name, model)
+                        control = dialog.getControl(name)
+                        control.setPosSize(x_, y_, width_, height_, POSSIZE)
+                        for key, value in props.items():
+                            try:
+                                setattr(model, key, value)
+                            except Exception:
+                                pass
+                        return control
+                    except Exception:
+                        return None
+                add("label_wait", "FixedText", HORI_MARGIN, VERT_MARGIN,
+                    WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+                    {"Label": "MIrAI réfléchi...", "NoLabel": True})
+                bg = add("edit_wait_bg", "Edit", HORI_MARGIN, VERT_MARGIN + LABEL_HEIGHT + 6,
+                    WIDTH - HORI_MARGIN * 2, BG_HEIGHT,
+                    {"Text": "", "MultiLine": True, "ReadOnly": True})
+                if bg:
+                    try:
+                        bg.getModel().BackgroundColor = 0xFFFFFF
+                        bg.getModel().TextColor = 0xDDDDDD
+                        bg.getModel().FontHeight = 6
+                        bg.getModel().Border = 0
+                    except Exception:
+                        pass
+                frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
+                window = frame.getContainerWindow() if frame else None
+                dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
+                if window:
+                    ps = window.getPosSize()
+                    _x = ps.Width / 2 - WIDTH / 2
+                    _y = ps.Height / 2 - HEIGHT / 2
+                    dialog.setPosSize(_x, _y, 0, 0, POS)
+                dialog.setVisible(True)
+                wait_dialog["dialog"] = dialog
+                wait_dialog["bg"] = bg
+            except Exception:
+                pass
+
+        def _update_wait(chunk_text):
+            if not wait_dialog["bg"]:
+                return
+            try:
+                wait_buffer["text"] += chunk_text
+                if len(wait_buffer["text"]) > 1200:
+                    wait_buffer["text"] = wait_buffer["text"][-1200:]
+                wait_dialog["bg"].getModel().Text = wait_buffer["text"]
+            except Exception:
+                pass
+
+        def _close_wait():
+            try:
+                if wait_dialog["dialog"]:
+                    wait_dialog["dialog"].setVisible(False)
+                    wait_dialog["dialog"].dispose()
+            except Exception:
+                pass
+
         try:
             path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
             user_config_path = getattr(path_settings, "UserConfig")
@@ -1874,29 +1958,11 @@ class MainJob(unohelper.Base, XJobExecutor):
         except Exception:
             pass
 
-        prompt = """ORIGINAL VERSION:
-""" + original_text + """
-
-INSTRUCTIONS: """ + user_input + """
-
-IMPORTANT RULES:
-- Do NOT ask any questions
-- Do NOT add explanations or comments
-- Do NOT include phrases like "Here is..." or "I've made..."
-- Output ONLY the edited text directly
-- Start immediately with the edited content
-
-EDITED VERSION:
-"""
-
         system_prompt = self.get_config(
             "edit_selection_system_prompt",
             "You are a text editor. You follow instructions precisely and output only the edited text without any questions, explanations, or meta-commentary."
         )
-        max_tokens = len(original_text) + self.get_config("edit_selection_max_new_tokens", 15000)
-
         api_type = str(self.get_config("api_type", "completions")).lower()
-        request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
 
         # If selection is empty, insert at the current cursor position
         try:
@@ -1956,6 +2022,7 @@ EDITED VERSION:
         def append_text(chunk_text):
             nonlocal accumulated_text
             accumulated_text += chunk_text
+            _update_wait(chunk_text)
             lower_text = accumulated_text.lower()
             for pattern in question_patterns:
                 if pattern in lower_text:
@@ -1967,31 +2034,189 @@ EDITED VERSION:
                     accumulated_text = accumulated_text[:pos].rstrip()
                     return
 
-        self.stream_request(request, api_type, append_text)
-        if aborted["value"]:
-            self._show_message(
-                "Modification",
-                "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
-            )
-            return
-        # Replace selection in a single operation for Undo support
+        def _edit_segment(segment_text):
+            prompt = """ORIGINAL VERSION:
+""" + segment_text + """
+
+INSTRUCTIONS: """ + user_input + """
+
+IMPORTANT RULES:
+- Do NOT ask any questions
+- Do NOT add explanations or comments
+- Do NOT include phrases like "Here is..." or "I've made..."
+- Output ONLY the edited text directly
+- Start immediately with the edited content
+
+EDITED VERSION:
+"""
+            max_tokens = len(segment_text) + self.get_config("edit_selection_max_new_tokens", 15000)
+            request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
+            return request
+
+        # Preserve styles when replacing selection
+        def _capture_style_runs(range_obj, text_value):
+            runs = []
+            if not text_value:
+                return runs
+            try:
+                text_obj = range_obj.getText()
+                cursor = text_obj.createTextCursorByRange(range_obj.getStart())
+                current = None
+                run_len = 0
+                for _ in range(len(text_value)):
+                    cursor.goRight(1, True)
+                    try:
+                        char_style = cursor.getPropertyValue("CharStyleName")
+                    except Exception:
+                        char_style = ""
+                    try:
+                        para_style = cursor.getPropertyValue("ParaStyleName")
+                    except Exception:
+                        para_style = ""
+                    cursor.collapseToEnd()
+                    style = (char_style, para_style)
+                    if current is None:
+                        current = style
+                        run_len = 1
+                    elif style == current:
+                        run_len += 1
+                    else:
+                        runs.append((current, run_len))
+                        current = style
+                        run_len = 1
+                if current is not None:
+                    runs.append((current, run_len))
+            except Exception:
+                pass
+            return runs
+
         try:
-            text_range.setString(accumulated_text)
+            text_obj = text_range.getText()
+            start = text_range.getStart()
+            end = text_range.getEnd()
+            old_len = len(original_text)
+            runs = _capture_style_runs(text_range, original_text)
+
+            # Edit paragraph/style runs separately
+            _show_wait()
+            if original_text:
+                accumulated_text = ""
+                edited_segments = []
+                pos = 0
+                for style, run_len in runs:
+                    segment_text = original_text[pos:pos + run_len]
+                    pos += run_len
+                    segment_acc = ""
+                    def _seg_append(chunk_text):
+                        nonlocal segment_acc
+                        segment_acc += chunk_text
+                        _update_wait(chunk_text)
+                        lower_text = segment_acc.lower()
+                        for pattern in question_patterns:
+                            if pattern in lower_text:
+                                aborted["value"] = True
+                                return
+                        for stop_phrase in stop_phrases:
+                            if stop_phrase.lower() in segment_acc.lower():
+                                p = segment_acc.lower().find(stop_phrase.lower())
+                                segment_acc = segment_acc[:p].rstrip()
+                                return
+                    request = _edit_segment(segment_text)
+                    self.stream_request(request, api_type, _seg_append)
+                    if aborted["value"]:
+                        self._show_message(
+                            "Modification",
+                            "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
+                        )
+                        _close_wait()
+                        return
+                    if not segment_acc.strip():
+                        log_to_file("EditSelection: empty segment response")
+                    edited_segments.append((style, segment_acc))
+                    accumulated_text += segment_acc
+            else:
+                # Empty selection: single call
+                request = _edit_segment(original_text)
+                self.stream_request(request, api_type, append_text)
+                if aborted["value"]:
+                    self._show_message(
+                        "Modification",
+                        "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
+                    )
+                    _close_wait()
+                    return
+            _close_wait()
+            if not accumulated_text.strip():
+                self._show_message(
+                    "Modification",
+                    "Aucune réponse reçue du modèle. Vérifiez le token et réessayez."
+                )
+                return
+
+            new_len = len(accumulated_text)
+
+            log_to_file(f"EditSelection insert: old_len={old_len} new_len={new_len} runs={len(runs)}")
+            # Delete original selection (if any)
+            delete_cursor = text_obj.createTextCursorByRange(start)
+            delete_cursor.gotoRange(end, True)
+            delete_cursor.setString("")
+            insert_point = delete_cursor.getStart()
+
+            # Insert new text at cursor position
+            insert_cursor = text_obj.createTextCursorByRange(insert_point)
+            if original_text == "":
+                try:
+                    insert_cursor.setPropertyValue("CharStyleName", "Default")
+                except Exception:
+                    pass
+                try:
+                    insert_cursor.setPropertyValue("ParaStyleName", "Standard")
+                except Exception:
+                    pass
+            text_obj.insertString(insert_cursor, accumulated_text, False)
+            log_to_file("EditSelection insert: done")
+
+            # Reapply styles per segment for non-empty selection
+            if old_len > 0 and new_len > 0 and runs:
+                styled_cursor = text_obj.createTextCursorByRange(start)
+                if original_text:
+                    for style, seg_text in edited_segments:
+                        seg_len = len(seg_text)
+                        if seg_len <= 0:
+                            continue
+                        styled_cursor.goRight(seg_len, True)
+                        try:
+                            if style[0]:
+                                styled_cursor.setPropertyValue("CharStyleName", style[0])
+                        except Exception:
+                            pass
+                        try:
+                            if style[1]:
+                                styled_cursor.setPropertyValue("ParaStyleName", style[1])
+                        except Exception:
+                            pass
+                        styled_cursor.collapseToEnd()
+                else:
+                    try:
+                        if runs and runs[0][0][0]:
+                            styled_cursor.setPropertyValue("CharStyleName", runs[0][0][0])
+                    except Exception:
+                        pass
+
+            # Reselect inserted text
             try:
                 model = self.ctx.ServiceManager.createInstanceWithContext(
                     "com.sun.star.frame.Desktop", self.ctx
                 ).getCurrentComponent()
                 controller = model.getCurrentController() if model else None
                 if controller:
-                    start = text_range.getStart()
-                    end = text_range.getEnd()
-                    cursor = text_range.getText().createTextCursorByRange(start)
-                    cursor.gotoRange(end, True)
-                    controller.select(cursor)
+                    sel_cursor = text_obj.createTextCursorByRange(insert_point)
+                    sel_cursor.goRight(new_len, True)
+                    controller.select(sel_cursor)
             except Exception:
                 pass
-        except Exception:
-            pass
+        except Exception as e:
+            log_to_file(f"EditSelection insert failed: {str(e)}")
 
     def _show_edit_selection_dialog(self, text, text_range):
         if self._edit_dialog:
