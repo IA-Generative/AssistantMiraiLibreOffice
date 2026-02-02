@@ -337,7 +337,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         # Load user config (if present)
         if os.path.exists(config_file_path):
             try:
-                with open(config_file_path, 'r') as file:
+                with open(config_file_path, 'r', encoding='utf-8') as file:
                     user_config_data = json.load(file)
             except (IOError, json.JSONDecodeError):
                 user_config_data = None
@@ -348,7 +348,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         package_config_path = os.path.join(os.path.dirname(__file__), package_file)
         if os.path.exists(package_config_path):
             try:
-                with open(package_config_path, 'r') as file:
+                with open(package_config_path, 'r', encoding='utf-8') as file:
                     package_config_data = json.load(file)
             except (IOError, json.JSONDecodeError):
                 package_config_data = None
@@ -357,8 +357,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not isinstance(user_config_data, dict) or not user_config_data:
             if isinstance(package_config_data, dict) and package_config_data:
                 try:
-                    with open(config_file_path, 'w') as file:
-                        json.dump(package_config_data, file, indent=4)
+                    with open(config_file_path, 'w', encoding='utf-8') as file:
+                        json.dump(package_config_data, file, indent=4, ensure_ascii=False)
                     user_config_data = dict(package_config_data)
                     log_to_file(f"Config initialized from package defaults: {config_file_path}")
                 except Exception:
@@ -565,7 +565,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         # Load existing configuration if the file exists
         if os.path.exists(config_file_path):
             try:
-                with open(config_file_path, 'r') as file:
+                with open(config_file_path, 'r', encoding='utf-8') as file:
                     config_data = json.load(file)
             except (IOError, json.JSONDecodeError):
                 config_data = {}
@@ -579,8 +579,8 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         # Write the updated configuration back to the file
         try:
-            with open(config_file_path, 'w') as file:
-                json.dump(config_data, file, indent=4)
+            with open(config_file_path, 'w', encoding='utf-8') as file:
+                json.dump(config_data, file, indent=4, ensure_ascii=False)
         except IOError as e:
             # Handle potential IO errors (optional)
             print(f"Error writing to {config_file_path}: {e}")
