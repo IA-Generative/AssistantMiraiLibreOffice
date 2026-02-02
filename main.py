@@ -1918,7 +1918,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
                 if window:
                     ps = window.getPosSize()
-                    _x = ps.Width / 2 - WIDTH / 2
+                    _x = ps.Width / 2 - WIDTH / 2 + int(ps.Width * 0.15)
                     _y = ps.Height / 2 - HEIGHT / 2
                     dialog.setPosSize(_x, _y, 0, 0, POS)
                 dialog.setVisible(True)
@@ -1960,7 +1960,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         system_prompt = self.get_config(
             "edit_selection_system_prompt",
-            "You are a text editor. You follow instructions precisely and output only the edited text without any questions, explanations, or meta-commentary."
+            "Tu es un éditeur de texte. Tu dois appliquer les instructions sans poser de questions. Interdiction totale de poser une question, de demander des précisions ou de commenter. Tu dois produire uniquement le texte modifié, sans préambule, sans explication et sans guillemets. Ne répète pas les instructions."
         )
         api_type = str(self.get_config("api_type", "completions")).lower()
 
@@ -2046,6 +2046,7 @@ IMPORTANT RULES:
 - Do NOT include phrases like "Here is..." or "I've made..."
 - Output ONLY the edited text directly
 - Start immediately with the edited content
+- Edit ONLY the ORIGINAL VERSION. Do not add any extra text.
 
 EDITED VERSION:
 """
@@ -2053,98 +2054,33 @@ EDITED VERSION:
             request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
             return request
 
-        # Preserve styles when replacing selection
-        def _capture_style_runs(range_obj, text_value):
-            runs = []
-            if not text_value:
-                return runs
-            try:
-                text_obj = range_obj.getText()
-                cursor = text_obj.createTextCursorByRange(range_obj.getStart())
-                current = None
-                run_len = 0
-                for _ in range(len(text_value)):
-                    cursor.goRight(1, True)
-                    try:
-                        char_style = cursor.getPropertyValue("CharStyleName")
-                    except Exception:
-                        char_style = ""
-                    try:
-                        para_style = cursor.getPropertyValue("ParaStyleName")
-                    except Exception:
-                        para_style = ""
-                    cursor.collapseToEnd()
-                    style = (char_style, para_style)
-                    if current is None:
-                        current = style
-                        run_len = 1
-                    elif style == current:
-                        run_len += 1
-                    else:
-                        runs.append((current, run_len))
-                        current = style
-                        run_len = 1
-                if current is not None:
-                    runs.append((current, run_len))
-            except Exception:
-                pass
-            return runs
-
         try:
             text_obj = text_range.getText()
             start = text_range.getStart()
             end = text_range.getEnd()
             old_len = len(original_text)
-            runs = _capture_style_runs(text_range, original_text)
+            base_char_style = ""
+            base_para_style = ""
+            try:
+                base_char_style = text_range.getPropertyValue("CharStyleName")
+            except Exception:
+                pass
+            try:
+                base_para_style = text_range.getPropertyValue("ParaStyleName")
+            except Exception:
+                pass
 
-            # Edit paragraph/style runs separately
+            # Edit selection as a single block (no segmentation)
             _show_wait()
-            if original_text:
-                accumulated_text = ""
-                edited_segments = []
-                pos = 0
-                for style, run_len in runs:
-                    segment_text = original_text[pos:pos + run_len]
-                    pos += run_len
-                    segment_acc = ""
-                    def _seg_append(chunk_text):
-                        nonlocal segment_acc
-                        segment_acc += chunk_text
-                        _update_wait(chunk_text)
-                        lower_text = segment_acc.lower()
-                        for pattern in question_patterns:
-                            if pattern in lower_text:
-                                aborted["value"] = True
-                                return
-                        for stop_phrase in stop_phrases:
-                            if stop_phrase.lower() in segment_acc.lower():
-                                p = segment_acc.lower().find(stop_phrase.lower())
-                                segment_acc = segment_acc[:p].rstrip()
-                                return
-                    request = _edit_segment(segment_text)
-                    self.stream_request(request, api_type, _seg_append)
-                    if aborted["value"]:
-                        self._show_message(
-                            "Modification",
-                            "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
-                        )
-                        _close_wait()
-                        return
-                    if not segment_acc.strip():
-                        log_to_file("EditSelection: empty segment response")
-                    edited_segments.append((style, segment_acc))
-                    accumulated_text += segment_acc
-            else:
-                # Empty selection: single call
-                request = _edit_segment(original_text)
-                self.stream_request(request, api_type, append_text)
-                if aborted["value"]:
-                    self._show_message(
-                        "Modification",
-                        "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
-                    )
-                    _close_wait()
-                    return
+            request = _edit_segment(original_text)
+            self.stream_request(request, api_type, append_text)
+            if aborted["value"]:
+                self._show_message(
+                    "Modification",
+                    "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
+                )
+                _close_wait()
+                return
             _close_wait()
             if not accumulated_text.strip():
                 self._show_message(
@@ -2155,7 +2091,7 @@ EDITED VERSION:
 
             new_len = len(accumulated_text)
 
-            log_to_file(f"EditSelection insert: old_len={old_len} new_len={new_len} runs={len(runs)}")
+            log_to_file(f"EditSelection insert: old_len={old_len} new_len={new_len} segments=1")
             # Delete original selection (if any)
             delete_cursor = text_obj.createTextCursorByRange(start)
             delete_cursor.gotoRange(end, True)
@@ -2176,32 +2112,17 @@ EDITED VERSION:
             text_obj.insertString(insert_cursor, accumulated_text, False)
             log_to_file("EditSelection insert: done")
 
-            # Reapply styles per segment for non-empty selection
-            if old_len > 0 and new_len > 0 and runs:
-                styled_cursor = text_obj.createTextCursorByRange(start)
-                if original_text:
-                    for style, seg_text in edited_segments:
-                        seg_len = len(seg_text)
-                        if seg_len <= 0:
-                            continue
-                        styled_cursor.goRight(seg_len, True)
-                        try:
-                            if style[0]:
-                                styled_cursor.setPropertyValue("CharStyleName", style[0])
-                        except Exception:
-                            pass
-                        try:
-                            if style[1]:
-                                styled_cursor.setPropertyValue("ParaStyleName", style[1])
-                        except Exception:
-                            pass
-                        styled_cursor.collapseToEnd()
-                else:
-                    try:
-                        if runs and runs[0][0][0]:
-                            styled_cursor.setPropertyValue("CharStyleName", runs[0][0][0])
-                    except Exception:
-                        pass
+            # Reapply base styles to the whole inserted block
+            if old_len > 0 and new_len > 0:
+                try:
+                    style_cursor = text_obj.createTextCursorByRange(insert_point)
+                    style_cursor.goRight(new_len, True)
+                    if base_char_style:
+                        style_cursor.setPropertyValue("CharStyleName", base_char_style)
+                    if base_para_style:
+                        style_cursor.setPropertyValue("ParaStyleName", base_para_style)
+                except Exception:
+                    pass
 
             # Reselect inserted text
             try:
@@ -2312,6 +2233,36 @@ EDITED VERSION:
             except Exception:
                 pass
 
+        def _has_multiple_styles():
+            try:
+                selected = current_selection["range"].getString()
+            except Exception:
+                return False
+            if not selected:
+                return False
+            try:
+                text_obj = current_selection["range"].getText()
+                cursor = text_obj.createTextCursorByRange(current_selection["range"].getStart())
+                cursor.goRight(1, True)
+                try:
+                    base_char = cursor.getPropertyValue("CharStyleName")
+                except Exception:
+                    base_char = ""
+                cursor.collapseToEnd()
+                max_scan = min(len(selected), 2000)
+                for _ in range(max_scan):
+                    cursor.goRight(1, True)
+                    try:
+                        char_style = cursor.getPropertyValue("CharStyleName")
+                    except Exception:
+                        char_style = base_char
+                    cursor.collapseToEnd()
+                    if char_style != base_char:
+                        return True
+            except Exception:
+                return False
+            return False
+
         def _selection_info():
             _refresh_selection_range()
             try:
@@ -2328,7 +2279,8 @@ EDITED VERSION:
                 head = snippet[:head_len].rsplit(" ", 1)[0] or snippet[:head_len]
                 tail = snippet[-tail_len:].split(" ", 1)[-1] or snippet[-tail_len:]
                 snippet = head.rstrip() + " ... ... ... " + tail.lstrip()
-            return f"Sélection {snippet}"
+            warning = " ⚠ plusieurs styles fusionnés" if _has_multiple_styles() else ""
+            return f"Sélection {snippet}{warning}"
 
         PROMPT_BTN_WIDTH = 150
         label_max_width = WIDTH - HORI_MARGIN * 2 - PROMPT_BTN_WIDTH - HORI_SEP
@@ -2345,6 +2297,14 @@ EDITED VERSION:
             SUGGEST_LABEL_HEIGHT,
             {"Label": _selection_info(), "NoLabel": True, "FontHeight": 8, "TextColor": 0x777777}
         )
+        if label_selection_control:
+            try:
+                if _has_multiple_styles():
+                    label_selection_control.getModel().TextColor = 0xFF8800
+                else:
+                    label_selection_control.getModel().TextColor = 0x777777
+            except Exception:
+                pass
         edit_control = add("edit_prompt", "Edit", HORI_MARGIN, VERT_MARGIN + LABEL_HEIGHT + VERT_SEP + OFFSET_BELOW,
             WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": "", "MultiLine": True})
         if edit_control:
@@ -2424,8 +2384,14 @@ EDITED VERSION:
         dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
         if window:
             ps = window.getPosSize()
-            _x = ps.Width / 2 - WIDTH / 2
-            _y = ps.Height / 2 - HEIGHT / 2
+            saved_x = self.get_config("edit_dialog_x", None)
+            saved_y = self.get_config("edit_dialog_y", None)
+            if isinstance(saved_x, (int, float)) and isinstance(saved_y, (int, float)):
+                _x = int(saved_x)
+                _y = int(saved_y)
+            else:
+                _x = ps.Width / 2 - WIDTH / 2
+                _y = ps.Height / 2 - HEIGHT / 2
             dialog.setPosSize(_x, _y, 0, 0, POS)
 
         def _extract_snippet(text_value, limit=180):
@@ -2471,6 +2437,10 @@ EDITED VERSION:
             if label_selection_control:
                 try:
                     label_selection_control.getModel().Label = _selection_info()
+                    if _has_multiple_styles():
+                        label_selection_control.getModel().TextColor = 0xFF8800
+                    else:
+                        label_selection_control.getModel().TextColor = 0x777777
                 except Exception:
                     pass
 
@@ -2533,8 +2503,16 @@ EDITED VERSION:
         class EditDialogWindowListener(unohelper.Base, XWindowListener):
             def __init__(self, outer):
                 self.outer = outer
+            def _save_pos(self):
+                try:
+                    ps = dialog.getPosSize()
+                    self.outer.set_config("edit_dialog_x", int(ps.X))
+                    self.outer.set_config("edit_dialog_y", int(ps.Y))
+                except Exception:
+                    pass
             def windowClosing(self, event):
                 try:
+                    self._save_pos()
                     dialog.setVisible(False)
                     dialog.dispose()
                 except Exception:
@@ -2558,8 +2536,16 @@ EDITED VERSION:
         class EditDialogTopWindowListener(unohelper.Base, XTopWindowListener):
             def __init__(self, outer):
                 self.outer = outer
+            def _save_pos(self):
+                try:
+                    ps = dialog.getPosSize()
+                    self.outer.set_config("edit_dialog_x", int(ps.X))
+                    self.outer.set_config("edit_dialog_y", int(ps.Y))
+                except Exception:
+                    pass
             def windowClosing(self, event):
                 try:
+                    self._save_pos()
                     dialog.setVisible(False)
                     dialog.dispose()
                 except Exception:

@@ -16,7 +16,7 @@
     "extend_selection_max_tokens": 15000,
     "extend_selection_system_prompt": "",
     "edit_selection_max_new_tokens": 15000,
-    "edit_selection_system_prompt": "",
+    "edit_selection_system_prompt": "Tu es un éditeur de texte. Tu dois appliquer les instructions sans poser de questions. Interdiction totale de poser une question, de demander des précisions ou de commenter. Tu dois produire uniquement le texte modifié, sans préambule, sans explication et sans guillemets. Ne répète pas les instructions.",
     "summarize_selection_max_tokens": 15000,
     "summarize_selection_system_prompt": "",
     "simplify_selection_max_tokens": 15000,
