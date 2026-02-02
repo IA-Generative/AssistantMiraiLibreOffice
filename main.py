@@ -1898,9 +1898,15 @@ EDITED VERSION:
         api_type = str(self.get_config("api_type", "completions")).lower()
         request = self.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
 
-        cursor = text.createTextCursorByRange(text_range)
-        cursor.collapseToEnd()
-        text.insertString(cursor, "\n\n---modification-de-la-sélection---\n", False)
+        # If selection is empty, replace the whole document
+        try:
+            if text_range.getString() == "":
+                cursor = text.createTextCursor()
+                cursor.gotoStart(False)
+                cursor.gotoEnd(True)
+                text_range = cursor
+        except Exception:
+            pass
 
         accumulated_text = ""
         stop_phrases = [
@@ -1942,24 +1948,34 @@ EDITED VERSION:
             "quel style"
         ]
 
+        aborted = {"value": False}
+
         def append_text(chunk_text):
             nonlocal accumulated_text
             accumulated_text += chunk_text
             lower_text = accumulated_text.lower()
             for pattern in question_patterns:
                 if pattern in lower_text:
-                    text.insertString(cursor, "[Le modèle a tenté de poser une question au lieu d'éditer. Veuillez reformuler votre demande de manière plus directive.]", False)
-                    accumulated_text = ""
+                    aborted["value"] = True
                     return
             for stop_phrase in stop_phrases:
                 if stop_phrase.lower() in accumulated_text.lower():
                     pos = accumulated_text.lower().find(stop_phrase.lower())
                     accumulated_text = accumulated_text[:pos].rstrip()
                     return
-            text.insertString(cursor, chunk_text, False)
 
         self.stream_request(request, api_type, append_text)
-        text.insertString(cursor, "\n---fin-de-modification---\n", False)
+        if aborted["value"]:
+            self._show_message(
+                "Modification",
+                "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
+            )
+            return
+        # Replace selection in a single operation for Undo support
+        try:
+            text_range.setString(accumulated_text)
+        except Exception:
+            pass
 
     def _show_edit_selection_dialog(self, text, text_range):
         if self._edit_dialog:
@@ -1976,7 +1992,17 @@ EDITED VERSION:
         HORI_SEP = VERT_SEP = 8
         LABEL_HEIGHT = 22
         EDIT_HEIGHT = 120
-        HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT + VERT_SEP + BUTTON_HEIGHT
+        SUGGEST_LABEL_HEIGHT = 16
+        SUGGEST_LIST_HEIGHT = 70
+        SUGGEST_BTN_WIDTH = 120
+        HEIGHT = (
+            VERT_MARGIN * 2
+            + LABEL_HEIGHT + VERT_SEP
+            + EDIT_HEIGHT + VERT_SEP
+            + SUGGEST_LABEL_HEIGHT + VERT_SEP
+            + SUGGEST_LIST_HEIGHT + VERT_SEP
+            + BUTTON_HEIGHT
+        )
 
         from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
         ctx = uno.getComponentContext()
@@ -2039,6 +2065,46 @@ EDITED VERSION:
             except Exception:
                 pass
 
+        suggest_y = VERT_MARGIN + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT + VERT_SEP
+        add(
+            "label_suggestions",
+            "FixedText",
+            HORI_MARGIN,
+            suggest_y,
+            WIDTH - HORI_MARGIN * 2,
+            SUGGEST_LABEL_HEIGHT,
+            {"Label": "Suggestion de prompts", "NoLabel": True, "FontHeight": 8}
+        )
+        suggest_y += SUGGEST_LABEL_HEIGHT + VERT_SEP
+
+        suggestions_list = add(
+            "list_suggestions",
+            "ListBox",
+            HORI_MARGIN,
+            suggest_y,
+            WIDTH - HORI_MARGIN * 2 - (SUGGEST_BTN_WIDTH + HORI_SEP),
+            SUGGEST_LIST_HEIGHT,
+            {"Dropdown": True}
+        )
+        btn_copy_suggestion = add(
+            "btn_copy_suggestion",
+            "Button",
+            WIDTH - HORI_MARGIN - SUGGEST_BTN_WIDTH,
+            suggest_y,
+            SUGGEST_BTN_WIDTH,
+            BUTTON_HEIGHT,
+            {"Label": "📋 Copier"}
+        )
+        btn_regen_suggestions = add(
+            "btn_regen_suggestions",
+            "Button",
+            WIDTH - HORI_MARGIN - SUGGEST_BTN_WIDTH,
+            suggest_y + BUTTON_HEIGHT + VERT_SEP,
+            SUGGEST_BTN_WIDTH,
+            BUTTON_HEIGHT,
+            {"Label": "🔁 Nouveaux"}
+        )
+
         link_control = add(
             "link_prompt_file",
             "Button",
@@ -2046,7 +2112,7 @@ EDITED VERSION:
             HEIGHT - VERT_MARGIN - LABEL_HEIGHT,
             160,
             LABEL_HEIGHT,
-            {"Label": "Ouvrir prompt.txt"}
+            {"Label": "📄 Ouvrir prompt.txt"}
         )
 
         btn_send = add("btn_send", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH, HEIGHT - VERT_MARGIN - BUTTON_HEIGHT,
@@ -2060,6 +2126,59 @@ EDITED VERSION:
             _x = ps.Width / 2 - WIDTH / 2
             _y = ps.Height / 2 - HEIGHT / 2
             dialog.setPosSize(_x, _y, 0, 0, POS)
+
+        def _extract_snippet(text_value, limit=180):
+            value = " ".join((text_value or "").split())
+            return value[:limit].rstrip()
+
+        def _generate_prompt_suggestions(text_value, label="Texte"):
+            snippet = _extract_snippet(text_value)
+            base = f"{label}: {snippet}" if snippet else f"{label}: (vide)"
+            prompts = [
+                f"Corrige l’orthographe et la grammaire. {base}",
+                f"Reformule en style formel et concis. {base}",
+                f"Simplifie pour un public non spécialiste. {base}",
+                f"Rends le texte plus clair avec des phrases courtes. {base}",
+                f"Transforme en style administratif. {base}",
+                f"Rends la formulation plus positive et professionnelle. {base}",
+                f"Réorganise pour améliorer la logique et la structure. {base}",
+                f"Supprime les répétitions et les tournures lourdes. {base}",
+                f"Rends le texte plus convaincant sans changer le sens. {base}",
+                f"Résume le contenu en gardant l’essentiel. {base}",
+            ]
+            return prompts
+
+        def _load_suggestions():
+            try:
+                try:
+                    current_text = text.getString()
+                    suggestion_source = text_range.getString()
+                except Exception:
+                    current_text = ""
+                    suggestion_source = ""
+                label = "Texte sélectionné"
+                if not suggestion_source:
+                    suggestion_source = current_text
+                    label = "Texte entier"
+                elif current_text and suggestion_source not in current_text:
+                    suggestion_source = current_text
+                    label = "Texte entier"
+                suggestions = _generate_prompt_suggestions(suggestion_source, label=label)
+            except Exception:
+                suggestions = []
+            if suggestions_list:
+                try:
+                    suggestions_list.removeItems(0, suggestions_list.getItemCount())
+                except Exception:
+                    pass
+                if suggestions:
+                    try:
+                        suggestions_list.addItems(tuple(suggestions), 0)
+                        suggestions_list.selectItemPos(0, True)
+                    except Exception:
+                        pass
+
+        _load_suggestions()
 
         class EditDialogListener(unohelper.Base, XActionListener):
             def actionPerformed(self, event):
@@ -2075,6 +2194,15 @@ EDITED VERSION:
                         self.outer._run_edit_selection(text, text_range, user_input)
                     except Exception as e:
                         log_to_file(f"EditSelection dialog failed: {str(e)}")
+                elif source == btn_copy_suggestion:
+                    try:
+                        suggestion = suggestions_list.getSelectedItem() if suggestions_list else ""
+                        if suggestion:
+                            edit_control.getModel().Text = suggestion
+                    except Exception:
+                        pass
+                elif source == btn_regen_suggestions:
+                    _load_suggestions()
 
             def __init__(self, outer):
                 self.outer = outer
@@ -2086,6 +2214,16 @@ EDITED VERSION:
         if btn_send:
             try:
                 btn_send.addActionListener(listener)
+            except Exception:
+                pass
+        if btn_copy_suggestion:
+            try:
+                btn_copy_suggestion.addActionListener(listener)
+            except Exception:
+                pass
+        if btn_regen_suggestions:
+            try:
+                btn_regen_suggestions.addActionListener(listener)
             except Exception:
                 pass
 
