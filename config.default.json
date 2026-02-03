@@ -24,7 +24,7 @@
     "_comment_device_management": "Device Management (configuration centralisee)",
     "enabled": true,
     "bootstrap_url": "https://bootstrap.fake-domain.name/",
-    "config_path": "/config/libreoffice/config.json",
+    "config_path": "/config/libreoffice/config.json?profile=prod",
     "device_name": "mirai-libreoffice",
     "access_token": "",
     "refresh_token": "",
