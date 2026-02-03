@@ -1830,6 +1830,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 except Exception as e:
                     log_to_file(f"Dialog prop unsupported: control={name} type={type} prop={key} error={str(e)}")
             return control
+
         label_width = WIDTH - BUTTON_WIDTH - HORI_SEP - HORI_MARGIN * 2
         add("label", "FixedText", HORI_MARGIN, VERT_MARGIN, label_width, LABEL_HEIGHT, 
             {"Label": str(message), "NoLabel": True})
@@ -3259,7 +3260,8 @@ EDITED VERSION:
                 try:
                     from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
                     ctx = uno.getComponentContext()
-                    create = ctx.getServiceManager().createInstanceWithContext
+                    def create(name):
+                        return ctx.getServiceManager().createInstanceWithContext(name, ctx)
                     dialog = create("com.sun.star.awt.UnoControlDialog")
                     dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
                     dialog.setModel(dialog_model)
