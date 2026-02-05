@@ -24,6 +24,14 @@ from com.sun.star.beans import PropertyValue
 from com.sun.star.container import XNamed
 
 
+USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/120.0"
+
+def _with_user_agent(headers=None):
+    result = dict(headers) if headers else {}
+    if "User-Agent" not in result:
+        result["User-Agent"] = USER_AGENT
+    return result
+
 def log_to_file(message):
     # Get the user's home directory
     home_directory = os.path.expanduser('~')
@@ -169,6 +177,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
         json_data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(endpoint, data=json_data, method='POST')
         req.add_header('Content-Type', 'application/json')
+        req.add_header('User-Agent', USER_AGENT)
         
         # Add authentication header
         if auth_key:
@@ -456,7 +465,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         log_to_file(f"DM bootstrap URL: {url}")
 
         try:
-            request = urllib.request.Request(url, headers={"Accept": "application/json"})
+            request = urllib.request.Request(url, headers=_with_user_agent({"Accept": "application/json"}))
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 payload = response.read().decode("utf-8")
             log_to_file(f"DM bootstrap raw response: {payload[:2000]}")
@@ -782,7 +791,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             request = urllib.request.Request(
                 token_endpoint,
                 data=encoded,
-                headers={"Content-Type": "application/x-www-form-urlencoded"}
+                headers=_with_user_agent({"Content-Type": "application/x-www-form-urlencoded"})
             )
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
                 payload = response.read().decode("utf-8")
@@ -823,7 +832,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             try:
                 request = urllib.request.Request(
                     userinfo_endpoint,
-                    headers={"Authorization": f"Bearer {access_token}"}
+                    headers=_with_user_agent({"Authorization": f"Bearer {access_token}"})
                 )
                 with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                     payload = response.read().decode("utf-8")
@@ -1223,7 +1232,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             headers = {"Content-Type": "application/json"}
             if access_token:
                 headers["Authorization"] = f"Bearer {access_token}"
-            request = urllib.request.Request(enroll_endpoint, data=json_data, headers=headers)
+            request = urllib.request.Request(enroll_endpoint, data=json_data, headers=_with_user_agent(headers))
             request.get_method = lambda: 'POST'
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 response.read()
@@ -1284,7 +1293,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             pass
 
         try:
-            request = urllib.request.Request(url, headers=headers)
+            request = urllib.request.Request(url, headers=_with_user_agent(headers))
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 payload = response.read().decode("utf-8")
             data = json.loads(payload)
@@ -1330,7 +1339,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             headers["Authorization"] = f"Bearer {api_key}"
 
         try:
-            request = urllib.request.Request(url, headers=headers)
+            request = urllib.request.Request(url, headers=_with_user_agent(headers))
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 payload = response.read().decode("utf-8")
             data = json.loads(payload)
@@ -1465,7 +1474,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             else:
                 url = endpoint + "/" + path
         try:
-            request = urllib.request.Request(url, headers=headers)
+            request = urllib.request.Request(url, headers=_with_user_agent(headers))
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=5) as response:
                 if response.status < 200 or response.status >= 300:
                     return False
@@ -1532,7 +1541,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         try:
             json_data = json.dumps(data).encode("utf-8")
-            request = urllib.request.Request(url, data=json_data, headers=headers)
+            request = urllib.request.Request(url, data=json_data, headers=_with_user_agent(headers))
             request.get_method = lambda: 'POST'
             with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
                 payload = response.read().decode("utf-8")
@@ -1672,7 +1681,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             pass
         
         # Note: method='POST' is implicit when data is provided
-        request = urllib.request.Request(url, data=json_data, headers=headers)
+        request = urllib.request.Request(url, data=json_data, headers=_with_user_agent(headers))
         request.get_method = lambda: 'POST'
         return request
 
