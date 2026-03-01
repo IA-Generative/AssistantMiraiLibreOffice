@@ -23,3 +23,5 @@ log.txt
 
 # Temporary files
 *.tmp
+
+config.default.json
