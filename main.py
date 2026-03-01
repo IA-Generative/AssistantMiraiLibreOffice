@@ -205,7 +205,11 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
         
-        with urllib.request.urlopen(req, context=ssl_context, timeout=5) as response:
+        if hasattr(config, "_urlopen"):
+            response = config._urlopen(req, context=ssl_context, timeout=5)
+        else:
+            response = urllib.request.urlopen(req, context=ssl_context, timeout=5)
+        with response as response:
             response_status = response.status
             response_headers = dict(response.headers)
             response_body = response.read().decode('utf-8') if response.readable() else ""
@@ -249,6 +253,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._models_cache_key = None
         self._models_cache_loaded_at = 0
         self._models_cache_ttl = 60
+        self._fetching_config = False
         self._auth_prompt_in_progress = False
         self._auth_prompted_at = 0
         self._edit_dialog = None
@@ -288,6 +293,11 @@ class MainJob(unohelper.Base, XJobExecutor):
             self._ensure_device_management_state()
         except Exception as e:
             log_to_file(f"Failed to initialize device management: {str(e)}")
+
+        try:
+            self._check_proxy_consistency()
+        except Exception as e:
+            log_to_file(f"Failed to check proxy consistency: {str(e)}")
     
     def _ensure_extension_uuid(self):
         """Ensure extension has a unique UUID, generate if missing."""
@@ -452,6 +462,9 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not force and not self._device_management_enabled():
             log_to_file("DM config fetch skipped: device management disabled")
             return None
+        if self._fetching_config:
+            log_to_file("DM config fetch skipped: recursion guard active")
+            return None
         now = time.time()
         if self.config_cache and (now - self.config_loaded_at) < self.config_ttl:
             return self.config_cache
@@ -464,9 +477,10 @@ class MainJob(unohelper.Base, XJobExecutor):
         url = base_url.rstrip("/") + "/" + config_path.lstrip("/")
         log_to_file(f"DM bootstrap URL: {url}")
 
+        self._fetching_config = True
         try:
             request = urllib.request.Request(url, headers=_with_user_agent({"Accept": "application/json"}))
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=True) as response:
                 payload = response.read().decode("utf-8")
             log_to_file(f"DM bootstrap raw response: {payload[:2000]}")
             config_data = json.loads(payload)
@@ -484,6 +498,8 @@ class MainJob(unohelper.Base, XJobExecutor):
             log_to_file(f"Failed to fetch device management config: URL error {e.reason}")
         except Exception as e:
             log_to_file(f"Failed to fetch device management config: {str(e)}")
+        finally:
+            self._fetching_config = False
         return None
 
     def _get_setting(self, key):
@@ -793,7 +809,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 data=encoded,
                 headers=_with_user_agent({"Content-Type": "application/x-www-form-urlencoded"})
             )
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
                 payload = response.read().decode("utf-8")
             return json.loads(payload)
         except Exception as e:
@@ -834,7 +850,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                     userinfo_endpoint,
                     headers=_with_user_agent({"Authorization": f"Bearer {access_token}"})
                 )
-                with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
+                with self._urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                     payload = response.read().decode("utf-8")
                 info = json.loads(payload)
                 email = info.get("email") or info.get("preferred_username")
@@ -1190,6 +1206,10 @@ class MainJob(unohelper.Base, XJobExecutor):
         config_data = self._fetch_config()
         if not config_data:
             return
+        try:
+            self._sync_keycloak_from_config(config_data)
+        except Exception:
+            pass
 
         access_token = self._ensure_access_token(config_data)
         keycloak = self._keycloak_config(config_data)
@@ -1234,7 +1254,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 headers["Authorization"] = f"Bearer {access_token}"
             request = urllib.request.Request(enroll_endpoint, data=json_data, headers=_with_user_agent(headers))
             request.get_method = lambda: 'POST'
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 response.read()
             self.set_config("enrolled", True)
         except Exception as e:
@@ -1263,6 +1283,415 @@ class MainJob(unohelper.Base, XJobExecutor):
         if isinstance(value, (int, float)):
             return value != 0
         return False
+
+    def _get_proxy_config(self):
+        enabled = self._as_bool(self._get_config_from_file("proxy_enabled", False))
+        proxy_url = str(self._get_config_from_file("proxy_url", "")).strip()
+        username = str(self._get_config_from_file("proxy_username", "")).strip()
+        password = str(self._get_config_from_file("proxy_password", ""))
+        allow_insecure = self._as_bool(self._get_config_from_file("proxy_allow_insecure_ssl", False))
+        return {
+            "enabled": enabled,
+            "proxy_url": proxy_url,
+            "username": username,
+            "password": password,
+            "allow_insecure_ssl": allow_insecure,
+        }
+
+    def _normalize_proxy_url(self, proxy_url):
+        proxy_url = (proxy_url or "").strip()
+        if not proxy_url:
+            return ""
+        if "://" not in proxy_url:
+            proxy_url = "http://" + proxy_url
+        try:
+            parsed = urllib.parse.urlparse(proxy_url)
+            host = parsed.hostname or ""
+            port = parsed.port
+            if not host:
+                return ""
+            if port:
+                return f"{parsed.scheme}://{host}:{port}"
+            return f"{parsed.scheme}://{host}"
+        except Exception:
+            return proxy_url
+
+    def _build_proxy_opener(self, proxy_cfg, context=None):
+        if not proxy_cfg.get("enabled"):
+            log_to_file("[PROXY] disabled")
+            handlers = []
+            if context is not None:
+                handlers.append(urllib.request.HTTPSHandler(context=context))
+            return urllib.request.build_opener(*handlers)
+        proxy_url = self._normalize_proxy_url(proxy_cfg.get("proxy_url", ""))
+        if not proxy_url:
+            log_to_file("[PROXY] enabled but proxy_url is empty/invalid")
+            handlers = []
+            if context is not None:
+                handlers.append(urllib.request.HTTPSHandler(context=context))
+            return urllib.request.build_opener(*handlers)
+        handlers = []
+        if context is not None:
+            handlers.append(urllib.request.HTTPSHandler(context=context))
+        proxy_map = {"http": proxy_url, "https": proxy_url}
+        handlers.append(urllib.request.ProxyHandler(proxy_map))
+        username = proxy_cfg.get("username", "")
+        password = proxy_cfg.get("password", "")
+        if username and password:
+            try:
+                pwd_mgr = urllib.request.HTTPPasswordMgrWithDefaultRealm()
+                pwd_mgr.add_password(None, proxy_url, username, password)
+                handlers.append(urllib.request.ProxyBasicAuthHandler(pwd_mgr))
+                handlers.append(urllib.request.ProxyDigestAuthHandler(pwd_mgr))
+                log_to_file("[PROXY] auth enabled (username+password)")
+            except Exception:
+                pass
+        else:
+            log_to_file("[PROXY] auth disabled (empty username or password)")
+        try:
+            if username and password:
+                parsed = urllib.parse.urlparse(proxy_url)
+                host = parsed.hostname or ""
+                port = f":{parsed.port}" if parsed.port else ""
+                proxy_url_auth = f"{parsed.scheme}://{username}:{password}@{host}{port}"
+                proxy_map = {"http": proxy_url_auth, "https": proxy_url_auth}
+                handlers[-1] = urllib.request.ProxyHandler(proxy_map)
+        except Exception:
+            pass
+        log_to_file(f"[PROXY] using {proxy_url}")
+        return urllib.request.build_opener(*handlers)
+
+    def _urlopen(self, request, context=None, timeout=None, use_proxy=True):
+        proxy_cfg = self._get_proxy_config() if use_proxy else {
+            "enabled": False,
+            "proxy_url": "",
+            "username": "",
+            "password": "",
+            "allow_insecure_ssl": False,
+        }
+        allow_insecure = bool(proxy_cfg.get("allow_insecure_ssl"))
+        try:
+            url = request.full_url if hasattr(request, "full_url") else str(request)
+        except Exception:
+            url = "<unknown>"
+        if proxy_cfg.get("enabled"):
+            username = proxy_cfg.get("username", "")
+            password = proxy_cfg.get("password", "")
+            if username and password:
+                try:
+                    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
+                    if not request.has_header("Proxy-Authorization"):
+                        request.add_header("Proxy-Authorization", f"Basic {token}")
+                except Exception:
+                    pass
+        if context is None:
+            context = self.get_ssl_context()
+        opener = self._build_proxy_opener(proxy_cfg, context=context)
+        log_to_file(
+            f"[PROXY] request url={url} enabled={proxy_cfg.get('enabled')} "
+            f"insecure_ssl={allow_insecure} use_proxy={use_proxy}"
+        )
+        if timeout is None:
+            return opener.open(request)
+        return opener.open(request, timeout=timeout)
+
+    def _test_proxy_connection(self, proxy_cfg):
+        test_url = "https://example.com"
+        try:
+            log_to_file(f"[PROXY][TEST] start url={test_url}")
+            request = urllib.request.Request(test_url, headers=_with_user_agent({"Accept": "application/json"}))
+            context = self.get_ssl_context() if proxy_cfg.get("allow_insecure_ssl") else ssl.create_default_context()
+            opener = self._build_proxy_opener(proxy_cfg, context=context)
+            log_to_file(f"[PROXY][TEST] connect allow_insecure_ssl={bool(proxy_cfg.get('allow_insecure_ssl'))}")
+            with opener.open(request, timeout=8) as response:
+                log_to_file(f"[PROXY][TEST] success status={response.status} url={test_url}")
+                return True, f"Connexion OK ({response.status}) - URL: {test_url}"
+        except Exception as e:
+            log_to_file(f"[PROXY][TEST] error url={test_url} err={str(e)}")
+            return False, f"Erreur: {str(e)} - URL: {test_url}"
+
+    def _lo_proxy_settings(self):
+        settings = {
+            "enabled": False,
+            "host": "",
+            "port": "",
+            "username": "",
+            "password": "",
+            "type": 0,
+        }
+        try:
+            provider = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.configuration.ConfigurationProvider", self.ctx
+            )
+            node = PropertyValue()
+            node.Name = "nodepath"
+            node.Value = "/org.openoffice.Inet/Settings"
+            access = provider.createInstanceWithArguments(
+                "com.sun.star.configuration.ConfigurationAccess", (node,)
+            )
+            proxy_type = getattr(access, "ooInetProxyType", 0)
+            settings["type"] = int(proxy_type) if proxy_type is not None else 0
+            settings["enabled"] = settings["type"] == 1
+            http_host = getattr(access, "ooInetProxyHTTPName", "") or ""
+            http_port = getattr(access, "ooInetProxyHTTPPort", "") or ""
+            https_host = getattr(access, "ooInetProxyHTTPSName", "") or ""
+            https_port = getattr(access, "ooInetProxyHTTPSPort", "") or ""
+            host = http_host or https_host or ""
+            port = http_port or https_port or ""
+            settings["host"] = str(host)
+            settings["port"] = str(port)
+            settings["username"] = str(getattr(access, "ooInetProxyUser", "") or "")
+            settings["password"] = str(getattr(access, "ooInetProxyPassword", "") or "")
+        except Exception as e:
+            log_to_file(f"Failed to read LibreOffice proxy settings: {str(e)}")
+        return settings
+
+    def _proxy_mismatch(self):
+        cfg = self._get_proxy_config()
+        lo = self._lo_proxy_settings()
+        mismatches = []
+        if cfg["enabled"] != lo["enabled"]:
+            mismatches.append("enabled")
+        cfg_host = ""
+        cfg_port = ""
+        if cfg["proxy_url"]:
+            normalized = self._normalize_proxy_url(cfg["proxy_url"])
+            try:
+                parsed = urllib.parse.urlparse(normalized)
+                cfg_host = parsed.hostname or ""
+                cfg_port = str(parsed.port) if parsed.port else ""
+            except Exception:
+                pass
+        if cfg["enabled"] and lo["enabled"]:
+            if cfg_host and lo["host"] and cfg_host != lo["host"]:
+                mismatches.append("host")
+            if cfg_port and lo["port"] and cfg_port != lo["port"]:
+                mismatches.append("port")
+            if cfg["username"] and lo["username"] and cfg["username"] != lo["username"]:
+                mismatches.append("username")
+        return mismatches, cfg, lo
+
+    def _check_proxy_consistency(self):
+        checked_once = self._as_bool(self._get_config_from_file("proxy_consistency_checked_once", False))
+        if checked_once:
+            log_to_file("[PROXY] consistency check skipped (already checked)")
+            return
+        mismatches, cfg, lo = self._proxy_mismatch()
+        if not mismatches:
+            try:
+                self.set_config("proxy_consistency_checked_once", True)
+            except Exception:
+                pass
+            return
+        msg = (
+            "Les paramètres proxy de LibreOffice sont différents des préférences de MIrAI.\n\n"
+            "Voulez-vous vérifier et valider les informations de proxy ?"
+        )
+        if self._confirm_message("Proxy", msg):
+            try:
+                self.proxy_settings_box("Proxy")
+            except Exception:
+                pass
+        try:
+            self.set_config("proxy_consistency_checked_once", True)
+        except Exception:
+            pass
+
+    def proxy_settings_box(self, title="Proxy", x=None, y=None):
+        WIDTH = 620
+        HORI_MARGIN = VERT_MARGIN = 10
+        LABEL_HEIGHT = 18
+        EDIT_HEIGHT = 24
+        BUTTON_WIDTH = 130
+        BUTTON_HEIGHT = 26
+        HORI_SEP = 8
+        VERT_SEP = 6
+        import uno
+        from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+        from com.sun.star.awt.PushButtonType import OK, CANCEL
+        from com.sun.star.util.MeasureUnit import TWIP
+        ctx = uno.getComponentContext()
+        def create(name):
+            return ctx.getServiceManager().createInstanceWithContext(name, ctx)
+        dialog = create("com.sun.star.awt.UnoControlDialog")
+        dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
+        dialog.setModel(dialog_model)
+        dialog.setVisible(False)
+        dialog.setTitle(title)
+
+        def add(name, type, x_, y_, width_, height_, props):
+            try:
+                model = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type + "Model")
+            except Exception as e:
+                log_to_file(f"Dialog control type unsupported: name={name} type={type} error={str(e)}")
+                return None
+            try:
+                dialog_model.insertByName(name, model)
+            except Exception as e:
+                log_to_file(f"Dialog insert failed: name={name} type={type} error={str(e)}")
+                return None
+            control = dialog.getControl(name)
+            try:
+                control.setPosSize(x_, y_, width_, height_, POSSIZE)
+            except Exception as e:
+                log_to_file(f"Dialog size failed: name={name} type={type} error={str(e)}")
+            for key, value in props.items():
+                try:
+                    setattr(model, key, value)
+                except Exception as e:
+                    log_to_file(f"Dialog prop unsupported: control={name} type={type} prop={key} error={str(e)}")
+            return control
+
+        cfg = self._get_proxy_config()
+        lo = self._lo_proxy_settings()
+        proxy_url_value = cfg["proxy_url"]
+        if not proxy_url_value and lo["host"]:
+            proxy_url_value = f"{lo['host']}:{lo['port']}" if lo["port"] else lo["host"]
+
+        HEIGHT = VERT_MARGIN * 2 + (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP) * 5 + BUTTON_HEIGHT * 2 + VERT_SEP * 6 + 20
+        dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+
+        current_y = VERT_MARGIN
+        add("label_proxy", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+            {"Label": "Paramètres proxy MIrAI", "NoLabel": True})
+        current_y += LABEL_HEIGHT + VERT_SEP
+
+        add("label_enabled", "FixedText", HORI_MARGIN, current_y, 180, LABEL_HEIGHT,
+            {"Label": "Utiliser un proxy:", "NoLabel": True})
+        chk_enabled = add("chk_enabled", "CheckBox", HORI_MARGIN + 190, current_y, 50, LABEL_HEIGHT,
+            {"State": 1 if cfg["enabled"] else 0})
+        current_y += LABEL_HEIGHT + VERT_SEP
+
+        add("label_url", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+            {"Label": "Proxy (host:port):", "NoLabel": True})
+        current_y += LABEL_HEIGHT + VERT_SEP
+        edit_url = add("edit_url", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
+            {"Text": proxy_url_value})
+        current_y += EDIT_HEIGHT + VERT_SEP * 2
+
+        add("label_user", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+            {"Label": "Login proxy (optionnel):", "NoLabel": True})
+        current_y += LABEL_HEIGHT + VERT_SEP
+        edit_user = add("edit_user", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
+            {"Text": cfg["username"]})
+        current_y += EDIT_HEIGHT + VERT_SEP * 2
+
+        add("label_pass", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+            {"Label": "Mot de passe proxy (optionnel):", "NoLabel": True})
+        current_y += LABEL_HEIGHT + VERT_SEP
+        edit_pass = add("edit_pass", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
+            {"Text": cfg["password"], "EchoChar": ord("*")})
+        current_y += EDIT_HEIGHT + VERT_SEP * 2
+
+        add("label_insecure", "FixedText", HORI_MARGIN, current_y, 240, LABEL_HEIGHT,
+            {"Label": "Autoriser HTTPS sans vérification (-k):", "NoLabel": True})
+        chk_insecure = add("chk_insecure", "CheckBox", HORI_MARGIN + 250, current_y, 50, LABEL_HEIGHT,
+            {"State": 1 if cfg["allow_insecure_ssl"] else 0})
+        current_y += LABEL_HEIGHT + VERT_SEP * 2
+
+        lo_text = "LibreOffice: "
+        if lo["enabled"] and lo["host"]:
+            lo_text += f"{lo['host']}:{lo['port']}" if lo["port"] else lo["host"]
+        else:
+            lo_text += "Proxy désactivé"
+        add("label_lo", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+            {"Label": lo_text, "NoLabel": True})
+        current_y += LABEL_HEIGHT + VERT_SEP * 2
+
+        btn_test = add("btn_test", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH + 20, BUTTON_HEIGHT,
+            {"Label": "Tester connexion", "Name": "test_proxy"})
+        btn_copy = add("btn_copy", "Button", HORI_MARGIN + BUTTON_WIDTH + 30, current_y, BUTTON_WIDTH + 30, BUTTON_HEIGHT,
+            {"Label": "Copier LibreOffice", "Name": "copy_lo"})
+        current_y += BUTTON_HEIGHT + VERT_SEP * 2
+
+        add("btn_ok", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
+            {"PushButtonType": OK, "DefaultButton": True, "Label": "OK"})
+        add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
+            {"PushButtonType": CANCEL, "Label": "Annuler"})
+
+        frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
+        window = frame.getContainerWindow() if frame else None
+        dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
+        if not x is None and not y is None:
+            ps = dialog.convertSizeToPixel(uno.createUnoStruct("com.sun.star.awt.Size", x, y), TWIP)
+            _x, _y = ps.Width, ps.Height
+        elif window:
+            ps = window.getPosSize()
+            _x = ps.Width / 2 - WIDTH / 2
+            _y = ps.Height / 2 - HEIGHT / 2
+        dialog.setPosSize(_x, _y, 0, 0, POS)
+
+        class ProxyActionListener(unohelper.Base, XActionListener):
+            def __init__(self, outer):
+                self.outer = outer
+            def actionPerformed(self, event):
+                try:
+                    command = getattr(event, "ActionCommand", "") or ""
+                except Exception:
+                    command = ""
+                if not command:
+                    try:
+                        source = getattr(event, "Source", None)
+                        command = getattr(source.getModel(), "Name", "") if source else ""
+                    except Exception:
+                        command = ""
+                if command == "copy_lo":
+                    try:
+                        if lo["enabled"] and lo["host"]:
+                            url = f"{lo['host']}:{lo['port']}" if lo["port"] else lo["host"]
+                            edit_url.getModel().Text = url
+                            chk_enabled.getModel().State = 1
+                        else:
+                            chk_enabled.getModel().State = 0
+                    except Exception:
+                        pass
+                elif command == "test_proxy":
+                    try:
+                        proxy_cfg = {
+                            "enabled": bool(chk_enabled.getModel().State),
+                            "proxy_url": str(edit_url.getModel().Text).strip(),
+                            "username": str(edit_user.getModel().Text).strip(),
+                            "password": str(edit_pass.getModel().Text),
+                            "allow_insecure_ssl": bool(chk_insecure.getModel().State),
+                        }
+                        ok, message = self.outer._test_proxy_connection(proxy_cfg)
+                        self.outer._show_message("Test proxy", message if ok else f"Échec: {message}")
+                    except Exception as e:
+                        self.outer._show_message("Test proxy", f"Échec: {str(e)}")
+            def disposing(self, event):
+                return
+
+        listener = ProxyActionListener(self)
+        if btn_test:
+            try:
+                btn_test.addActionListener(listener)
+                btn_test.getModel().ActionCommand = "test_proxy"
+            except Exception:
+                pass
+        if btn_copy:
+            try:
+                btn_copy.addActionListener(listener)
+                btn_copy.getModel().ActionCommand = "copy_lo"
+            except Exception:
+                pass
+
+        result = {}
+        if dialog.execute():
+            try:
+                result["proxy_enabled"] = bool(chk_enabled.getModel().State)
+                result["proxy_url"] = str(edit_url.getModel().Text).strip()
+                result["proxy_username"] = str(edit_user.getModel().Text).strip()
+                result["proxy_password"] = str(edit_pass.getModel().Text)
+                result["proxy_allow_insecure_ssl"] = bool(chk_insecure.getModel().State)
+                self.set_config("proxy_enabled", result["proxy_enabled"])
+                self.set_config("proxy_url", result["proxy_url"])
+                self.set_config("proxy_username", result["proxy_username"])
+                self.set_config("proxy_password", result["proxy_password"])
+                self.set_config("proxy_allow_insecure_ssl", result["proxy_allow_insecure_ssl"])
+            except Exception:
+                pass
+        dialog.dispose()
+        return result
 
     def _split_endpoint_api_path(self, endpoint, is_openwebui):
         endpoint = (endpoint or "").rstrip("/")
@@ -1294,7 +1723,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         try:
             request = urllib.request.Request(url, headers=_with_user_agent(headers))
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 payload = response.read().decode("utf-8")
             data = json.loads(payload)
         except Exception as e:
@@ -1340,7 +1769,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         try:
             request = urllib.request.Request(url, headers=_with_user_agent(headers))
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
                 payload = response.read().decode("utf-8")
             data = json.loads(payload)
         except Exception as e:
@@ -1421,6 +1850,26 @@ class MainJob(unohelper.Base, XJobExecutor):
             settings.pop("owuiEndpoint", None)
         if "tokenOWUI" in settings:
             settings.pop("tokenOWUI", None)
+        self._sync_keycloak_from_settings(settings, config_data)
+        # Normalize keycloak fields if provided at top-level settings
+        try:
+            if "keycloakRealm" not in settings:
+                for k in ("realm", "keycloak_realm"):
+                    if k in settings and str(settings.get(k) or "").strip():
+                        settings["keycloakRealm"] = str(settings.get(k)).strip()
+                        break
+            if "keycloakIssuerUrl" not in settings:
+                for k in ("issuerUrl", "issuerURL", "issuer_url", "baseUrl", "base_url", "keycloakIssuerUrl"):
+                    if k in settings and str(settings.get(k) or "").strip():
+                        settings["keycloakIssuerUrl"] = str(settings.get(k)).strip()
+                        break
+            if "keycloakClientId" not in settings:
+                for k in ("client_id", "clientId", "clientID", "keycloakClientId"):
+                    if k in settings and str(settings.get(k) or "").strip():
+                        settings["keycloakClientId"] = str(settings.get(k)).strip()
+                        break
+        except Exception:
+            pass
         config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
         bootstrap_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
         normalized_url = f"{bootstrap_url.rstrip('/')}/{config_path.lstrip('/')}"
@@ -1428,7 +1877,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         log_to_file(f"Reload config: url={normalized_url} keys={list(settings.keys())}")
         synced = []
         skipped = []
-        for meta_key in ("lastversion", "updateUrl", "configVersion"):
+        for meta_key in ("lastversion", "updateUrl", "configVersion", "environment"):
             if isinstance(config_data, dict) and meta_key in config_data:
                 meta_val = config_data.get(meta_key)
                 if meta_val is None or (isinstance(meta_val, str) and meta_val.strip() == ""):
@@ -1442,6 +1891,13 @@ class MainJob(unohelper.Base, XJobExecutor):
             if value is None or (isinstance(value, str) and value.strip() == ""):
                 skipped.append(key)
                 continue
+            if key in ("proxy_url", "proxy_username", "proxy_password"):
+                try:
+                    if isinstance(value, str) and len(value.strip()) < 5:
+                        skipped.append(key)
+                        continue
+                except Exception:
+                    pass
             try:
                 self.set_config(key, value)
                 synced.append(key)
@@ -1451,6 +1907,78 @@ class MainJob(unohelper.Base, XJobExecutor):
         if skipped:
             log_to_file(f"Device management config skipped empty values: {skipped}")
         return settings
+
+    def _sync_keycloak_from_settings(self, settings, config_data=None):
+        keycloak_src = None
+        if isinstance(settings, dict):
+            if isinstance(settings.get("keycloak"), dict):
+                keycloak_src = settings.get("keycloak")
+            elif isinstance(settings.get("endpoints"), dict) and isinstance(settings.get("endpoints", {}).get("keycloak"), dict):
+                keycloak_src = settings.get("endpoints", {}).get("keycloak")
+        if keycloak_src is None and isinstance(config_data, dict):
+            candidate = config_data.get("keycloak")
+            if not isinstance(candidate, dict):
+                endpoints = config_data.get("endpoints", {}) if isinstance(config_data.get("endpoints", {}), dict) else {}
+                candidate = endpoints.get("keycloak")
+            if isinstance(candidate, dict):
+                keycloak_src = candidate
+        if not isinstance(keycloak_src, dict):
+            return
+        keycloak_map = {
+            "keycloakIssuerUrl": (
+                keycloak_src.get("issuerUrl")
+                or keycloak_src.get("issuerURL")
+                or keycloak_src.get("keycloakIssuerUrl")
+                or keycloak_src.get("issuer_url")
+                or keycloak_src.get("issuerUri")
+                or keycloak_src.get("issuerURI")
+                or keycloak_src.get("issuer")
+                or keycloak_src.get("baseUrl")
+                or keycloak_src.get("base_url")
+                or keycloak_src.get("url")
+            ),
+            "keycloakRealm": (
+                keycloak_src.get("realm")
+                or keycloak_src.get("keycloakRealm")
+                or keycloak_src.get("keycloak_realm")
+            ),
+            "keycloakClientId": (
+                keycloak_src.get("client_id")
+                or keycloak_src.get("clientId")
+                or keycloak_src.get("clientID")
+                or keycloak_src.get("keycloakClientId")
+            ),
+            "keycloak_client_secret": (
+                keycloak_src.get("client_secret")
+                or keycloak_src.get("clientSecret")
+                or keycloak_src.get("keycloakClientSecret")
+            ),
+        }
+        for target_key, value in keycloak_map.items():
+            if value is None:
+                continue
+            text = str(value).strip()
+            if not text:
+                continue
+            try:
+                current = str(self._get_config_from_file(target_key, "") or "").strip()
+            except Exception:
+                current = ""
+            if not current:
+                try:
+                    self.set_config(target_key, text)
+                except Exception:
+                    pass
+
+    def _sync_keycloak_from_config(self, config_data):
+        settings = None
+        if isinstance(config_data, dict):
+            config_obj = config_data.get("config")
+            if isinstance(config_obj, dict):
+                settings = config_obj
+            else:
+                settings = self._select_settings(config_data)
+        self._sync_keycloak_from_settings(settings if isinstance(settings, dict) else {}, config_data=config_data)
 
     def _get_cached_models(self, endpoint, api_key, is_openwebui):
         key = (endpoint, api_key, bool(is_openwebui))
@@ -1475,7 +2003,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 url = endpoint + "/" + path
         try:
             request = urllib.request.Request(url, headers=_with_user_agent(headers))
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=5) as response:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=5) as response:
                 if response.status < 200 or response.status >= 300:
                     return False
                 payload = response.read().decode("utf-8")
@@ -1543,7 +2071,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             json_data = json.dumps(data).encode("utf-8")
             request = urllib.request.Request(url, data=json_data, headers=_with_user_agent(headers))
             request.get_method = lambda: 'POST'
-            with urllib.request.urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
                 payload = response.read().decode("utf-8")
             response_data = json.loads(payload)
             choice = None
@@ -1706,6 +2234,9 @@ class MainJob(unohelper.Base, XJobExecutor):
         Create an SSL context that doesn't verify certificates.
         This is needed for some environments where SSL certificates are not properly configured.
         """
+        allow_insecure = self._as_bool(self._get_config_from_file("proxy_allow_insecure_ssl", False))
+        if not allow_insecure:
+            return ssl.create_default_context()
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -1725,7 +2256,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         log_to_file(f"Request method: {request.get_method()}")
         
         try:
-            with urllib.request.urlopen(request, context=ssl_context) as response:
+            with self._urlopen(request, context=ssl_context) as response:
                 log_to_file(f"Response status: {response.status}")
                 log_to_file(f"Response headers: {response.headers}")
                 
@@ -1872,8 +2403,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         if len(original_text.strip()) == 0:
             original_text = ""
 
-        wait_dialog = {"dialog": None, "bg": None}
-        wait_buffer = {"text": ""}
+        wait_dialog = {"dialog": None, "bg": None, "toolkit": None}
+        wait_buffer = {"text": "Contacte MIrAI..."}
         def _show_wait():
             try:
                 from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
@@ -1892,7 +2423,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 dialog.setTitle("MIrAI")
                 dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
                 try:
-                    dialog_model.BackgroundColor = 0xFFFFFF
+                    dialog_model.BackgroundColor = 0xE6F7E6
                 except Exception:
                     pass
                 def add(name, type, x_, y_, width_, height_, props):
@@ -1914,18 +2445,19 @@ class MainJob(unohelper.Base, XJobExecutor):
                     {"Label": "MIrAI réfléchi...", "NoLabel": True})
                 bg = add("edit_wait_bg", "Edit", HORI_MARGIN, VERT_MARGIN + LABEL_HEIGHT + 6,
                     WIDTH - HORI_MARGIN * 2, BG_HEIGHT,
-                    {"Text": "", "MultiLine": True, "ReadOnly": True})
+                    {"Text": wait_buffer["text"], "MultiLine": True, "ReadOnly": True})
                 if bg:
                     try:
-                        bg.getModel().BackgroundColor = 0xFFFFFF
-                        bg.getModel().TextColor = 0xDDDDDD
+                        bg.getModel().BackgroundColor = 0xE6F7E6
+                        bg.getModel().TextColor = 0x2F5D2F
                         bg.getModel().FontHeight = 6
                         bg.getModel().Border = 0
                     except Exception:
                         pass
                 frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
                 window = frame.getContainerWindow() if frame else None
-                dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
+                toolkit = create("com.sun.star.awt.Toolkit")
+                dialog.createPeer(toolkit, window)
                 if window:
                     ps = window.getPosSize()
                     _x = ps.Width / 2 - WIDTH / 2 + int(ps.Width * 0.15)
@@ -1934,6 +2466,17 @@ class MainJob(unohelper.Base, XJobExecutor):
                 dialog.setVisible(True)
                 wait_dialog["dialog"] = dialog
                 wait_dialog["bg"] = bg
+                wait_dialog["toolkit"] = toolkit
+                if bg:
+                    try:
+                        bg.getModel().Text = wait_buffer["text"]
+                    except Exception:
+                        pass
+                try:
+                    toolkit.processEventsToIdle()
+                except Exception:
+                    pass
+                time.sleep(0.05)
             except Exception:
                 pass
 
@@ -1945,6 +2488,9 @@ class MainJob(unohelper.Base, XJobExecutor):
                 if len(wait_buffer["text"]) > 1200:
                     wait_buffer["text"] = wait_buffer["text"][-1200:]
                 wait_dialog["bg"].getModel().Text = wait_buffer["text"]
+                if wait_dialog.get("toolkit"):
+                    wait_dialog["toolkit"].processEventsToIdle()
+                time.sleep(0.01)
             except Exception:
                 pass
 
@@ -2903,7 +3449,7 @@ EDITED VERSION:
         num_fields = len(field_specs)
         total_field_height = num_fields * (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP * 2) + TEST_ROW_HEIGHT
         desc_block_height = LABEL_HEIGHT + VERT_SEP + DESC_HEIGHT + VERT_SEP * 2
-        HEIGHT = VERT_MARGIN * 2 + IMAGE_HEIGHT + VERT_SEP + total_field_height + desc_block_height + LABEL_HEIGHT + BUTTON_HEIGHT + VERT_SEP * 4 + EXTRA_BOTTOM
+        HEIGHT = VERT_MARGIN * 2 + IMAGE_HEIGHT + VERT_SEP + total_field_height + desc_block_height + LABEL_HEIGHT + BUTTON_HEIGHT * 2 + VERT_SEP * 6 + EXTRA_BOTTOM
         dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
 
         def add(name, type, x_, y_, width_, height_, props):
@@ -2945,6 +3491,18 @@ EDITED VERSION:
                         "Border": 0,
                         "ScaleImage": True
                     })
+                proxy_btn_width = 70
+                proxy_btn_height = LABEL_HEIGHT
+                proxy_btn_x = WIDTH - HORI_MARGIN - 69
+                proxy_btn_y = VERT_MARGIN + IMAGE_HEIGHT + VERT_SEP
+                add("btn_proxy", "Button", proxy_btn_x, proxy_btn_y,
+                    proxy_btn_width, proxy_btn_height, {
+                        "Label": "Proxy",
+                        "Name": "proxy_settings",
+                        "Tabstop": True,
+                        "Enabled": True,
+                        "FontHeight": 8
+                    })
                 current_y += IMAGE_HEIGHT + VERT_SEP * 2
             except Exception:
                 pass
@@ -2959,7 +3517,7 @@ EDITED VERSION:
                 {"Label": field["label"], "NoLabel": True})
             if field.get("name") == "api_key":
                 add("toggle_api_key", "Button", HORI_MARGIN + label_width - 9, current_y, 70, LABEL_HEIGHT,
-                    {"Label": "Révéler"})
+                    {"Label": "Révéler", "FontHeight": 8})
             current_y += LABEL_HEIGHT + VERT_SEP
             if field.get("type") == "list":
                 items = field.get("items") or []
@@ -3029,14 +3587,15 @@ EDITED VERSION:
             {"PushButtonType": OK, "DefaultButton": True, "Label": "OK"})
         add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
             {"PushButtonType": CANCEL, "Label": "Annuler"})
-        keycloak_width = BUTTON_WIDTH - 12
-        reload_width = BUTTON_WIDTH + 52
-        keycloak_x = HORI_MARGIN + (BUTTON_WIDTH + HORI_SEP) * 2
-        reload_x = keycloak_x + keycloak_width + HORI_SEP
+        keycloak_width = 96
+        reload_width = 110
+        reload_x = WIDTH - HORI_MARGIN - reload_width
+        keycloak_x = reload_x - HORI_SEP - keycloak_width
         add("btn_keycloak", "Button", keycloak_x, current_y,
-            keycloak_width, BUTTON_HEIGHT, {"Label": "🔐 Login", "Name": "keycloak_login", "Tabstop": True, "Enabled": True})
+            keycloak_width, BUTTON_HEIGHT, {"Label": "🔐 Login", "Name": "keycloak_login", "Tabstop": True, "Enabled": True, "FontHeight": 8})
         add("btn_reload_config", "Button", reload_x,
-            current_y, reload_width, BUTTON_HEIGHT, {"Label": "🔄 Recharge configuration", "Name": "reload_config", "Tabstop": True, "Enabled": True})
+            current_y, reload_width, BUTTON_HEIGHT, {"Label": "🔄 Config", "Name": "reload_config", "Tabstop": True, "Enabled": True, "FontHeight": 8})
+        dialog.setPosSize(0, 0, WIDTH, current_y + BUTTON_HEIGHT + 20, SIZE)
 
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
@@ -3067,6 +3626,7 @@ EDITED VERSION:
         if not api_key_plain_control:
             api_key_plain_control = dialog.getControl("edit_api_key_plain")
         btn_reload_config = dialog.getControl("btn_reload_config")
+        btn_proxy = dialog.getControl("btn_proxy")
         btn_test_token = dialog.getControl("btn_test_token")
         if not btn_reload_config:
             log_to_file("Reload config button not found in dialog")
@@ -3260,6 +3820,11 @@ EDITED VERSION:
                     _test_token_and_refresh()
                 elif command == "reload_config":
                     pass
+                elif command == "proxy_settings":
+                    try:
+                        self.outer.proxy_settings_box("Proxy")
+                    except Exception:
+                        pass
 
         def _do_reload_config():
             log_to_file("Reload config: button clicked")
@@ -3480,6 +4045,16 @@ EDITED VERSION:
                 btn_reload_config.getModel().ActionCommand = "reload_config"
             except Exception as e:
                 log_to_file(f"Reload config ActionCommand set failed: {str(e)}")
+
+        if btn_proxy:
+            try:
+                btn_proxy.addActionListener(listener)
+            except Exception:
+                pass
+            try:
+                btn_proxy.getModel().ActionCommand = "proxy_settings"
+            except Exception:
+                pass
 
         # Apply model selection after peer creation
         model_control = field_controls.get("model")

@@ -160,6 +160,28 @@ Access the official mirai website (https://mirai.interieur.gouv.fr) from the ext
 
 Configure the extension to your needs: LLM base URL(s), default model(s), API token(s), and advanced options.
 
+**Proxy support**
+
+The extension can route all HTTP requests through a proxy (including Device Management, model discovery, and API calls). Proxy settings are available in the Preferences dialog via the **Proxy...** button.
+
+Config keys (in `config.json` / `config.default.json`):
+
+```json
+{
+  "proxy_enabled": false,
+  "proxy_url": "proxy.example.local:8080",
+  "proxy_allow_insecure_ssl": true,
+  "proxy_username": "",
+  "proxy_password": ""
+}
+```
+
+Notes:
+* If `proxy_username` or `proxy_password` is empty, proxy authentication is **not** enabled.
+* `proxy_allow_insecure_ssl` mirrors the `-k` behavior (HTTPS without certificate validation).
+* On startup, the extension checks LibreOffice proxy settings and warns if they differ from MIrAI preferences.
+* The Proxy dialog lets you test the connection and copy LibreOffice proxy values.
+
 ---
 
 ## Feature behavior
@@ -241,6 +263,7 @@ This project has gone through many iterations. Here is a summary of the most rec
 - **OpenWebUI**: full support for LLM settings (base URLs, API tokens, headers). Added diagnostics (logs/curl) for model and chat calls.
 - **Keycloak/SSO**: Authorization Code + PKCE flow with local redirect; multi‑URI handling; improved re‑login UX.
 - **Preferences UI**: simplified dialog, model dropdown, dynamic description, API status indicator, reload button, splash image, masked token with reveal toggle.
+- **Proxy support**: configurable proxy (URL, optional auth), TLS `-k` toggle, startup consistency check with LibreOffice settings, and a Proxy dialog with connection test.
 - **Editing**: new “Edit selection” dialog always on top, resizable, with send button and system close handling.
 - **Logs & diagnostics**: better network logs, HTTP error handling, user notification when token expired.
 
