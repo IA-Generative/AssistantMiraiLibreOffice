@@ -4,7 +4,7 @@ config/config.default.json
 
 # Build artifacts
 *.oxt
-!dist/*.oxt
+!dist/mirai.example.oxt
 *.pyc
 __pycache__/
 

@@ -251,6 +251,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         self.config_cache = None
         self.config_loaded_at = 0
         self.config_ttl = 300
+        self._config_last_failure_at = 0
+        self._config_failure_backoff = 30
         self._models_cache = None
         self._models_cache_key = None
         self._models_cache_loaded_at = 0
@@ -481,6 +483,16 @@ class MainJob(unohelper.Base, XJobExecutor):
         now = time.time()
         if self.config_cache and (now - self.config_loaded_at) < self.config_ttl:
             return self.config_cache
+        if (
+            not force
+            and self._config_last_failure_at
+            and (now - self._config_last_failure_at) < self._config_failure_backoff
+        ):
+            if self.config_cache:
+                log_to_file("DM config fetch skipped: backoff active, using stale cache")
+                return self.config_cache
+            log_to_file("DM config fetch skipped: backoff active after recent failure")
+            return None
 
         base_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
         if not base_url:
@@ -500,6 +512,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             if isinstance(config_data, dict):
                 self.config_cache = config_data
                 self.config_loaded_at = now
+                self._config_last_failure_at = 0
                 return config_data
         except urllib.error.HTTPError as e:
             try:
@@ -507,12 +520,18 @@ class MainJob(unohelper.Base, XJobExecutor):
             except Exception:
                 body = ""
             log_to_file(f"Failed to fetch device management config: HTTP {e.code} {e.reason} body={body[:500]}")
+            self._config_last_failure_at = now
         except urllib.error.URLError as e:
             log_to_file(f"Failed to fetch device management config: URL error {e.reason}")
+            self._config_last_failure_at = now
         except Exception as e:
             log_to_file(f"Failed to fetch device management config: {str(e)}")
+            self._config_last_failure_at = now
         finally:
             self._fetching_config = False
+        if self.config_cache:
+            log_to_file("DM config fetch failed: using stale cache")
+            return self.config_cache
         return None
 
     def _get_setting(self, key):
@@ -1276,10 +1295,15 @@ class MainJob(unohelper.Base, XJobExecutor):
     def _get_openwebui_access_token(self):
         if not self._device_management_enabled():
             return ""
-        config_data = self._fetch_config()
-        if not config_data:
-            return ""
-        return self._ensure_access_token(config_data) or ""
+        config_data = self._fetch_config() or {}
+        token = self._ensure_access_token(config_data) or ""
+        if token:
+            return token
+        fallback_token = str(self._get_config_from_file("access_token", "")).strip()
+        if fallback_token and not self._token_is_expired(fallback_token):
+            log_to_file("Using local cached access_token (DM config unavailable)")
+            return fallback_token
+        return ""
 
     def _auth_header(self):
         name = str(self.get_config("authHeaderName", "Authorization")).strip() or "Authorization"
@@ -1775,10 +1799,12 @@ class MainJob(unohelper.Base, XJobExecutor):
             url = endpoint + "/models"
         headers = {"Content-Type": "application/json"}
         if is_openwebui:
+            header_name, header_prefix = self._auth_header()
             if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
+                headers[header_name] = f"{header_prefix}{api_key}"
         elif api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+            header_name, header_prefix = self._auth_header()
+            headers[header_name] = f"{header_prefix}{api_key}"
 
         try:
             request = urllib.request.Request(url, headers=_with_user_agent(headers))
@@ -2025,6 +2051,48 @@ class MainJob(unohelper.Base, XJobExecutor):
         except Exception:
             return False
 
+    def _api_probe(self, endpoint, headers, path):
+        endpoint = (endpoint or "").rstrip("/")
+        if path.startswith("http://") or path.startswith("https://"):
+            url = path
+        else:
+            if path.startswith("/"):
+                url = endpoint + path
+            else:
+                url = endpoint + "/" + path
+        try:
+            request = urllib.request.Request(url, headers=_with_user_agent(headers))
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=5) as response:
+                response.read()
+                status = getattr(response, "status", None)
+            return True, {"url": url, "status": status, "error": ""}
+        except urllib.error.HTTPError as e:
+            return True, {"url": url, "status": e.code, "error": f"http_{e.code}"}
+        except urllib.error.URLError as e:
+            reason = getattr(e, "reason", e)
+            return False, {"url": url, "status": None, "error": str(reason)}
+        except socket.timeout:
+            return False, {"url": url, "status": None, "error": "timeout"}
+        except Exception as e:
+            return False, {"url": url, "status": None, "error": str(e)}
+
+    def _endpoint_connectivity_status(self, endpoint, is_openwebui):
+        headers = {"Content-Type": "application/json"}
+        endpoint_base, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
+        checks = []
+        if is_openwebui:
+            checks.append("/health")
+        models_path = (api_path + "/models") if api_path else "/models"
+        checks.append(models_path)
+        checks.append("/")
+        last_detail = {"url": endpoint_base, "status": None, "error": "unknown"}
+        for path in checks:
+            ok, detail = self._api_probe(endpoint_base, headers, path)
+            if ok:
+                return True, detail
+            last_detail = detail
+        return False, last_detail
+
     def _api_status(self, endpoint, api_key, is_openwebui):
         anon_headers = {"Content-Type": "application/json"}
         anon_ok = self._api_reachable(endpoint, anon_headers, is_openwebui, "https://chat.mirai.interieur.gouv.fr/health")
@@ -2039,8 +2107,10 @@ class MainJob(unohelper.Base, XJobExecutor):
             auth_headers[header_name] = f"{header_prefix}{api_key}"
 
         auth_ok = False
-        if "Authorization" in auth_headers:
-            auth_ok = self._api_reachable(endpoint, auth_headers, is_openwebui, "models")
+        if api_key:
+            endpoint_base, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
+            models_path = (api_path + "/models") if api_path else "/models"
+            auth_ok = self._api_reachable(endpoint_base, auth_headers, is_openwebui, models_path)
 
         return anon_ok, auth_ok
 
@@ -2059,10 +2129,12 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         headers = {"Content-Type": "application/json"}
         if is_openwebui:
+            header_name, header_prefix = self._auth_header()
             if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
+                headers[header_name] = f"{header_prefix}{api_key}"
         elif api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
+            header_name, header_prefix = self._auth_header()
+            headers[header_name] = f"{header_prefix}{api_key}"
 
         system_prompt = (
             "Select the best model id from the provided list. "
@@ -3681,6 +3753,28 @@ EDITED VERSION:
                 endpoint_val = ""
             api_key_val = _read_api_key_value()
             log_to_file("Token test: start")
+            conn_ok, conn_detail = self._endpoint_connectivity_status(endpoint_val, True)
+            if not conn_ok:
+                proxy_cfg = self._get_proxy_config()
+                err = conn_detail.get("error", "inconnue")
+                url = conn_detail.get("url", endpoint_val)
+                if proxy_cfg.get("enabled"):
+                    self._show_message(
+                        "API",
+                        "Endpoint OWUI injoignable via le proxy.\n\n"
+                        f"URL testée: {url}\n"
+                        f"Détail: {err}\n\n"
+                        "Vérifiez le proxy (bouton Proxy > Tester connexion)."
+                    )
+                else:
+                    self._show_message(
+                        "API",
+                        "Endpoint OWUI injoignable.\n\n"
+                        f"URL testée: {url}\n"
+                        f"Détail: {err}"
+                    )
+                log_to_file(f"Token test: connectivity failed url={url} err={err}")
+                return
             anon_ok, auth_ok = _update_api_status_label(endpoint_val, api_key_val)
             if not auth_ok:
                 self._show_message(
@@ -3788,13 +3882,9 @@ EDITED VERSION:
                 if not command:
                     log_to_file("SettingsActionListener: empty ActionCommand")
                 if command == "keycloak_login":
-                    config_data = self.outer._fetch_config()
+                    config_data = self.outer._fetch_config() or {}
                     if not config_data:
-                        self.outer._show_message(
-                            "Device Management",
-                            "Impossible de récupérer la configuration Device Management."
-                        )
-                        return
+                        log_to_file("Keycloak login: DM config unavailable, using local Keycloak settings fallback")
                     self.outer._clear_tokens()
                     access_token = self.outer._authorization_code_flow(config_data)
                     email = self.outer._token_email(access_token) if access_token else None
