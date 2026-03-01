@@ -1,5 +1,6 @@
 # Configuration files with secrets
 mirai.json
+config/config.default.json
 
 # Build artifacts
 *.oxt
@@ -23,5 +24,3 @@ log.txt
 
 # Temporary files
 *.tmp
-
-config.default.json

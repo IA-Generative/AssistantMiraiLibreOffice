@@ -48,6 +48,41 @@ Cette extension LibreOffice intègre un assistant d’écriture : génération d
 *   [Device Management (Status & TODO)](#device-management-status--todo)
 *   [Résumé en français](#résumé-en-français)
 
+
+## Repository Structure (for contributors)
+
+The repository is organized to separate extension resources, Python code, and local configuration:
+
+- `src/mirai/entrypoint.py`: main extension implementation (`MainJob`, UNO registration)
+- `src/mirai/menu_actions/`: menu action handlers split by context (`writer.py`, `calc.py`, `shared.py`)
+- `main.py`: thin compatibility shim required by LibreOffice Python loader
+- `oxt/`: static files packaged at the root of the `.oxt` (Addons, icons, manifest, assets)
+- `config/config.default.example.json`: committable example defaults
+- `config/config.default.json`: local real defaults (ignored by git)
+- `scripts/02-build-oxt.sh`: build script producing `dist/mirai.oxt`
+- `scripts/04-repack-oxt.sh`: utility to inject `config.default.json` in an existing `.oxt`
+- `scripts/01-init-default-config.sh`: initialize/update default Keycloak/proxy/bootstrap keys in `config/config.default.json`
+- `scripts/05-update-plugin.sh`: one-command build + install + restart
+### Script quickstart
+
+```bash
+# 1) Initialize default config keys (interactive)
+./scripts/01-init-default-config.sh --interactive
+
+# 2) Build OXT from source tree
+./scripts/02-build-oxt.sh
+
+# 3) Run local checks
+./scripts/03-test-local.sh
+
+# 4) Repack an existing OXT with current config defaults
+./scripts/04-repack-oxt.sh --src ./dist/mirai.oxt --out ./dist/mirai.oxt
+
+# 5) Build + install + restart LibreOffice
+./scripts/05-update-plugin.sh
+```
+
+
 ## Features
 
 This extension provides four powerful features for LibreOffice Writer, allowing you to integrate generative AI directly into your writing workflow:
