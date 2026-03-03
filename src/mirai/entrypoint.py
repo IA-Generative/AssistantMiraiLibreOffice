@@ -504,29 +504,48 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         self._fetching_config = True
         try:
-            request = urllib.request.Request(url, headers=_with_user_agent({"Accept": "application/json"}))
-            with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=True) as response:
-                payload = response.read().decode("utf-8")
-            log_to_file(f"DM bootstrap raw response: {payload[:2000]}")
-            config_data = json.loads(payload)
-            if isinstance(config_data, dict):
-                self.config_cache = config_data
-                self.config_loaded_at = now
-                self._config_last_failure_at = 0
-                return config_data
-        except urllib.error.HTTPError as e:
-            try:
-                body = e.read().decode("utf-8")
-            except Exception:
-                body = ""
-            log_to_file(f"Failed to fetch device management config: HTTP {e.code} {e.reason} body={body[:500]}")
+            proxy_enabled = self._as_bool(self._get_config_from_file("proxy_enabled", False))
+            attempts = [("direct", False)]
+            if proxy_enabled:
+                attempts.append(("proxy", True))
+            else:
+                log_to_file("DM config fetch: proxy disabled, skipping proxy retry")
+
+            last_error = "unknown"
+            for mode, use_proxy in attempts:
+                try:
+                    log_to_file(f"DM config fetch attempt: mode={mode} url={url}")
+                    request = urllib.request.Request(url, headers=_with_user_agent({"Accept": "application/json"}))
+                    with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=use_proxy) as response:
+                        payload = response.read().decode("utf-8")
+                    log_to_file(f"DM bootstrap raw response ({mode}): {payload[:2000]}")
+                    config_data = json.loads(payload)
+                    if isinstance(config_data, dict):
+                        self.config_cache = config_data
+                        self.config_loaded_at = now
+                        self._config_last_failure_at = 0
+                        return config_data
+                    last_error = f"Invalid JSON root type: {type(config_data).__name__}"
+                    log_to_file(f"Failed to fetch device management config ({mode}): {last_error}")
+                except urllib.error.HTTPError as e:
+                    try:
+                        body = e.read().decode("utf-8")
+                    except Exception:
+                        body = ""
+                    last_error = f"HTTP {e.code} {e.reason}"
+                    log_to_file(
+                        f"Failed to fetch device management config ({mode}): "
+                        f"HTTP {e.code} {e.reason} body={body[:500]}"
+                    )
+                except urllib.error.URLError as e:
+                    last_error = f"URL error {e.reason}"
+                    log_to_file(f"Failed to fetch device management config ({mode}): URL error {e.reason}")
+                except Exception as e:
+                    last_error = str(e)
+                    log_to_file(f"Failed to fetch device management config ({mode}): {str(e)}")
+
             self._config_last_failure_at = now
-        except urllib.error.URLError as e:
-            log_to_file(f"Failed to fetch device management config: URL error {e.reason}")
-            self._config_last_failure_at = now
-        except Exception as e:
-            log_to_file(f"Failed to fetch device management config: {str(e)}")
-            self._config_last_failure_at = now
+            log_to_file(f"Failed to fetch device management config: all attempts failed ({last_error})")
         finally:
             self._fetching_config = False
         if self.config_cache:
@@ -1049,6 +1068,17 @@ class MainJob(unohelper.Base, XJobExecutor):
             )
             return None
 
+        proceed = self._confirm_message(
+            "Connexion MIrAI requise",
+            "Vous allez être redirigé vers la page de connexion MIrAI dans votre navigateur.\n\n"
+            "Pourquoi : le plugin doit obtenir un jeton de session sécurisé pour accéder à l'API et à la configuration.\n\n"
+            "Après la connexion, revenez à LibreOffice.\n\n"
+            "Voulez-vous continuer ?"
+        )
+        if not proceed:
+            log_to_file("Keycloak auth canceled by user before browser open")
+            return None
+
         code_verifier = self._pkce_code_verifier()
         code_challenge = self._pkce_code_challenge(code_verifier)
         state = uuid.uuid4().hex
@@ -1194,42 +1224,13 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._auth_prompt_in_progress = True
         self._auth_prompted_at = now
         try:
-            confirm = self._confirm_message(
-                "Session expirée",
-                "Votre session a expiré. Vous devez vous reconnecter pour utiliser le service.\n\n"
-                "En continuant, vous serez redirigé vers un navigateur.\n\n"
-                "Voulez-vous poursuivre ?"
-            )
+            auth_code_token = self._authorization_code_flow(config_data)
         finally:
             self._auth_prompt_in_progress = False
-        if not confirm:
-            return None
-
-        auth_code_token = self._authorization_code_flow(config_data)
         if auth_code_token:
             return auth_code_token
 
-        allow_password_fallback = self._as_bool(self._get_config_from_file("password_fallback", False))
-        if not allow_password_fallback:
-            log_to_file("Password fallback disabled; authentication aborted")
-            return None
-
-        username, password = self.credentials_box("Device Management", "Email ou identifiant :", "Mot de passe :")
-        if not username or not password:
-            return None
-
-        password_payload = {
-            "grant_type": "password",
-            "username": username,
-            "password": password,
-            "client_id": client_id
-        }
-        if client_secret:
-            password_payload["client_secret"] = client_secret
-        token_response = self._request_token(token_endpoint, password_payload)
-        if isinstance(token_response, dict) and token_response.get("access_token"):
-            self._store_tokens(token_response)
-            return token_response.get("access_token")
+        log_to_file("Authentication aborted: no token obtained from browser SSO flow")
         return None
 
     def _ensure_device_management_state(self):
