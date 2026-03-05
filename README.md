@@ -46,6 +46,7 @@ Cette extension LibreOffice intègre un assistant d’écriture : génération d
 *   [License](#license)
 *   [Update History (Summary)](#update-history-summary)
 *   [Device Management (Status & TODO)](#device-management-status--todo)
+*   [Secure Bootstrap / Relay Flow](#secure-bootstrap--relay-flow)
 *   [Résumé en français](#résumé-en-français)
 
 
@@ -58,11 +59,14 @@ The repository is organized to separate extension resources, Python code, and lo
 - `main.py`: thin compatibility shim required by LibreOffice Python loader
 - `oxt/`: static files packaged at the root of the `.oxt` (Addons, icons, manifest, assets)
 - `config/config.default.example.json`: committable example defaults
+- `config/profiles/`: predefined profile configs (`docker`, `kubernetes`, `dgx`, `local-llm`)
 - `config/config.default.json`: local real defaults (ignored by git)
 - `scripts/02-build-oxt.sh`: build script producing `dist/mirai.oxt`
 - `scripts/04-repack-oxt.sh`: utility to inject `config.default.json` in an existing `.oxt`
 - `scripts/01-init-default-config.sh`: initialize/update default Keycloak/proxy/bootstrap keys in `config/config.default.json`
 - `scripts/05-update-plugin.sh`: one-command build + install + restart
+- `scripts/06-use-config-profile.sh`: switch local config to a target profile
+- `scripts/07-package-release.sh`: package OXT with a specific profile (production-friendly)
 ### Script quickstart
 
 ```bash
@@ -80,7 +84,47 @@ The repository is organized to separate extension resources, Python code, and lo
 
 # 5) Build + install + restart LibreOffice
 ./scripts/05-update-plugin.sh
+
+# 6) Switch local config profile quickly
+./scripts/06-use-config-profile.sh --list
+./scripts/06-use-config-profile.sh --profile docker --print
+
+# 7) Build a profile-specific release package
+./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt
 ```
+
+### Config profiles and release workflow
+
+Predefined profiles:
+- `docker`: local bootstrap (`http://localhost:3001`, `profile=dev`)
+- `kubernetes`: generic k8s endpoint template (`https://bootstrap.fake-domain.name`, `profile=prod`)
+- `dgx`: DGX route (`https://onyxia.gpu.minint.fr/bootstrap`, `profile=prod`)
+- `local-llm`: 100% local fallback (bootstrap disabled, fixed local endpoint/model)
+
+Simple developer mode switch:
+```bash
+./scripts/06-use-config-profile.sh --profile docker
+./scripts/02-build-oxt.sh --install --restart
+```
+
+Production packaging (recommended):
+```bash
+# 1) Build with DGX profile without mutating local config
+./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt
+
+# 2) Optional: install locally to smoke-test
+./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt --install --restart
+```
+
+100% local fallback (no bootstrap):
+```bash
+./scripts/06-use-config-profile.sh --profile local-llm --print
+./scripts/02-build-oxt.sh --install --restart
+```
+
+Notes:
+- `dist/mirai.oxt` is ignored by git.
+- Keep secrets out of profile files; secrets should come from bootstrap after login/enroll.
 
 
 ## Features
@@ -306,8 +350,43 @@ This project has gone through many iterations. Here is a summary of the most rec
 
 Device Management integration is in place, but several items remain:
 
+Déploiement progressif (synthèse): le plugin appelle Device Management avec son `plugin_uuid`, sa version et, après login PKCE, un token Keycloak; DM valide le token (signature/JWKS, `iss`, `aud`, `exp`), extrait l’identité utilisateur (`sub`) et les `groups`, applique la priorité des groupes de déploiement (d’abord les 5 groupes câblés dans l’outil de management, puis les groupes Keycloak mappés), puis renvoie une policy de campagne (`none/update/rollback`, version cible, artefact, hash/signature, pourcentage de rollout). Le plugin n’installe que si la policy l’autorise et si la vérification cryptographique est valide, puis remonte les indicateurs (`success/failure`) pour piloter des campagnes démarrables/arrêtables (canary, promotion, rollback) avec suivi par groupe.
+
 **TODO:**
 - Finalize **silent enrollment**.
 - Implement **automatic OpenWebUI token retrieval**.
 - **Externalize all prompts** via Device Management (all prompts must become configurable).
 - Implement the **automatic update mechanism** for the extension.
+
+## Secure Bootstrap / Relay Flow
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant P as Plugin
+  participant DM as Device Management
+  participant KC as Keycloak
+  participant R as relay-assistant
+
+  P->>DM: GET /config/libreoffice/config.json
+  DM-->>P: public config (no secrets)
+
+  P->>KC: PKCE login (auth + token)
+  KC-->>P: access_token / refresh_token
+
+  P->>DM: POST /enroll (Bearer access_token)
+  DM-->>P: relayClientId + relayClientKey + expiry
+
+  P->>DM: GET /config/libreoffice/config.json + relay headers
+  DM-->>P: config + secrets
+
+  P->>R: /relay-assistant/keycloak|llm|mcr-api + relay headers
+  R->>DM: /relay/authorize
+  DM-->>R: 200/403
+```
+
+### Local validation
+
+```bash
+./scripts/03-test-local.sh
+```

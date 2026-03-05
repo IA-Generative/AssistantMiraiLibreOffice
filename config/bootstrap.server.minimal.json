@@ -1,0 +1,13 @@
+{
+    "config": {
+        "llm_base_urls": "https://change.me/v1/",
+        "llm_api_tokens": "change-me-llm-token",
+        "llm_default_models": "change-me-model",
+        "keycloakIssuerUrl": "https://change.me/realms/change-me",
+        "keycloakRealm": "change-me",
+        "keycloakClientId": "bootstrap-iassistant",
+        "telemetryEnabled": true,
+        "telemetryEndpoint": "https://change.me/telemetry/v1/traces",
+        "telemetryAuthorizationType": "Bearer"
+    }
+}

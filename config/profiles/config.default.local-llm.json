@@ -1,0 +1,12 @@
+{
+    "configVersion": 1,
+    "enabled": false,
+    "bootstrap_url": "",
+    "config_path": "/config/libreoffice/config.json?profile=prod",
+    "llm_base_urls": "http://localhost:11434/v1",
+    "llm_api_tokens": "",
+    "llm_default_models": "llama3.1:8b",
+    "api_type": "chat",
+    "authHeaderName": "Authorization",
+    "authHeaderPrefix": "Bearer "
+}
