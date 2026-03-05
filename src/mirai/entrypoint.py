@@ -24,6 +24,13 @@ from com.sun.star.beans import PropertyValue
 from com.sun.star.container import XNamed
 from .menu_actions.writer import handle_writer_action
 from .menu_actions.calc import handle_calc_action
+from .security_flow import (
+    SecureBootstrapFlow,
+    FileJsonStore,
+    FileQueueStore,
+    default_vault,
+    Ed25519Provider,
+)
 
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/120.0"
@@ -165,6 +172,15 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
                 }
             ]
         }
+
+        # Preferred secure telemetry pipeline (bootstrap/enroll/token rotation + offline queue).
+        if hasattr(config, "_secure_send_telemetry_payload"):
+            try:
+                handled = bool(config._secure_send_telemetry_payload(payload, span_name))
+                if handled:
+                    return
+            except Exception as e:
+                log_to_file(f"Secure telemetry pipeline unavailable, fallback legacy sender: {str(e)}")
         
         if log_json:
             log_to_file(f"=== Telemetry Request ===")
@@ -193,10 +209,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
             log_to_file(f"=== Request Headers ===")
             for header_name, header_value in req.headers.items():
                 if header_name.lower() == 'authorization':
-                    # Show full authorization header for debugging
-                    log_to_file(f"{header_name}: {header_value}")
-                    log_to_file(f"  └─ Type: {auth_type}")
-                    log_to_file(f"  └─ Key (first 20 chars): {auth_key[:20]}..." if len(auth_key) > 20 else f"  └─ Key: {auth_key}")
+                    log_to_file(f"{header_name}: <redacted>")
                 else:
                     log_to_file(f"{header_name}: {header_value}")
             log_to_file(f"Content-Length: {len(json_data)}")
@@ -258,9 +271,15 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._models_cache_loaded_at = 0
         self._models_cache_ttl = 60
         self._fetching_config = False
+        self._config_refresh_lock = threading.RLock()
+        self._config_refresh_in_progress = False
+        self._config_refresh_last_started_at = 0
+        self._config_async_min_interval = 20
         self._auth_prompt_in_progress = False
         self._auth_prompted_at = 0
         self._edit_dialog = None
+        self._secure_flow = None
+        self._secure_flow_lock = threading.RLock()
         # handling different situations (inside LibreOffice or other process)
         try:
             self.sm = ctx.getServiceManager()
@@ -286,6 +305,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         # Send telemetry trace on extension load
         try:
             self._ensure_extension_uuid()
+            self._ensure_plugin_uuid()
+            self._warmup_secure_flow_async()
             send_telemetry_trace_async(self, "ExtensionLoaded", {
                 "event.type": "extension_loaded",
                 "extension.context": "libreoffice_writer"
@@ -294,7 +315,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             log_to_file(f"Failed to send extension load telemetry: {str(e)}")
 
         try:
-            self._ensure_device_management_state()
+            self._ensure_device_management_state_async()
         except Exception as e:
             log_to_file(f"Failed to initialize device management: {str(e)}")
 
@@ -309,6 +330,13 @@ class MainJob(unohelper.Base, XJobExecutor):
     def _send_telemetry(self, span_name, attributes=None):
         send_telemetry_trace_async(self, span_name, attributes)
 
+    def _get_user_config_dir(self):
+        path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
+        user_config_path = getattr(path_settings, "UserConfig")
+        if user_config_path.startswith('file://'):
+            user_config_path = str(uno.fileUrlToSystemPath(user_config_path))
+        return user_config_path
+
     def _ensure_extension_uuid(self):
         """Ensure extension has a unique UUID, generate if missing."""
         extension_uuid = self.get_config("extensionUUID", "")
@@ -317,6 +345,128 @@ class MainJob(unohelper.Base, XJobExecutor):
             self.set_config("extensionUUID", extension_uuid)
             log_to_file(f"Generated new extension UUID: {extension_uuid}")
         return extension_uuid
+
+    def _ensure_plugin_uuid(self):
+        plugin_uuid = str(self._get_config_from_file("plugin_uuid", "") or "").strip()
+        if plugin_uuid:
+            return plugin_uuid
+        extension_uuid = str(self._get_config_from_file("extensionUUID", "") or "").strip()
+        if not extension_uuid:
+            extension_uuid = str(uuid.uuid4())
+            self.set_config("extensionUUID", extension_uuid)
+        self.set_config("plugin_uuid", extension_uuid)
+        return extension_uuid
+
+    def _secure_http_call(self, method, url, headers=None, body=None, timeout=10, use_proxy=True):
+        request = urllib.request.Request(url, data=body, headers=_with_user_agent(headers or {}))
+        request.get_method = lambda: str(method or "GET").upper()
+        try:
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=timeout, use_proxy=use_proxy) as response:
+                payload = response.read()
+                status = int(getattr(response, "status", 0) or 0)
+                response_headers = dict(response.headers.items()) if hasattr(response, "headers") else {}
+                return status, response_headers, payload
+        except urllib.error.HTTPError as exc:
+            try:
+                payload = exc.read()
+            except Exception:
+                payload = b""
+            response_headers = dict(exc.headers.items()) if hasattr(exc, "headers") and exc.headers else {}
+            return int(exc.code), response_headers, payload
+
+    def _get_secure_flow(self):
+        with self._secure_flow_lock:
+            if self._secure_flow is not None:
+                return self._secure_flow
+            bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            if not bootstrap_url:
+                return None
+            plugin_uuid = self._ensure_plugin_uuid()
+            device_name = str(self._get_config_from_file("device_name", "mirai-libreoffice") or "").strip() or "mirai-libreoffice"
+            user_config_dir = self._get_user_config_dir()
+            state_path = os.path.join(user_config_dir, "secure_bootstrap_state.json")
+            queue_path = os.path.join(user_config_dir, "telemetry_queue.json")
+            try:
+                flow = SecureBootstrapFlow(
+                    bootstrap_base_url=bootstrap_url.rstrip("/"),
+                    plugin_uuid=plugin_uuid,
+                    device_name=device_name,
+                    http_call=self._secure_http_call,
+                    log_func=lambda m: log_to_file(m),
+                    state_store=FileJsonStore(state_path),
+                    queue_store=FileQueueStore(queue_path),
+                    vault=default_vault(),
+                    signer=Ed25519Provider(),
+                )
+            except Exception as exc:
+                log_to_file(f"Secure flow init failed: {str(exc)}")
+                return None
+            self._secure_flow = flow
+            return flow
+
+    def _warmup_secure_flow_async(self):
+        def _worker():
+            try:
+                flow = self._get_secure_flow()
+                if not flow:
+                    return
+                flow.ensure_identity()
+                try:
+                    flow.fetch_bootstrap_config()
+                except Exception as exc:
+                    log_to_file(f"Secure flow bootstrap fetch failed: {str(exc)}")
+            except Exception as exc:
+                log_to_file(f"Secure flow warmup failed: {str(exc)}")
+
+        thread = threading.Thread(target=_worker, daemon=True)
+        thread.start()
+
+    def _secure_send_telemetry_payload(self, payload, _span_name=None):
+        flow = self._get_secure_flow()
+        if not flow:
+            bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            if bootstrap_url:
+                log_to_file("Secure telemetry unavailable; legacy sender disabled for bootstrap mode")
+                return True
+            return False
+        try:
+            current_kind = flow.telemetry_kind()
+            access_token = str(self._get_config_from_file("access_token", "") or "").strip()
+            has_valid_login = bool(access_token) and (not self._token_is_expired(access_token))
+            if current_kind != "user":
+                technical_events = {
+                    "ExtensionLoaded",
+                    "OpenSettings",
+                    "OpenmiraiWebsite",
+                    "OpenWebsite",
+                    "ReloadConfig",
+                    "ProxyCheck",
+                    "ProxyTest",
+                }
+                if not has_valid_login:
+                    return True
+                if _span_name and _span_name not in technical_events:
+                    return True
+            handled = bool(flow.send_trace(payload))
+            if flow.rebind_required():
+                if access_token and not self._token_is_expired(access_token):
+                    self._secure_bind_identity(access_token)
+                else:
+                    log_to_file("Secure telemetry requires user rebind/login")
+            return handled
+        except Exception as exc:
+            log_to_file(f"Secure telemetry pipeline failure: {str(exc)}")
+            return True
+
+    def _secure_bind_identity(self, access_token):
+        flow = self._get_secure_flow()
+        if not flow:
+            return ""
+        try:
+            return flow.bind_identity(access_token)
+        except Exception as exc:
+            log_to_file(f"Secure identity bind failed: {str(exc)}")
+            return ""
     
     def _decode_default_key(self):
         """
@@ -473,6 +623,30 @@ class MainJob(unohelper.Base, XJobExecutor):
                 return value
         return None
 
+    def _schedule_config_refresh(self, force=False, reason="background"):
+        if not self._device_management_enabled():
+            return False
+        now = time.time()
+        with self._config_refresh_lock:
+            if self._config_refresh_in_progress:
+                return False
+            if not force and (now - self._config_refresh_last_started_at) < self._config_async_min_interval:
+                return False
+            self._config_refresh_in_progress = True
+            self._config_refresh_last_started_at = now
+
+        def _worker():
+            try:
+                self._fetch_config(force=force)
+            except Exception as exc:
+                log_to_file(f"DM config async refresh failed ({reason}): {str(exc)}")
+            finally:
+                with self._config_refresh_lock:
+                    self._config_refresh_in_progress = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+
     def _fetch_config(self, force=False):
         if not force and not self._device_management_enabled():
             log_to_file("DM config fetch skipped: device management disabled")
@@ -515,7 +689,9 @@ class MainJob(unohelper.Base, XJobExecutor):
             for mode, use_proxy in attempts:
                 try:
                     log_to_file(f"DM config fetch attempt: mode={mode} url={url}")
-                    request = urllib.request.Request(url, headers=_with_user_agent({"Accept": "application/json"}))
+                    headers = {"Accept": "application/json"}
+                    headers.update(self._relay_headers())
+                    request = urllib.request.Request(url, headers=_with_user_agent(headers))
                     with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=use_proxy) as response:
                         payload = response.read().decode("utf-8")
                     log_to_file(f"DM bootstrap raw response ({mode}): {payload[:2000]}")
@@ -554,7 +730,11 @@ class MainJob(unohelper.Base, XJobExecutor):
         return None
 
     def _get_setting(self, key):
-        config_data = self._fetch_config()
+        now = time.time()
+        cache_fresh = bool(self.config_cache and (now - self.config_loaded_at) < self.config_ttl)
+        if not cache_fresh:
+            self._schedule_config_refresh(force=not bool(self.config_cache), reason=f"get_setting:{key}")
+        config_data = self.config_cache if isinstance(self.config_cache, dict) else None
         if not config_data:
             return None
         settings = self._select_settings(config_data)
@@ -786,11 +966,91 @@ class MainJob(unohelper.Base, XJobExecutor):
     def _keycloak_config(self, config_data):
         if not isinstance(config_data, dict):
             return {}
+
+        def _flat_keycloak(source):
+            if not isinstance(source, dict):
+                return None
+            flat = {
+                "issuerUrl": (
+                    source.get("keycloakIssuerUrl")
+                    or source.get("issuerUrl")
+                    or source.get("issuerURL")
+                    or source.get("issuer_url")
+                    or source.get("keycloak_base_url")
+                    or source.get("issuer")
+                ),
+                "realm": (
+                    source.get("keycloakRealm")
+                    or source.get("keycloak_realm")
+                    or source.get("realm")
+                ),
+                "clientId": (
+                    source.get("keycloakClientId")
+                    or source.get("keycloak_client_id")
+                    or source.get("clientId")
+                    or source.get("client_id")
+                ),
+                "clientSecret": (
+                    source.get("keycloak_client_secret")
+                    or source.get("clientSecret")
+                    or source.get("client_secret")
+                ),
+                "authorization_endpoint": (
+                    source.get("authorization_endpoint")
+                    or source.get("authorizationEndpoint")
+                    or source.get("keycloakAuthorizationEndpoint")
+                    or source.get("keycloak_authorization_endpoint")
+                    or source.get("auth_endpoint")
+                    or source.get("authEndpoint")
+                    or source.get("auth_url")
+                    or source.get("authUrl")
+                    or source.get("auth")
+                ),
+                "token_endpoint": (
+                    source.get("token_endpoint")
+                    or source.get("tokenEndpoint")
+                    or source.get("keycloakTokenEndpoint")
+                    or source.get("keycloak_token_endpoint")
+                    or source.get("token_url")
+                    or source.get("tokenUrl")
+                    or source.get("token")
+                ),
+                "userinfo_endpoint": (
+                    source.get("userinfo_endpoint")
+                    or source.get("userinfoEndpoint")
+                    or source.get("keycloakUserinfoEndpoint")
+                    or source.get("keycloak_userinfo_endpoint")
+                    or source.get("user_info_endpoint")
+                    or source.get("userInfoEndpoint")
+                    or source.get("userinfo")
+                ),
+            }
+            if any(v is not None and str(v).strip() for v in flat.values()):
+                return flat
+            return None
+
+        settings = self._select_settings(config_data)
+        if isinstance(settings, dict):
+            if isinstance(settings.get("keycloak"), dict):
+                return settings.get("keycloak")
+            settings_endpoints = settings.get("endpoints", {})
+            if isinstance(settings_endpoints, dict) and isinstance(settings_endpoints.get("keycloak"), dict):
+                return settings_endpoints.get("keycloak")
+            flat_settings = _flat_keycloak(settings)
+            if flat_settings:
+                return flat_settings
+
         endpoints = config_data.get("endpoints", {})
         if not isinstance(endpoints, dict):
             endpoints = {}
         keycloak = config_data.get("keycloak") or endpoints.get("keycloak") or {}
-        return keycloak if isinstance(keycloak, dict) else {}
+        if isinstance(keycloak, dict):
+            return keycloak
+
+        flat_top_level = _flat_keycloak(config_data)
+        if flat_top_level:
+            return flat_top_level
+        return {}
 
     def _keycloak_endpoint(self, keycloak_config, *names):
         for name in names:
@@ -831,6 +1091,21 @@ class MainJob(unohelper.Base, XJobExecutor):
             "token_url",
             "tokenUrl",
             "token"
+        )
+        if auth_endpoint and token_endpoint:
+            return auth_endpoint, token_endpoint
+
+        auth_endpoint = (
+            self._get_config_from_file("keycloakAuthorizationEndpoint", "")
+            or self._get_config_from_file("keycloak_authorization_endpoint", "")
+            or self._get_config_from_file("authorization_endpoint", "")
+            or self._get_config_from_file("authorizationEndpoint", "")
+        )
+        token_endpoint = (
+            self._get_config_from_file("keycloakTokenEndpoint", "")
+            or self._get_config_from_file("keycloak_token_endpoint", "")
+            or self._get_config_from_file("token_endpoint", "")
+            or self._get_config_from_file("tokenEndpoint", "")
         )
         if auth_endpoint and token_endpoint:
             return auth_endpoint, token_endpoint
@@ -889,13 +1164,13 @@ class MainJob(unohelper.Base, XJobExecutor):
         except Exception:
             pass
 
-    def _token_email(self, access_token, userinfo_endpoint=None):
+    def _token_email(self, access_token, userinfo_endpoint=None, allow_network=True):
         payload = self._jwt_payload(access_token)
         email = payload.get("email") or payload.get("preferred_username")
         verified = payload.get("email_verified", payload.get("emailVerified"))
         if email and (verified is None or verified is True):
             return email
-        if userinfo_endpoint:
+        if userinfo_endpoint and allow_network:
             try:
                 request = urllib.request.Request(
                     userinfo_endpoint,
@@ -1179,10 +1454,19 @@ class MainJob(unohelper.Base, XJobExecutor):
         token_response = self._request_token(token_endpoint, token_payload)
         if isinstance(token_response, dict) and token_response.get("access_token"):
             self._store_tokens(token_response)
-            return token_response.get("access_token")
+            access_token = token_response.get("access_token")
+            try:
+                self._secure_bind_identity(access_token)
+            except Exception as exc:
+                log_to_file(f"Post-SSO identity bind failed: {str(exc)}")
+            try:
+                self._ensure_device_management_state_async()
+            except Exception as exc:
+                log_to_file(f"Post-SSO enroll scheduling failed: {str(exc)}")
+            return access_token
         return None
 
-    def _ensure_access_token(self, config_data):
+    def _ensure_access_token(self, config_data, interactive=True):
         access_token = str(self._get_config_from_file("access_token", "")).strip()
         if access_token and not self._token_is_expired(access_token):
             return access_token
@@ -1217,6 +1501,10 @@ class MainJob(unohelper.Base, XJobExecutor):
                 self._store_tokens(token_response)
                 return token_response.get("access_token")
 
+        if not interactive:
+            log_to_file("Access token unavailable (interactive login disabled for this flow)")
+            return None
+
         now = time.time()
         if self._auth_prompt_in_progress or (now - self._auth_prompted_at) < 30:
             log_to_file("Auth prompt suppressed (already shown recently)")
@@ -1233,6 +1521,15 @@ class MainJob(unohelper.Base, XJobExecutor):
         log_to_file("Authentication aborted: no token obtained from browser SSO flow")
         return None
 
+    def _ensure_device_management_state_async(self):
+        def _worker():
+            try:
+                self._ensure_device_management_state()
+            except Exception as exc:
+                log_to_file(f"Failed to initialize device management (async): {str(exc)}")
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _ensure_device_management_state(self):
         if not self._device_management_enabled():
             return
@@ -1244,7 +1541,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         except Exception:
             pass
 
-        access_token = self._ensure_access_token(config_data)
+        access_token = self._ensure_access_token(config_data, interactive=False)
         keycloak = self._keycloak_config(config_data)
         userinfo_endpoint = self._keycloak_endpoint(
             keycloak,
@@ -1288,7 +1585,39 @@ class MainJob(unohelper.Base, XJobExecutor):
             request = urllib.request.Request(enroll_endpoint, data=json_data, headers=_with_user_agent(headers))
             request.get_method = lambda: 'POST'
             with self._urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
-                response.read()
+                raw = response.read().decode("utf-8", errors="ignore")
+            relay_client_id = ""
+            relay_client_key = ""
+            relay_expires_at = 0
+            try:
+                payload = json.loads(raw) if raw else {}
+                if isinstance(payload, dict):
+                    relay = payload.get("relay") if isinstance(payload.get("relay"), dict) else {}
+                    relay_client_id = str(
+                        payload.get("relayClientId")
+                        or relay.get("client_id")
+                        or ""
+                    ).strip()
+                    relay_client_key = str(
+                        payload.get("relayClientKey")
+                        or relay.get("client_key")
+                        or ""
+                    ).strip()
+                    relay_expires = payload.get("relayKeyExpiresAt") or relay.get("expires_at") or 0
+                    try:
+                        relay_expires_at = int(relay_expires)
+                    except Exception:
+                        relay_expires_at = 0
+            except Exception:
+                pass
+            if relay_client_id and relay_client_key:
+                self.set_config("relay_client_id", relay_client_id)
+                self.set_config("relay_client_key", relay_client_key)
+                if relay_expires_at > 0:
+                    self.set_config("relay_key_expires_at", relay_expires_at)
+                log_to_file("Device management enroll succeeded with relay credentials")
+            else:
+                log_to_file("Device management enroll succeeded without relay credentials")
             self.set_config("enrolled", True)
         except Exception as e:
             log_to_file(f"Device management enroll failed: {str(e)}")
@@ -1297,7 +1626,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not self._device_management_enabled():
             return ""
         config_data = self._fetch_config() or {}
-        token = self._ensure_access_token(config_data) or ""
+        token = self._ensure_access_token(config_data, interactive=False) or ""
         if token:
             return token
         fallback_token = str(self._get_config_from_file("access_token", "")).strip()
@@ -1312,6 +1641,16 @@ class MainJob(unohelper.Base, XJobExecutor):
         if prefix and not prefix.endswith(" "):
             prefix = prefix + " "
         return name, prefix
+
+    def _relay_headers(self):
+        relay_client_id = str(self._get_config_from_file("relay_client_id", "") or "").strip()
+        relay_client_key = str(self._get_config_from_file("relay_client_key", "") or "").strip()
+        if not relay_client_id or not relay_client_key:
+            return {}
+        return {
+            "X-Relay-Client": relay_client_id,
+            "X-Relay-Key": relay_client_key,
+        }
 
     def _as_bool(self, value):
         if isinstance(value, bool):
@@ -1400,6 +1739,16 @@ class MainJob(unohelper.Base, XJobExecutor):
         return urllib.request.build_opener(*handlers)
 
     def _urlopen(self, request, context=None, timeout=None, use_proxy=True):
+        try:
+            req_url = str(getattr(request, "full_url", "") or "")
+            if "/relay-assistant/" in req_url:
+                for header_name, header_value in self._relay_headers().items():
+                    try:
+                        request.add_header(header_name, header_value)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
         proxy_cfg = self._get_proxy_config() if use_proxy else {
             "enabled": False,
             "proxy_url": "",
@@ -1950,11 +2299,86 @@ class MainJob(unohelper.Base, XJobExecutor):
 
     def _sync_keycloak_from_settings(self, settings, config_data=None):
         keycloak_src = None
+
+        def _flat_keycloak(source):
+            if not isinstance(source, dict):
+                return None
+            flat = {
+                "issuerUrl": (
+                    source.get("keycloakIssuerUrl")
+                    or source.get("issuerUrl")
+                    or source.get("issuerURL")
+                    or source.get("issuer_url")
+                    or source.get("keycloak_base_url")
+                    or source.get("issuer")
+                ),
+                "realm": (
+                    source.get("keycloakRealm")
+                    or source.get("keycloak_realm")
+                    or source.get("realm")
+                ),
+                "clientId": (
+                    source.get("keycloakClientId")
+                    or source.get("keycloak_client_id")
+                    or source.get("clientId")
+                    or source.get("client_id")
+                ),
+                "clientSecret": (
+                    source.get("keycloak_client_secret")
+                    or source.get("clientSecret")
+                    or source.get("client_secret")
+                ),
+                "authorization_endpoint": (
+                    source.get("keycloakAuthorizationEndpoint")
+                    or source.get("keycloak_authorization_endpoint")
+                    or source.get("authorization_endpoint")
+                    or source.get("authorizationEndpoint")
+                    or source.get("auth_endpoint")
+                    or source.get("authEndpoint")
+                    or source.get("auth_url")
+                    or source.get("authUrl")
+                    or source.get("auth")
+                ),
+                "token_endpoint": (
+                    source.get("keycloakTokenEndpoint")
+                    or source.get("keycloak_token_endpoint")
+                    or source.get("token_endpoint")
+                    or source.get("tokenEndpoint")
+                    or source.get("token_url")
+                    or source.get("tokenUrl")
+                    or source.get("token")
+                ),
+                "userinfo_endpoint": (
+                    source.get("keycloakUserinfoEndpoint")
+                    or source.get("keycloak_userinfo_endpoint")
+                    or source.get("userinfo_endpoint")
+                    or source.get("userinfoEndpoint")
+                    or source.get("user_info_endpoint")
+                    or source.get("userInfoEndpoint")
+                    or source.get("userinfo")
+                ),
+                "redirect_uri": (
+                    source.get("keycloak_redirect_uri")
+                    or source.get("redirect_uri")
+                    or source.get("redirectUri")
+                ),
+                "allowed_redirect_uri": (
+                    source.get("keycloak_allowed_redirect_uri")
+                    or source.get("allowed_redirect_uri")
+                    or source.get("allowedRedirectUri")
+                ),
+            }
+            if any(v is not None and str(v).strip() for v in flat.values()):
+                return flat
+            return None
+
         if isinstance(settings, dict):
             if isinstance(settings.get("keycloak"), dict):
                 keycloak_src = settings.get("keycloak")
             elif isinstance(settings.get("endpoints"), dict) and isinstance(settings.get("endpoints", {}).get("keycloak"), dict):
                 keycloak_src = settings.get("endpoints", {}).get("keycloak")
+            if keycloak_src is None:
+                keycloak_src = _flat_keycloak(settings)
         if keycloak_src is None and isinstance(config_data, dict):
             candidate = config_data.get("keycloak")
             if not isinstance(candidate, dict):
@@ -1962,6 +2386,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                 candidate = endpoints.get("keycloak")
             if isinstance(candidate, dict):
                 keycloak_src = candidate
+            if keycloak_src is None:
+                keycloak_src = _flat_keycloak(config_data)
         if not isinstance(keycloak_src, dict):
             return
         keycloak_map = {
@@ -1992,6 +2418,42 @@ class MainJob(unohelper.Base, XJobExecutor):
                 keycloak_src.get("client_secret")
                 or keycloak_src.get("clientSecret")
                 or keycloak_src.get("keycloakClientSecret")
+            ),
+            "keycloakAuthorizationEndpoint": (
+                keycloak_src.get("authorization_endpoint")
+                or keycloak_src.get("authorizationEndpoint")
+                or keycloak_src.get("keycloakAuthorizationEndpoint")
+                or keycloak_src.get("auth_endpoint")
+                or keycloak_src.get("authEndpoint")
+                or keycloak_src.get("auth_url")
+                or keycloak_src.get("authUrl")
+                or keycloak_src.get("auth")
+            ),
+            "keycloakTokenEndpoint": (
+                keycloak_src.get("token_endpoint")
+                or keycloak_src.get("tokenEndpoint")
+                or keycloak_src.get("keycloakTokenEndpoint")
+                or keycloak_src.get("token_url")
+                or keycloak_src.get("tokenUrl")
+                or keycloak_src.get("token")
+            ),
+            "keycloakUserinfoEndpoint": (
+                keycloak_src.get("userinfo_endpoint")
+                or keycloak_src.get("userinfoEndpoint")
+                or keycloak_src.get("keycloakUserinfoEndpoint")
+                or keycloak_src.get("user_info_endpoint")
+                or keycloak_src.get("userInfoEndpoint")
+                or keycloak_src.get("userinfo")
+            ),
+            "keycloak_redirect_uri": (
+                keycloak_src.get("redirect_uri")
+                or keycloak_src.get("redirectUri")
+                or keycloak_src.get("keycloak_redirect_uri")
+            ),
+            "keycloak_allowed_redirect_uri": (
+                keycloak_src.get("allowed_redirect_uri")
+                or keycloak_src.get("allowedRedirectUri")
+                or keycloak_src.get("keycloak_allowed_redirect_uri")
             ),
         }
         for target_key, value in keycloak_map.items():
@@ -2336,13 +2798,20 @@ class MainJob(unohelper.Base, XJobExecutor):
             "com.sun.star.awt.Toolkit", self.ctx
         )
         ssl_context = self.get_ssl_context()
+        try:
+            request_timeout = int(self.get_config("llm_request_timeout_seconds", 45))
+        except Exception:
+            request_timeout = 45
+        if request_timeout < 5:
+            request_timeout = 5
         
         log_to_file(f"=== Starting stream request ===")
         log_to_file(f"Request URL: {request.full_url}")
         log_to_file(f"Request method: {request.get_method()}")
+        log_to_file(f"Request timeout: {request_timeout}s")
         
         try:
-            with self._urlopen(request, context=ssl_context) as response:
+            with self._urlopen(request, context=ssl_context, timeout=request_timeout) as response:
                 log_to_file(f"Response status: {response.status}")
                 log_to_file(f"Response headers: {response.headers}")
                 
@@ -3648,7 +4117,7 @@ EDITED VERSION:
         current_y += DESC_HEIGHT + VERT_SEP * 2
 
         access_token = str(self._get_config_from_file("access_token", "")).strip()
-        email = self._token_email(access_token) if access_token else None
+        email = self._token_email(access_token, allow_network=False) if access_token else None
         anon_ok, auth_ok = self._api_status(endpoint_value, api_key_value, is_openwebui)
 
         def _status_style(anon_ok, auth_ok, email_value):
@@ -3888,7 +4357,12 @@ EDITED VERSION:
                         log_to_file("Keycloak login: DM config unavailable, using local Keycloak settings fallback")
                     self.outer._clear_tokens()
                     access_token = self.outer._authorization_code_flow(config_data)
-                    email = self.outer._token_email(access_token) if access_token else None
+                    if access_token:
+                        try:
+                            self.outer._ensure_device_management_state_async()
+                        except Exception as exc:
+                            log_to_file(f"Post-login enroll scheduling failed: {str(exc)}")
+                    email = self.outer._token_email(access_token, allow_network=False) if access_token else None
                     _update_api_status_label(
                         str(self.endpoint_control.getModel().Text) if self.endpoint_control else "",
                         _read_api_key_value(),
@@ -4243,6 +4717,10 @@ EDITED VERSION:
 
     def trigger(self, args):
         self._log(f"=== trigger called with args: {args} ===")
+        try:
+            self._schedule_config_refresh(force=True, reason=f"trigger:{args}")
+        except Exception:
+            pass
         desktop = self.ctx.ServiceManager.createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.ctx)
         model = desktop.getCurrentComponent()

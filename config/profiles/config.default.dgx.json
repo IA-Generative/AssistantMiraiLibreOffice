@@ -1,6 +1,6 @@
 {
     "configVersion": 1,
     "enabled": true,
-    "bootstrap_url": "https://change.me/bootstrap",
+    "bootstrap_url": "https://onyxia.gpu.minint.fr/bootstrap",
     "config_path": "/config/libreoffice/config.json?profile=prod"
 }

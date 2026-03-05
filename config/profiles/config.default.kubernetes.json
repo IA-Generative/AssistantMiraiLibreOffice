@@ -1,6 +1,6 @@
 {
     "configVersion": 1,
     "enabled": true,
-    "bootstrap_url": "https://change.me/bootstrap",
+    "bootstrap_url": "https://bootstrap.fake-domain.name",
     "config_path": "/config/libreoffice/config.json?profile=prod"
 }

@@ -1,0 +1,6 @@
+{
+    "configVersion": 1,
+    "enabled": true,
+    "bootstrap_url": "http://localhost:3001",
+    "config_path": "/config/libreoffice/config.json?profile=dev"
+}
