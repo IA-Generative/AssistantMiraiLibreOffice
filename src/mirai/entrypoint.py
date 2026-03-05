@@ -2870,7 +2870,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         BUTTON_WIDTH = 100
         BUTTON_HEIGHT = 26
         HORI_SEP = VERT_SEP = 8
-        LABEL_HEIGHT = BUTTON_HEIGHT * 2 + 5
+        LABEL_HEIGHT = 26
         EDIT_HEIGHT = 80
         HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT + VERT_SEP + BUTTON_HEIGHT
         import uno
@@ -2926,14 +2926,15 @@ class MainJob(unohelper.Base, XJobExecutor):
                     log_to_file(f"Dialog prop unsupported: control={name} type={type} prop={key} error={str(e)}")
             return control
 
-        label_width = WIDTH - BUTTON_WIDTH - HORI_SEP - HORI_MARGIN * 2
-        add("label", "FixedText", HORI_MARGIN, VERT_MARGIN, label_width, LABEL_HEIGHT, 
+        edit_y = VERT_MARGIN + LABEL_HEIGHT + VERT_SEP
+        btn_y = edit_y + EDIT_HEIGHT + VERT_SEP
+        add("label", "FixedText", HORI_MARGIN, VERT_MARGIN, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
             {"Label": str(message), "NoLabel": True})
-        add("btn_ok", "Button", HORI_MARGIN + label_width + HORI_SEP, VERT_MARGIN, 
-                BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": OK, "DefaultButton": True, "Label": ok_label})
-        add("edit", "Edit", HORI_MARGIN, LABEL_HEIGHT + VERT_MARGIN + VERT_SEP, 
+        add("edit", "Edit", HORI_MARGIN, edit_y,
                 WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": str(default), "MultiLine": True})
-        add("btn_cancel", "Button", HORI_MARGIN + label_width + HORI_SEP, VERT_MARGIN + BUTTON_HEIGHT + VERT_SEP, 
+        add("btn_ok", "Button", HORI_MARGIN, btn_y,
+                BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": OK, "DefaultButton": True, "Label": ok_label})
+        add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, btn_y,
                 BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": CANCEL, "Label": cancel_label})
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
@@ -2960,14 +2961,17 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         wait_dialog = {"dialog": None, "bg": None, "toolkit": None}
         wait_buffer = {"text": "Contacte MIrAI..."}
+        cancelled = {"value": False}
         def _show_wait():
             try:
                 from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
                 WIDTH = 420
-                HEIGHT = 140
+                BUTTON_HEIGHT = 26
                 HORI_MARGIN = VERT_MARGIN = 8
                 LABEL_HEIGHT = 18
-                BG_HEIGHT = HEIGHT - VERT_MARGIN * 2 - LABEL_HEIGHT - 6
+                VERT_SEP = 8
+                BG_HEIGHT = 96
+                HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + BG_HEIGHT + VERT_SEP + BUTTON_HEIGHT
                 ctx = uno.getComponentContext()
                 def create(name):
                     return ctx.getServiceManager().createInstanceWithContext(name, ctx)
@@ -2998,7 +3002,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                 add("label_wait", "FixedText", HORI_MARGIN, VERT_MARGIN,
                     WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
                     {"Label": "MIrAI réfléchi...", "NoLabel": True})
-                bg = add("edit_wait_bg", "Edit", HORI_MARGIN, VERT_MARGIN + LABEL_HEIGHT + 6,
+                bg_y = VERT_MARGIN + LABEL_HEIGHT + VERT_SEP
+                bg = add("edit_wait_bg", "Edit", HORI_MARGIN, bg_y,
                     WIDTH - HORI_MARGIN * 2, BG_HEIGHT,
                     {"Text": wait_buffer["text"], "MultiLine": True, "ReadOnly": True})
                 if bg:
@@ -3009,6 +3014,27 @@ class MainJob(unohelper.Base, XJobExecutor):
                         bg.getModel().Border = 0
                     except Exception:
                         pass
+                btn_cancel_y = bg_y + BG_HEIGHT + VERT_SEP
+                CANCEL_BTN_WIDTH = 100
+                btn_cancel_wait = add(
+                    "btn_cancel_wait", "Button",
+                    WIDTH // 2 - CANCEL_BTN_WIDTH // 2, btn_cancel_y,
+                    CANCEL_BTN_WIDTH, BUTTON_HEIGHT,
+                    {"Label": "Annuler"}
+                )
+
+                class CancelWaitListener(unohelper.Base, XActionListener):
+                    def actionPerformed(self, event):
+                        cancelled["value"] = True
+                    def disposing(self, event):
+                        return
+
+                if btn_cancel_wait:
+                    try:
+                        btn_cancel_wait.addActionListener(CancelWaitListener())
+                    except Exception:
+                        pass
+
                 frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
                 window = frame.getContainerWindow() if frame else None
                 toolkit = create("com.sun.star.awt.Toolkit")
@@ -3132,6 +3158,8 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         def append_text(chunk_text):
             nonlocal accumulated_text
+            if cancelled["value"]:
+                return
             accumulated_text += chunk_text
             _update_wait(chunk_text)
             lower_text = accumulated_text.lower()
@@ -3185,14 +3213,15 @@ EDITED VERSION:
             _show_wait()
             request = _edit_segment(original_text)
             self.stream_request(request, api_type, append_text)
+            _close_wait()
+            if cancelled["value"]:
+                return
             if aborted["value"]:
                 self._show_message(
                     "Modification",
                     "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
                 )
-                _close_wait()
                 return
-            _close_wait()
             if not accumulated_text.strip():
                 self._show_message(
                     "Modification",
@@ -3262,7 +3291,7 @@ EDITED VERSION:
 
         WIDTH = 720
         HORI_MARGIN = VERT_MARGIN = 8
-        BUTTON_WIDTH = 110
+        BUTTON_WIDTH = 130
         BUTTON_HEIGHT = 26
         HORI_SEP = VERT_SEP = 8
         LABEL_HEIGHT = 22
@@ -3852,16 +3881,16 @@ EDITED VERSION:
 
     def settings_box(self,title="", x=None, y=None):
         """ Settings dialog with configurable backend options """
-        WIDTH = 660
+        WIDTH = 720
         HORI_MARGIN = VERT_MARGIN = 10
         BUTTON_WIDTH = 140
-        BUTTON_HEIGHT = 26
+        BUTTON_HEIGHT = 32
         HORI_SEP = 8
         VERT_SEP = 6
-        LABEL_HEIGHT = 18
+        LABEL_HEIGHT = 22
         EDIT_HEIGHT = 24
         IMAGE_HEIGHT = 132
-        EXTRA_BOTTOM = 30
+        EXTRA_BOTTOM = 60
         DESC_HEIGHT = EDIT_HEIGHT * 2
         TEST_ROW_HEIGHT = BUTTON_HEIGHT + VERT_SEP
         import uno
@@ -4002,7 +4031,7 @@ EDITED VERSION:
         ]
 
         num_fields = len(field_specs)
-        total_field_height = num_fields * (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP * 2) + TEST_ROW_HEIGHT
+        total_field_height = num_fields * (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP * 2) + TEST_ROW_HEIGHT + (BUTTON_HEIGHT - LABEL_HEIGHT)
         desc_block_height = LABEL_HEIGHT + VERT_SEP + DESC_HEIGHT + VERT_SEP * 2
         HEIGHT = VERT_MARGIN * 2 + IMAGE_HEIGHT + VERT_SEP + total_field_height + desc_block_height + LABEL_HEIGHT + BUTTON_HEIGHT * 2 + VERT_SEP * 6 + EXTRA_BOTTOM
         dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
@@ -4067,13 +4096,13 @@ EDITED VERSION:
             edit_name = f"edit_{field['name']}"
             label_width = WIDTH - HORI_MARGIN * 2
             if field.get("name") == "api_key":
-                label_width -= 60
+                label_width -= (80 + HORI_SEP)
             add(label_name, "FixedText", HORI_MARGIN, current_y, label_width, LABEL_HEIGHT,
                 {"Label": field["label"], "NoLabel": True})
             if field.get("name") == "api_key":
-                add("toggle_api_key", "Button", HORI_MARGIN + label_width - 9, current_y, 70, LABEL_HEIGHT,
-                    {"Label": "Révéler", "FontHeight": 8})
-            current_y += LABEL_HEIGHT + VERT_SEP
+                add("toggle_api_key", "Button", HORI_MARGIN + label_width + HORI_SEP, current_y, 80, BUTTON_HEIGHT,
+                    {"Label": "Révéler", "NoLabel": True})
+            current_y += (BUTTON_HEIGHT if field.get("name") == "api_key" else LABEL_HEIGHT) + VERT_SEP
             if field.get("type") == "list":
                 items = field.get("items") or []
                 control = add(edit_name, "ListBox", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
@@ -4103,8 +4132,8 @@ EDITED VERSION:
                             pass
             current_y += EDIT_HEIGHT + VERT_SEP * 2
             if field.get("name") == "api_key":
-                add("btn_test_token", "Button", HORI_MARGIN, current_y - VERT_SEP, 120, BUTTON_HEIGHT,
-                    {"Label": "♻️ Rafraîchir", "Name": "test_token"})
+                add("btn_test_token", "Button", HORI_MARGIN, current_y - VERT_SEP, 140, BUTTON_HEIGHT,
+                    {"Label": "♻️ Rafraîchir", "Name": "test_token", "NoLabel": True})
                 current_y += TEST_ROW_HEIGHT
 
         description_label = "Description du modèle:"
@@ -4143,13 +4172,13 @@ EDITED VERSION:
         add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
             {"PushButtonType": CANCEL, "Label": "Annuler"})
         keycloak_width = 96
-        reload_width = 110
-        reload_x = WIDTH - HORI_MARGIN - reload_width
-        keycloak_x = reload_x - HORI_SEP - keycloak_width
+        keycloak_x = HORI_MARGIN + (BUTTON_WIDTH + HORI_SEP) * 2
+        reload_x = keycloak_x + keycloak_width + HORI_SEP
+        reload_width = WIDTH - HORI_MARGIN - reload_x
         add("btn_keycloak", "Button", keycloak_x, current_y,
-            keycloak_width, BUTTON_HEIGHT, {"Label": "🔐 Login", "Name": "keycloak_login", "Tabstop": True, "Enabled": True, "FontHeight": 8})
+            keycloak_width, BUTTON_HEIGHT, {"Label": "🔐 Login", "Name": "keycloak_login", "Tabstop": True, "Enabled": True, "NoLabel": True})
         add("btn_reload_config", "Button", reload_x,
-            current_y, reload_width, BUTTON_HEIGHT, {"Label": "🔄 Config", "Name": "reload_config", "Tabstop": True, "Enabled": True, "FontHeight": 8})
+            current_y, reload_width, BUTTON_HEIGHT, {"Label": "🔄 Recharger configuration", "Name": "reload_config", "Tabstop": True, "Enabled": True, "NoLabel": True})
         dialog.setPosSize(0, 0, WIDTH, current_y + BUTTON_HEIGHT + 20, SIZE)
 
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
