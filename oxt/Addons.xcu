@@ -21,19 +21,13 @@
             </prop>
           </node>  
           <node oor:name="M1" oor:op="replace">
-            <prop oor:name="Title" oor:type="xs:string">
-              <value>────────────</value>
-            </prop>
             <prop oor:name="URL" oor:type="xs:string">
-              <value>service:fr.gouv.interieur.mirai.do?MenuSeparator</value>
+              <value>private:separator</value>
             </prop>
-            <prop oor:name="Target" oor:type="xs:string">
-              <value>_self</value>
-            </prop>
-          </node> 
+          </node>
           <node oor:name="M2" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">✨ Générer la suite (de la selection)</value>
+              <value xml:lang="en-US">✨ Générer la suite (de la sélection)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?ExtendSelection</value>
@@ -44,7 +38,7 @@
           </node>
            <node oor:name="M3" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">✏️ Modifier la selection</value>
+              <value xml:lang="en-US">🖊️ Modifier la sélection</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?EditSelection</value>
@@ -76,14 +70,8 @@
             </prop>
           </node>
           <node oor:name="M6" oor:op="replace">
-            <prop oor:name="Title" oor:type="xs:string">
-              <value>────────────</value>
-            </prop>
             <prop oor:name="URL" oor:type="xs:string">
-              <value>service:fr.gouv.interieur.mirai.do?MenuSeparator</value>
-            </prop>
-            <prop oor:name="Target" oor:type="xs:string">
-              <value>_self</value>
+              <value>private:separator</value>
             </prop>
           </node>
           <node oor:name="M7" oor:op="replace">
@@ -98,19 +86,13 @@
             </prop>
           </node>
           <node oor:name="M8" oor:op="replace">
-            <prop oor:name="Title" oor:type="xs:string">
-              <value>────────────</value>
-            </prop>
             <prop oor:name="URL" oor:type="xs:string">
-              <value>service:fr.gouv.interieur.mirai.do?MenuSeparator</value>
-            </prop>
-            <prop oor:name="Target" oor:type="xs:string">
-              <value>_self</value>
+              <value>private:separator</value>
             </prop>
           </node>
           <node oor:name="M9" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">⚙️ Parametres</value>
+              <value xml:lang="en-US">⚙️ Paramètres</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?settings</value>
@@ -120,14 +102,8 @@
             </prop>
           </node>
           <node oor:name="M10" oor:op="replace">
-            <prop oor:name="Title" oor:type="xs:string">
-              <value>────────────</value>
-            </prop>
             <prop oor:name="URL" oor:type="xs:string">
-              <value>service:fr.gouv.interieur.mirai.do?MenuSeparator</value>
-            </prop>
-            <prop oor:name="Target" oor:type="xs:string">
-              <value>_self</value>
+              <value>private:separator</value>
             </prop>
           </node>
         </node>
