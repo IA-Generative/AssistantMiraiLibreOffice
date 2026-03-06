@@ -1195,7 +1195,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         digest = hashlib.sha256(verifier.encode("utf-8")).digest()
         return base64.urlsafe_b64encode(digest).decode("utf-8").rstrip("=")
 
-    def _wait_for_auth_code(self, redirect_uri, timeout_seconds=120, tick=None):
+    def _wait_for_auth_code(self, redirect_uri, timeout_seconds=120, tick=None, cancel_event=None):
         try:
             parsed = urllib.parse.urlparse(redirect_uri)
             if parsed.scheme != "http" or parsed.hostname not in ("localhost", "127.0.0.1"):
@@ -1206,9 +1206,17 @@ class MainJob(unohelper.Base, XJobExecutor):
         except Exception:
             return None, "redirect_uri_invalid"
 
+        if cancel_event is None:
+            cancel_event = threading.Event()
+
+        done_event = threading.Event()
         result = {"code": None, "error": None}
 
         from http.server import BaseHTTPRequestHandler, HTTPServer
+        try:
+            from http.server import ThreadingHTTPServer as CallbackHTTPServer
+        except Exception:
+            CallbackHTTPServer = HTTPServer
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
@@ -1229,6 +1237,8 @@ class MainJob(unohelper.Base, XJobExecutor):
                 log_to_file(f"PKCE callback parsed: code={'set' if code else 'none'} error={error or 'none'}")
                 result["code"] = code
                 result["error"] = error
+                if code or error:
+                    done_event.set()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.end_headers()
@@ -1260,25 +1270,52 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         bind_host = "" if host in ("localhost", "127.0.0.1") else host
         try:
-            httpd = HTTPServer((bind_host, port), Handler)
-            httpd.timeout = 1
+            httpd = CallbackHTTPServer((bind_host, port), Handler)
+            if hasattr(httpd, "daemon_threads"):
+                httpd.daemon_threads = True
         except Exception as e:
             log_to_file(f"Failed to start local callback server: {str(e)}")
             return None, "callback_server_error"
         log_to_file(f"Local callback server listening on http://{bind_host or '0.0.0.0'}:{port}{path}")
 
+        server_thread = threading.Thread(
+            target=httpd.serve_forever,
+            kwargs={"poll_interval": 0.1},
+            daemon=True
+        )
+        server_thread.start()
+
         start = time.time()
-        while time.time() - start < timeout_seconds and not result["code"] and not result["error"]:
-            httpd.handle_request()
-            if tick:
+        try:
+            while (
+                time.time() - start < timeout_seconds
+                and not done_event.is_set()
+                and not cancel_event.is_set()
+            ):
+                if tick:
+                    try:
+                        tick()
+                    except Exception:
+                        pass
+                time.sleep(0.1)
+        finally:
+            try:
+                httpd.shutdown()
+            except Exception:
+                pass
+            httpd.server_close()
+            if server_thread.is_alive():
                 try:
-                    tick()
+                    server_thread.join(timeout=1)
                 except Exception:
                     pass
-        httpd.server_close()
 
+        if cancel_event.is_set() and not result["code"] and not result["error"]:
+            return None, "cancelled_by_user"
         if result["error"]:
             return None, result["error"]
+        if not result["code"]:
+            return None, "timeout"
         return result["code"], None
 
     def _validate_redirect_uri(self, redirect_uri):
@@ -1386,6 +1423,8 @@ class MainJob(unohelper.Base, XJobExecutor):
             except Exception as e:
                 log_to_file(f"Failed to open browser: {str(e)}")
 
+        auth_cancel_event = threading.Event()
+
         def _show_auth_wait_dialog():
             try:
                 from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
@@ -1396,14 +1435,20 @@ class MainJob(unohelper.Base, XJobExecutor):
                 dialog.setModel(dialog_model)
                 dialog.setVisible(False)
                 dialog.setTitle("")
-                dialog.setPosSize(0, 0, 300, 90, SIZE)
+                dialog.setPosSize(0, 0, 300, 120, SIZE)
 
                 label_model = dialog_model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
                 dialog_model.insertByName("auth_wait_label", label_model)
                 label_model.Label = "Authentification Keycloak..."
                 label_model.NoLabel = True
                 label = dialog.getControl("auth_wait_label")
-                label.setPosSize(10, 30, 280, 20, POSSIZE)
+                label.setPosSize(10, 24, 280, 20, POSSIZE)
+
+                btn_model = dialog_model.createInstance("com.sun.star.awt.UnoControlButtonModel")
+                dialog_model.insertByName("auth_wait_cancel", btn_model)
+                btn_model.Label = "Annuler"
+                btn = dialog.getControl("auth_wait_cancel")
+                btn.setPosSize(100, 72, 100, 26, POSSIZE)
 
                 frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
                 window = frame.getContainerWindow() if frame else None
@@ -1412,14 +1457,25 @@ class MainJob(unohelper.Base, XJobExecutor):
                 if window:
                     ps = window.getPosSize()
                     _x = ps.Width / 2 - 150
-                    _y = ps.Height / 2 - 45
+                    _y = ps.Height / 2 - 60
                     dialog.setPosSize(_x, _y, 0, 0, POS)
                 dialog.setVisible(True)
-                return dialog, label, toolkit
+                return dialog, label, btn, toolkit
             except Exception:
-                return None, None, None
+                return None, None, None, None
 
-        wait_dialog, wait_label, wait_toolkit = _show_auth_wait_dialog()
+        class CancelAuthListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, event):
+                auth_cancel_event.set()
+            def disposing(self, event):
+                return
+
+        wait_dialog, wait_label, wait_cancel_btn, wait_toolkit = _show_auth_wait_dialog()
+        if wait_cancel_btn:
+            try:
+                wait_cancel_btn.addActionListener(CancelAuthListener())
+            except Exception:
+                pass
         tick_state = {"i": 0}
         def _tick():
             if not wait_label or not wait_toolkit:
@@ -1427,18 +1483,24 @@ class MainJob(unohelper.Base, XJobExecutor):
             tick_state["i"] += 1
             dots = "." * ((tick_state["i"] % 3) + 1)
             try:
-                wait_label.getModel().Label = f"Authentification Keycloak{dots}"
+                if auth_cancel_event.is_set():
+                    wait_label.getModel().Label = "Annulation..."
+                else:
+                    wait_label.getModel().Label = f"Authentification Keycloak{dots}"
                 wait_toolkit.processEventsToIdle()
             except Exception:
                 pass
 
-        code, error = self._wait_for_auth_code(redirect_uri, tick=_tick)
+        code, error = self._wait_for_auth_code(redirect_uri, tick=_tick, cancel_event=auth_cancel_event)
         if wait_dialog:
             try:
                 wait_dialog.setVisible(False)
                 wait_dialog.dispose()
             except Exception:
                 pass
+        if error == "cancelled_by_user":
+            log_to_file("Authorization code flow cancelled by user")
+            return None
         if not code:
             log_to_file(f"Authorization code flow failed: {error}")
             return None
