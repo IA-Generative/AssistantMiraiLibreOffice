@@ -561,26 +561,48 @@ class SecureBootstrapFlow(object):
                 "public_key": public_key,
             }
             enroll_resp = self._request_json("POST", self._enroll_url(), body=payload, timeout=10, use_proxy=None)
+            token, expires_in, expires_at = self._extract_token(enroll_resp)
             enroll_id = str(enroll_resp.get("enroll_id") or enroll_resp.get("id") or "").strip()
             challenge = enroll_resp.get("challenge")
-            if not enroll_id or not challenge:
-                raise SecureFlowError("invalid enroll response")
-            signature = self._sign_payload(self._challenge_bytes(challenge))
-            confirm_payload = {
-                "enroll_id": enroll_id,
-                "plugin_uuid": self.plugin_uuid,
-                "signature": signature,
-                "public_key": public_key,
-            }
-            confirm_resp = self._request_json(
-                "POST",
-                self._enroll_confirm_url(),
-                body=confirm_payload,
-                timeout=10,
-                use_proxy=None,
-            )
-            token, expires_in, expires_at = self._extract_token(confirm_resp)
-            self._state["enroll_id"] = enroll_id
+            if enroll_id and challenge:
+                signature = self._sign_payload(self._challenge_bytes(challenge))
+                confirm_payload = {
+                    "enroll_id": enroll_id,
+                    "plugin_uuid": self.plugin_uuid,
+                    "signature": signature,
+                    "public_key": public_key,
+                }
+                try:
+                    confirm_resp = self._request_json(
+                        "POST",
+                        self._enroll_confirm_url(),
+                        body=confirm_payload,
+                        timeout=10,
+                        use_proxy=None,
+                    )
+                    token, expires_in, expires_at = self._extract_token(confirm_resp)
+                except HttpStatusError as exc:
+                    if exc.status != 404:
+                        raise
+
+            if not token:
+                # Compatibility path for bootstrap services exposing /enroll but no /enroll/confirm.
+                try:
+                    response = self._request_json(
+                        "GET",
+                        self._telemetry_token_url(),
+                        timeout=10,
+                        use_proxy=None,
+                    )
+                    token, expires_in, expires_at = self._extract_token(response)
+                except HttpStatusError as exc:
+                    if exc.status not in (401, 403, 404):
+                        raise
+
+            if enroll_id:
+                self._state["enroll_id"] = enroll_id
+            elif not self._state.get("enroll_id"):
+                self._state["enroll_id"] = self.plugin_uuid
             self._state["enrolled_at"] = self._effective_now()
             if token:
                 self._store_token(token, expires_in=expires_in, expires_at=expires_at, kind="preauth")
@@ -660,15 +682,23 @@ class SecureBootstrapFlow(object):
             if not self._state.get("enroll_id"):
                 self.enroll_anonymous()
             payload = self._device_proof()
-            response = self._request_json(
-                "POST",
-                self._bind_url(),
-                body=payload,
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-                use_proxy=None,
-            )
-            user_token, expires_in, expires_at = self._extract_token(response)
+            try:
+                response = self._request_json(
+                    "POST",
+                    self._bind_url(),
+                    body=payload,
+                    headers={"Authorization": f"Bearer {token}"},
+                    timeout=10,
+                    use_proxy=None,
+                )
+                user_token, expires_in, expires_at = self._extract_token(response)
+            except HttpStatusError as exc:
+                if exc.status != 404:
+                    raise
+                telemetry = self._state.get("telemetry", {})
+                user_token = str(telemetry.get("token") or "").strip()
+                expires_in = None
+                expires_at = telemetry.get("expires_at")
             if user_token:
                 self._store_token(user_token, expires_in=expires_in, expires_at=expires_at, kind="user")
             return self._state.get("telemetry", {}).get("token", "")

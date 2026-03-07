@@ -1618,12 +1618,41 @@ class MainJob(unohelper.Base, XJobExecutor):
             log_to_file("Device management token email verification failed")
             return
 
+        bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip().rstrip("/")
+        settings = self._select_settings(config_data) if isinstance(config_data, dict) else {}
+
         enroll_endpoint = ""
-        endpoints = config_data.get("endpoints", {}) if isinstance(config_data, dict) else {}
-        if isinstance(endpoints, dict):
-            enroll_endpoint = endpoints.get("enroll") or endpoints.get("enroll_endpoint") or endpoints.get("enrollEndpoint") or ""
-        if not enroll_endpoint:
-            enroll_endpoint = config_data.get("enroll") or config_data.get("enroll_endpoint") or config_data.get("enrollEndpoint") or ""
+        sources = []
+        if isinstance(settings, dict):
+            sources.append(settings)
+        if isinstance(config_data, dict):
+            sources.append(config_data)
+
+        for source in sources:
+            endpoints = source.get("endpoints", {})
+            if isinstance(endpoints, dict):
+                enroll_endpoint = str(
+                    endpoints.get("enroll")
+                    or endpoints.get("enroll_endpoint")
+                    or endpoints.get("enrollEndpoint")
+                    or ""
+                ).strip()
+            if enroll_endpoint:
+                break
+            enroll_endpoint = str(
+                source.get("enroll")
+                or source.get("enroll_endpoint")
+                or source.get("enrollEndpoint")
+                or ""
+            ).strip()
+            if enroll_endpoint:
+                break
+
+        if enroll_endpoint.startswith("/") and bootstrap_url:
+            enroll_endpoint = bootstrap_url + enroll_endpoint
+        if not enroll_endpoint and bootstrap_url:
+            enroll_endpoint = bootstrap_url + "/enroll"
+            log_to_file(f"Device management enroll endpoint fallback applied: {enroll_endpoint}")
 
         if not enroll_endpoint:
             return
