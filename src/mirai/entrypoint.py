@@ -2702,7 +2702,17 @@ class MainJob(unohelper.Base, XJobExecutor):
         if api_key:
             endpoint_base, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
             models_path = (api_path + "/models") if api_path else "/models"
-            auth_ok = self._api_reachable(endpoint_base, auth_headers, is_openwebui, models_path)
+            _, detail = self._api_probe(endpoint_base, auth_headers, models_path)
+            status = detail.get("status")
+            if status in (401, 403):
+                auth_ok = False
+                log_to_file(f"API auth probe rejected: status={status} url={detail.get('url')}")
+            elif status is not None:
+                # Accept non-auth errors (e.g. 404) as "auth reachable":
+                # some providers do not expose /models despite valid credentials.
+                auth_ok = True
+            else:
+                auth_ok = False
 
         return anon_ok, auth_ok
 
