@@ -280,6 +280,9 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._edit_dialog = None
         self._secure_flow = None
         self._secure_flow_lock = threading.RLock()
+        self._last_loaded_ca_bundle = None
+        self._last_ca_bundle_error = None
+        self._last_logged_ca_bundle_error = None
         # handling different situations (inside LibreOffice or other process)
         try:
             self.sm = ctx.getServiceManager()
@@ -2870,15 +2873,64 @@ class MainJob(unohelper.Base, XJobExecutor):
 
     def get_ssl_context(self):
         """
-        Create an SSL context that doesn't verify certificates.
-        This is needed for some environments where SSL certificates are not properly configured.
+        Create an SSL context for HTTP calls.
+        If available, load the bundled CA chain used by bootstrap endpoints.
         """
         allow_insecure = self._as_bool(self._get_config_from_file("proxy_allow_insecure_ssl", False))
-        if not allow_insecure:
-            return ssl.create_default_context()
         ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        if allow_insecure:
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            return ssl_context
+
+        loaded_bundle = None
+        configured_bundle = str(self._get_config_from_file("ca_bundle_path", "") or "").strip()
+        candidate_paths = []
+        if configured_bundle:
+            if configured_bundle.startswith("file://"):
+                try:
+                    configured_bundle = str(uno.fileUrlToSystemPath(configured_bundle))
+                except Exception:
+                    pass
+            if os.path.isabs(configured_bundle):
+                candidate_paths.append(configured_bundle)
+            else:
+                candidate_paths.append(os.path.join(self._get_user_config_dir(), configured_bundle))
+                candidate_paths.append(os.path.join(os.path.dirname(__file__), configured_bundle))
+
+        candidate_paths.append(
+            os.path.join(
+                os.path.dirname(__file__),
+                "CAbundle",
+                "scaleway-bootstrap-ca-chain.pem",
+            )
+        )
+
+        seen = set()
+        for path in candidate_paths:
+            candidate = str(path or "").strip()
+            if not candidate or candidate in seen:
+                continue
+            seen.add(candidate)
+            if not os.path.isfile(candidate):
+                continue
+            try:
+                ssl_context.load_verify_locations(cafile=candidate)
+                loaded_bundle = candidate
+                break
+            except Exception as exc:
+                self._last_ca_bundle_error = str(exc)
+
+        if loaded_bundle and loaded_bundle != self._last_loaded_ca_bundle:
+            self._last_loaded_ca_bundle = loaded_bundle
+            self._last_ca_bundle_error = None
+            self._last_logged_ca_bundle_error = None
+            log_to_file(f"SSL CA bundle loaded: {loaded_bundle}")
+        elif not loaded_bundle and self._last_ca_bundle_error:
+            if self._last_ca_bundle_error != self._last_logged_ca_bundle_error:
+                log_to_file(f"SSL CA bundle load failed: {self._last_ca_bundle_error}")
+                self._last_logged_ca_bundle_error = self._last_ca_bundle_error
+
         return ssl_context
 
     def stream_request(self, request, api_type, append_callback):
