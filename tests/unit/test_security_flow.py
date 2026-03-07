@@ -113,6 +113,17 @@ class SecurityFlowTests(unittest.TestCase):
         self.assertEqual(token, "preauth-from-token-endpoint")
         self.assertEqual(self.flow.telemetry_kind(), "preauth")
 
+    def test_anonymous_enroll_without_confirm_endpoint_uses_token_endpoint(self):
+        self.http.add("POST", "/bootstrap/enroll", body={"ok": True})
+        self.http.add(
+            "GET",
+            "/bootstrap/telemetry/token",
+            body={"telemetryKey": "preauth-fallback-token", "telemetryKeyTtlSeconds": 120},
+        )
+        token = self.flow.enroll_anonymous()
+        self.assertEqual(token, "preauth-fallback-token")
+        self.assertEqual(self.flow.telemetry_kind(), "preauth")
+
     def test_proactive_refresh_when_expiring_in_less_than_30s(self):
         self._seed_identity()
         self.flow._state["telemetry"] = {
@@ -145,6 +156,19 @@ class SecurityFlowTests(unittest.TestCase):
         )
         token = self.flow.bind_identity("access-token")
         self.assertEqual(token, "user-token")
+        self.assertEqual(self.flow.telemetry_kind(), "user")
+
+    def test_bind_identity_without_endpoint_marks_existing_token_as_user(self):
+        self._seed_identity()
+        self.flow._state["telemetry"] = {
+            "token": "preauth-token",
+            "expires_at": self.flow._effective_now() + 300,
+            "kind": "preauth",
+        }
+        self.flow._save_state()
+        self.http.add("POST", "/bootstrap/identity/bind", status=404, body={"detail": "not found"})
+        token = self.flow.bind_identity("access-token")
+        self.assertEqual(token, "preauth-token")
         self.assertEqual(self.flow.telemetry_kind(), "user")
 
     def test_queue_retry_and_ttl_purge(self):
