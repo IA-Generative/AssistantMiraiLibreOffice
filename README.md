@@ -44,6 +44,7 @@ Cette extension LibreOffice intègre un assistant d’écriture : génération d
     *   [Local Development Setup](#local-development-setup)
     *   [Building the Extension Package](#building-the-extension-package)
 *   [License](#license)
+*   [Grafana Monitoring Pack (Device Management)](#grafana-monitoring-pack-device-management)
 *   [Update History (Summary)](#update-history-summary)
 *   [Device Management (Status & TODO)](#device-management-status--todo)
 *   [Secure Bootstrap / Relay Flow](#secure-bootstrap--relay-flow)
@@ -330,6 +331,82 @@ In your `mirai.json` (or config file), you can configure:
 | `telemetrySel` | Telemetry salt | `mirai_salt` |
 | `telemetryHost` | Custom host | `""` (optional) |
 | `telemetryFormatProtobuf` | Protobuf format | `false` (not implemented) |
+
+---
+
+## Grafana Monitoring Pack (Device Management)
+
+For production monitoring, use the Device Management `/metrics` endpoint as a Prometheus source and build a minimal Grafana pack with 3 dashboards:
+
+1. `API/Ingress`
+2. `Queue/Workers`
+3. `Capacity/HPA`
+
+Recommended dashboard variables:
+- `$cluster`
+- `$namespace` (default: `bootstrap`)
+- `$host` (example: `bootstrap.fake-domain.name`)
+
+### Core metrics to include
+
+From Device Management `/metrics`:
+- `dm_metrics_scrape_success`
+- `dm_queue_available`
+- `dm_queue_pending_jobs`
+- `dm_queue_processing_jobs`
+- `dm_queue_dead_jobs`
+- `dm_queue_oldest_pending_age_seconds`
+- `dm_queue_stale_processing_jobs`
+- `dm_queue_done_jobs`
+
+From ingress / k8s metrics (if available in your Prometheus stack):
+- `nginx_ingress_controller_requests`
+- `nginx_ingress_controller_request_duration_seconds_bucket`
+- `kube_horizontalpodautoscaler_status_current_replicas`
+- `kube_horizontalpodautoscaler_status_desired_replicas`
+
+### PromQL examples (ready to copy)
+
+Queue health:
+```promql
+dm_queue_pending_jobs
+dm_queue_processing_jobs
+dm_queue_dead_jobs
+dm_queue_oldest_pending_age_seconds
+dm_queue_stale_processing_jobs
+```
+
+Ingress enroll error rate:
+```promql
+sum(rate(nginx_ingress_controller_requests{host="$host",path="/enroll",status=~"5.."}[5m]))
+/
+sum(rate(nginx_ingress_controller_requests{host="$host",path="/enroll"}[5m]))
+```
+
+Ingress enroll p95 latency:
+```promql
+histogram_quantile(
+  0.95,
+  sum(rate(nginx_ingress_controller_request_duration_seconds_bucket{host="$host",path="/enroll"}[5m])) by (le)
+)
+```
+
+HPA scaling view:
+```promql
+kube_horizontalpodautoscaler_status_current_replicas{namespace="$namespace",horizontalpodautoscaler=~"device-management|queue-worker"}
+kube_horizontalpodautoscaler_status_desired_replicas{namespace="$namespace",horizontalpodautoscaler=~"device-management|queue-worker"}
+```
+
+### Alert set (minimum)
+
+- `QueueBacklogHigh`: `dm_queue_pending_jobs > 1000` for 10m
+- `QueueOldestPendingTooHigh`: `dm_queue_oldest_pending_age_seconds > 60` for 10m
+- `QueueStaleProcessing`: `dm_queue_stale_processing_jobs > 0` for 5m
+- `QueueDeadLetters`: `dm_queue_dead_jobs > 0` for 5m
+- `MetricsScrapeFailed`: `dm_metrics_scrape_success == 0` for 2m
+- `Enroll5xxRateHigh`: enroll 5xx ratio > 1% for 10m
+
+Tip: version your Grafana JSON dashboards and alert rules in the same repo as Device Management infra manifests.
 
 ---
 
