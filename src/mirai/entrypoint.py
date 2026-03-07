@@ -280,6 +280,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._edit_dialog = None
         self._secure_flow = None
         self._secure_flow_lock = threading.RLock()
+        self._secure_flow_init_error = None
+        self._secure_legacy_fallback_logged = False
         self._last_loaded_ca_bundle = None
         self._last_ca_bundle_error = None
         self._last_logged_ca_bundle_error = None
@@ -381,6 +383,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         with self._secure_flow_lock:
             if self._secure_flow is not None:
                 return self._secure_flow
+            if self._secure_flow_init_error:
+                return None
             bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
             if not bootstrap_url:
                 return None
@@ -403,6 +407,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 )
             except Exception as exc:
                 log_to_file(f"Secure flow init failed: {str(exc)}")
+                self._secure_flow_init_error = str(exc)
                 return None
             self._secure_flow = flow
             return flow
@@ -429,8 +434,10 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not flow:
             bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
             if bootstrap_url:
-                log_to_file("Secure telemetry unavailable; legacy sender disabled for bootstrap mode")
-                return True
+                if not self._secure_legacy_fallback_logged:
+                    self._secure_legacy_fallback_logged = True
+                    log_to_file("Secure telemetry unavailable; fallback to legacy sender")
+                return False
             return False
         try:
             current_kind = flow.telemetry_kind()
@@ -1494,7 +1501,20 @@ class MainJob(unohelper.Base, XJobExecutor):
             except Exception:
                 pass
 
-        code, error = self._wait_for_auth_code(redirect_uri, tick=_tick, cancel_event=auth_cancel_event)
+        auth_timeout_seconds = 180
+        try:
+            auth_timeout_seconds = int(self._get_config_from_file("keycloak_auth_timeout_seconds", 180))
+        except Exception:
+            auth_timeout_seconds = 180
+        if auth_timeout_seconds < 60:
+            auth_timeout_seconds = 60
+
+        code, error = self._wait_for_auth_code(
+            redirect_uri,
+            timeout_seconds=auth_timeout_seconds,
+            tick=_tick,
+            cancel_event=auth_cancel_event
+        )
         if wait_dialog:
             try:
                 wait_dialog.setVisible(False)
@@ -1506,6 +1526,13 @@ class MainJob(unohelper.Base, XJobExecutor):
             return None
         if not code:
             log_to_file(f"Authorization code flow failed: {error}")
+            if error == "timeout":
+                self._show_message(
+                    "Connexion expirée",
+                    "Le login Keycloak a expiré avant le retour navigateur.\n\n"
+                    f"Redirection attendue:\n{redirect_uri}\n\n"
+                    "Vérifiez la redirection et relancez Login."
+                )
             return None
         log_to_file("Authorization code received, exchanging for token")
 
@@ -1728,6 +1755,12 @@ class MainJob(unohelper.Base, XJobExecutor):
             log_to_file("Using local cached access_token (DM config unavailable)")
             return fallback_token
         return ""
+
+    def _effective_api_token(self, preferred_token=""):
+        token = str(preferred_token or "").strip()
+        if token:
+            return token
+        return str(self._get_openwebui_access_token() or "").strip()
 
     def _auth_header(self):
         name = str(self.get_config("authHeaderName", "Authorization")).strip() or "Authorization"
@@ -2183,6 +2216,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
     def _fetch_models_list(self, endpoint, api_key, is_openwebui):
         endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
+        api_key = self._effective_api_token(api_key)
         if api_path:
             url = endpoint + api_path + "/models"
         else:
@@ -2237,6 +2271,7 @@ class MainJob(unohelper.Base, XJobExecutor):
 
     def _fetch_models_info(self, endpoint, api_key, is_openwebui):
         endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
+        api_key = self._effective_api_token(api_key)
         if api_path:
             url = endpoint + api_path + "/models"
         else:
@@ -2651,9 +2686,9 @@ class MainJob(unohelper.Base, XJobExecutor):
         return False, last_detail
 
     def _api_status(self, endpoint, api_key, is_openwebui):
-        anon_headers = {"Content-Type": "application/json"}
-        anon_ok = self._api_reachable(endpoint, anon_headers, is_openwebui, "https://chat.mirai.interieur.gouv.fr/health")
+        anon_ok, _ = self._endpoint_connectivity_status(endpoint, is_openwebui)
 
+        api_key = self._effective_api_token(api_key)
         auth_headers = {"Content-Type": "application/json"}
         if is_openwebui:
             header_name, header_prefix = self._auth_header()
@@ -2672,6 +2707,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         return anon_ok, auth_ok
 
     def _choose_model_via_ai(self, description, endpoint, api_key, is_openwebui):
+        api_key = self._effective_api_token(api_key)
         models = self._fetch_models_list(endpoint, api_key, is_openwebui)
         if not models:
             return None
@@ -2753,7 +2789,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             max_tokens = 15000
 
         endpoint = str(self.get_config("llm_base_urls", "http://127.0.0.1:5000")).rstrip("/")
-        api_key = str(self.get_config("llm_api_tokens", ""))
+        api_key = self._effective_api_token(self.get_config("llm_api_tokens", ""))
         if api_type is None:
             api_type = str(self.get_config("api_type", "completions")).lower()
         api_type = "chat" if api_type == "chat" else "completions"
@@ -4394,6 +4430,7 @@ EDITED VERSION:
             except Exception:
                 endpoint_val = ""
             api_key_val = _read_api_key_value()
+            effective_api_key = self._effective_api_token(api_key_val)
             log_to_file("Token test: start")
             conn_ok, conn_detail = self._endpoint_connectivity_status(endpoint_val, True)
             if not conn_ok:
@@ -4417,22 +4454,23 @@ EDITED VERSION:
                     )
                 log_to_file(f"Token test: connectivity failed url={url} err={err}")
                 return
-            anon_ok, auth_ok = _update_api_status_label(endpoint_val, api_key_val)
+            anon_ok, auth_ok = _update_api_status_label(endpoint_val, effective_api_key)
             if not auth_ok:
                 self._show_message(
                     "API",
-                    "Token invalide ou refusé."
+                    "Token invalide, absent, ou refusé."
                 )
                 log_to_file("Token test: auth failed")
                 return
             try:
                 if endpoint_val.startswith("http"):
                     self.set_config("llm_base_urls", endpoint_val)
-                self.set_config("llm_api_tokens", api_key_val)
-                log_to_file("Token test: token saved")
+                if api_key_val:
+                    self.set_config("llm_api_tokens", api_key_val)
+                    log_to_file("Token test: token saved")
             except Exception:
                 pass
-            models, model_descriptions_local = self._fetch_models_info(endpoint_val, api_key_val, True)
+            models, model_descriptions_local = self._fetch_models_info(endpoint_val, effective_api_key, True)
             if not models:
                 self._show_message(
                     "API",
