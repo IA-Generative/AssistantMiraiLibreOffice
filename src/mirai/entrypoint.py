@@ -35,6 +35,10 @@ from .security_flow import (
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/120.0"
 
+# Configure logging once at module level (thread-safe, not per-call)
+_log_file_path = os.path.join(os.path.expanduser('~'), 'log.txt')
+logging.basicConfig(filename=_log_file_path, level=logging.INFO, format='%(asctime)s - %(message)s')
+
 def _with_user_agent(headers=None):
     result = dict(headers) if headers else {}
     if "User-Agent" not in result:
@@ -61,16 +65,6 @@ def _curl_headers_for_log(headers):
     return " ".join(parts)
 
 def log_to_file(message):
-    # Get the user's home directory
-    home_directory = os.path.expanduser('~')
-    
-    # Define the log file path
-    log_file_path = os.path.join(home_directory, 'log.txt')
-    
-    # Set up logging configuration
-    logging.basicConfig(filename=log_file_path, level=logging.INFO, format='%(asctime)s - %(message)s')
-    
-    # Log the input message
     logging.info(message)
 
 
@@ -234,11 +228,8 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
             log_to_file(f"Content-Length: {len(json_data)}")
             log_to_file(f"===")
         
-        # Create SSL context that doesn't verify certificates (for internal endpoints)
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
-        
+        ssl_context = config.get_ssl_context() if hasattr(config, "get_ssl_context") else ssl.create_default_context()
+
         if hasattr(config, "_urlopen"):
             response = config._urlopen(req, context=ssl_context, timeout=5)
         else:
@@ -294,8 +285,10 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._config_refresh_in_progress = False
         self._config_refresh_last_started_at = 0
         self._config_async_min_interval = 20
+        self._auth_prompt_lock = threading.Lock()
         self._auth_prompt_in_progress = False
         self._auth_prompted_at = 0
+        self._config_write_lock = threading.Lock()
         self._edit_dialog = None
         self._secure_flow = None
         self._secure_flow_lock = threading.RLock()
@@ -837,38 +830,34 @@ class MainJob(unohelper.Base, XJobExecutor):
 
     def set_config(self, key, value):
         name_file = "config.json"
-        
+
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
         user_config_path = getattr(path_settings, "UserConfig")
 
         if user_config_path.startswith('file://'):
             user_config_path = str(uno.fileUrlToSystemPath(user_config_path))
 
-        # Ensure the path ends with the filename
         config_file_path = os.path.join(user_config_path, name_file)
 
-        # Load existing configuration if the file exists
-        if os.path.exists(config_file_path):
-            try:
-                with open(config_file_path, 'r', encoding='utf-8') as file:
-                    config_data = json.load(file)
-            except (IOError, json.JSONDecodeError):
+        with self._config_write_lock:
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, 'r', encoding='utf-8') as file:
+                        config_data = json.load(file)
+                except (IOError, json.JSONDecodeError):
+                    config_data = {}
+            else:
                 config_data = {}
-        else:
-            config_data = {}
 
-        # Update the configuration with the new key-value pair
-        config_data[key] = value
-        if key == "llm_default_models":
-            log_to_file(f"Model saved (local): {value}")
+            config_data[key] = value
+            if key == "llm_default_models":
+                log_to_file(f"Model saved (local): {value}")
 
-        # Write the updated configuration back to the file
-        try:
-            with open(config_file_path, 'w', encoding='utf-8') as file:
-                json.dump(config_data, file, indent=4, ensure_ascii=False)
-        except IOError as e:
-            # Handle potential IO errors (optional)
-            print(f"Error writing to {config_file_path}: {e}")
+            try:
+                with open(config_file_path, 'w', encoding='utf-8') as file:
+                    json.dump(config_data, file, indent=4, ensure_ascii=False)
+            except IOError as e:
+                log_to_file(f"Error writing to {config_file_path}: {e}")
 
     def _jwt_payload(self, token):
         try:
@@ -1217,7 +1206,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         return None
 
     def _pkce_code_verifier(self):
-        raw = base64.urlsafe_b64encode(os.urandom(40)).decode("utf-8")
+        # RFC 7636 recommends 32-96 bytes of entropy; 96 bytes → 128-char base64url verifier
+        raw = base64.urlsafe_b64encode(os.urandom(96)).decode("utf-8")
         return raw.rstrip("=")
 
     def _pkce_code_challenge(self, verifier):
@@ -1617,15 +1607,17 @@ class MainJob(unohelper.Base, XJobExecutor):
             return None
 
         now = time.time()
-        if self._auth_prompt_in_progress or (now - self._auth_prompted_at) < 30:
-            log_to_file("Auth prompt suppressed (already shown recently)")
-            return None
-        self._auth_prompt_in_progress = True
-        self._auth_prompted_at = now
+        with self._auth_prompt_lock:
+            if self._auth_prompt_in_progress or (now - self._auth_prompted_at) < 30:
+                log_to_file("Auth prompt suppressed (already shown recently)")
+                return None
+            self._auth_prompt_in_progress = True
+            self._auth_prompted_at = now
         try:
             auth_code_token = self._authorization_code_flow(config_data)
         finally:
-            self._auth_prompt_in_progress = False
+            with self._auth_prompt_lock:
+                self._auth_prompt_in_progress = False
         if auth_code_token:
             return auth_code_token
 
@@ -2233,25 +2225,28 @@ class MainJob(unohelper.Base, XJobExecutor):
         api_path = "/api" if is_openwebui else "/v1"
         return endpoint, api_path
 
-    def _fetch_models_list(self, endpoint, api_key, is_openwebui):
-        endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
-        api_key = self._effective_api_token(api_key)
-        if api_path:
-            url = endpoint + api_path + "/models"
-        else:
-            url = endpoint + "/models"
+    def _build_auth_headers(self, api_key):
+        """Build standard JSON + auth headers for API calls."""
         headers = {"Content-Type": "application/json"}
-        if is_openwebui:
-            header_name, header_prefix = self._auth_header()
-            if api_key:
-                headers[header_name] = f"{header_prefix}{api_key}"
-        elif api_key:
+        if api_key:
             header_name, header_prefix = self._auth_header()
             headers[header_name] = f"{header_prefix}{api_key}"
+        return headers
+
+    def _fetch_models(self, endpoint, api_key, is_openwebui, include_info=False):
+        """
+        Fetch models from the API endpoint.
+
+        Returns a list of model IDs when include_info=False,
+        or a (list, dict) tuple of (model_ids, descriptions) when include_info=True.
+        """
+        endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
+        api_key = self._effective_api_token(api_key)
+        url = endpoint + api_path + "/models" if api_path else endpoint + "/models"
+        headers = self._build_auth_headers(api_key)
 
         try:
-            curl_headers = _curl_headers_for_log(headers)
-            log_to_file(f"Models list curl: curl -i {curl_headers} '{url}'")
+            log_to_file(f"Models fetch curl: curl -i {_curl_headers_for_log(headers)} '{url}'")
         except Exception:
             pass
 
@@ -2261,67 +2256,16 @@ class MainJob(unohelper.Base, XJobExecutor):
                 payload = response.read().decode("utf-8")
             data = json.loads(payload)
         except Exception as e:
-            log_to_file(f"Failed to fetch models list: {str(e)}")
-            return []
+            log_to_file(f"Failed to fetch models: {str(e)}")
+            return ([], {}) if include_info else []
 
-        models = []
-        if isinstance(data, dict):
-            if isinstance(data.get("data"), list):
-                for item in data["data"]:
-                    if isinstance(item, dict):
-                        model_id = item.get("id") or item.get("model") or item.get("name")
-                        if model_id:
-                            models.append(str(model_id))
-            elif isinstance(data.get("models"), list):
-                for item in data["models"]:
-                    if isinstance(item, dict):
-                        model_id = item.get("id") or item.get("model") or item.get("name")
-                        if model_id:
-                            models.append(str(model_id))
-        elif isinstance(data, list):
-            for item in data:
-                if isinstance(item, str):
-                    models.append(item)
-                elif isinstance(item, dict):
-                    model_id = item.get("id") or item.get("model") or item.get("name")
-                    if model_id:
-                        models.append(str(model_id))
-        return models
-
-    def _fetch_models_info(self, endpoint, api_key, is_openwebui):
-        endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
-        api_key = self._effective_api_token(api_key)
-        if api_path:
-            url = endpoint + api_path + "/models"
-        else:
-            url = endpoint + "/models"
-        headers = {"Content-Type": "application/json"}
-        if is_openwebui:
-            header_name, header_prefix = self._auth_header()
-            if api_key:
-                headers[header_name] = f"{header_prefix}{api_key}"
-        elif api_key:
-            header_name, header_prefix = self._auth_header()
-            headers[header_name] = f"{header_prefix}{api_key}"
-
-        try:
-            request = urllib.request.Request(url, headers=_with_user_agent(headers))
-            with self._urlopen(request, context=self.get_ssl_context(), timeout=10) as response:
-                payload = response.read().decode("utf-8")
-            data = json.loads(payload)
-        except Exception as e:
-            log_to_file(f"Failed to fetch models info: {str(e)}")
-            return [], {}
-
-        try:
+        if include_info:
             log_to_file(f"Models API raw response: {payload[:2000]}")
-        except Exception:
-            pass
 
         models = []
         descriptions = {}
 
-        def add_model(item):
+        def _add_model(item):
             if not isinstance(item, dict):
                 return
             model_id = item.get("id") or item.get("model") or item.get("name")
@@ -2329,32 +2273,39 @@ class MainJob(unohelper.Base, XJobExecutor):
                 return
             model_id = str(model_id)
             models.append(model_id)
-            info = item.get("info") or {}
-            meta = info.get("meta") or {}
-            description = (
-                meta.get("description")
-                or info.get("description")
-                or item.get("description")
-                or item.get("summary")
-                or item.get("name")
-                or item.get("owned_by")
-            )
-            if description:
-                descriptions[model_id] = str(description)
+            if include_info:
+                info = item.get("info") or {}
+                meta = info.get("meta") or {}
+                description = (
+                    meta.get("description")
+                    or info.get("description")
+                    or item.get("description")
+                    or item.get("summary")
+                    or item.get("name")
+                    or item.get("owned_by")
+                )
+                if description:
+                    descriptions[model_id] = str(description)
 
+        items = []
         if isinstance(data, dict):
-            if isinstance(data.get("data"), list):
-                for item in data["data"]:
-                    add_model(item)
-            elif isinstance(data.get("models"), list):
-                for item in data["models"]:
-                    add_model(item)
+            items = data.get("data") or data.get("models") or []
         elif isinstance(data, list):
-            for item in data:
-                if isinstance(item, dict):
-                    add_model(item)
+            items = data
 
-        return models, descriptions
+        for item in items:
+            if isinstance(item, str) and not include_info:
+                models.append(item)
+            else:
+                _add_model(item)
+
+        return (models, descriptions) if include_info else models
+
+    def _fetch_models_list(self, endpoint, api_key, is_openwebui):
+        return self._fetch_models(endpoint, api_key, is_openwebui, include_info=False)
+
+    def _fetch_models_info(self, endpoint, api_key, is_openwebui):
+        return self._fetch_models(endpoint, api_key, is_openwebui, include_info=True)
 
     def _refresh_config_to_local(self, cancel_flag=None):
         if cancel_flag and cancel_flag.get("cancel"):
