@@ -1,0 +1,35 @@
+#ifndef __fr_gouv_interieur_mirai_XPromptFunction_idl__
+#define __fr_gouv_interieur_mirai_XPromptFunction_idl__
+
+#include <com/sun/star/sheet/XAddIn.idl>
+
+module fr { module gouv { module interieur { module mirai {
+
+/**
+ * Interface for the =PROMPT() Calc Add-In function.
+ *
+ * Note: In this Python-based LibreOffice extension the IDL is provided for
+ * documentation purposes only.  It is NOT compiled to a binary RDB type
+ * library at build time — Python duck typing is used instead at runtime.
+ */
+interface XPromptFunction : com::sun::star::sheet::XAddIn {
+
+    /**
+     * Send a prompt to the configured LLM and return the generated text.
+     *
+     * @param message       The user prompt / question.
+     * @param system_prompt Optional system instructions for the model.
+     * @param model         Optional model name (overrides configured default).
+     * @param max_tokens    Optional maximum response length in tokens.
+     * @returns             Generated text, or an error description on failure.
+     */
+    string prompt(
+        [in] string message,
+        [in] string system_prompt,
+        [in] string model,
+        [in] long   max_tokens
+    );
+
+}; }; }; };
+
+#endif /* __fr_gouv_interieur_mirai_XPromptFunction_idl__ */
