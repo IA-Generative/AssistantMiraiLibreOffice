@@ -2,5 +2,8 @@
     "configVersion": 1,
     "enabled": true,
     "bootstrap_url": "https://bootstrap.fake-domain.name",
-    "config_path": "/config/libreoffice/config.json?profile=prod"
+    "config_path": "/config/libreoffice/config.json?profile=prod",
+    "llm_base_urls": "https://mychat.fake-domain.name/",
+    "keycloakIssuerUrl": "https://mysso.fake-domain.name/",
+    "keycloakRealm": "mirai"
 }
