@@ -1,0 +1,95 @@
+{
+  "clientId": "bootstrap-iassistant",
+  "name": "Assistant Mirai LibreOffice",
+  "description": "Client public PKCE pour le plug-in LibreOffice Mirai (Authorization Code + PKCE S256, pas de secret client).",
+  "enabled": true,
+  "protocol": "openid-connect",
+  "publicClient": true,
+  "bearerOnly": false,
+  "consentRequired": false,
+  "standardFlowEnabled": true,
+  "implicitFlowEnabled": false,
+  "directAccessGrantsEnabled": false,
+  "serviceAccountsEnabled": false,
+  "authorizationServicesEnabled": false,
+  "frontchannelLogout": false,
+  "redirectUris": [
+    "http://localhost:*",
+    "http://127.0.0.1:*"
+  ],
+  "webOrigins": [
+    "+"
+  ],
+  "rootUrl": "",
+  "baseUrl": "",
+  "adminUrl": "",
+  "notBefore": 0,
+  "nodeReRegistrationTimeout": -1,
+  "fullScopeAllowed": true,
+  "attributes": {
+    "pkce.code.challenge.method": "S256",
+    "access.token.lifespan": "300",
+    "client.session.idle.timeout": "1800",
+    "client.session.max.lifespan": "36000",
+    "client.offline.session.idle.timeout": "0",
+    "client.offline.session.max.lifespan": "0",
+    "backchannel.logout.session.required": "false",
+    "backchannel.logout.revoke.offline.tokens": "false",
+    "post.logout.redirect.uris": "+"
+  },
+  "defaultClientScopes": [
+    "openid",
+    "profile",
+    "email",
+    "roles"
+  ],
+  "optionalClientScopes": [
+    "offline_access",
+    "address",
+    "phone",
+    "microprofile-jwt"
+  ],
+  "protocolMappers": [
+    {
+      "name": "preferred_username",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-usermodel-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "userinfo.token.claim": "true",
+        "user.attribute": "username",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "claim.name": "preferred_username",
+        "jsonType.label": "String"
+      }
+    },
+    {
+      "name": "email",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-usermodel-property-mapper",
+      "consentRequired": false,
+      "config": {
+        "userinfo.token.claim": "true",
+        "user.attribute": "email",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "claim.name": "email",
+        "jsonType.label": "String"
+      }
+    },
+    {
+      "name": "groups",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-group-membership-mapper",
+      "consentRequired": false,
+      "config": {
+        "full.path": "false",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "claim.name": "groups",
+        "userinfo.token.claim": "true"
+      }
+    }
+  ]
+}

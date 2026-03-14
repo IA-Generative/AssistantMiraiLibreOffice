@@ -1,0 +1,10 @@
+{
+    "_note": "Copiez ce fichier en config.default.production.json et renseignez les URLs réelles. Pour un déploiement on-premise réel, utiliser le profil 'dgx' (scripts/06-use-config-profile.sh --profile dgx).",
+    "configVersion": 1,
+    "enabled": true,
+    "bootstrap_url": "https://bootstrap.change-me.example.com",
+    "config_path": "/config/libreoffice/config.json?profile=prod",
+    "keycloakIssuerUrl": "https://sso.change-me.example.com/realms/mirai",
+    "keycloakRealm": "mirai",
+    "keycloakClientId": "bootstrap-iassistant"
+}

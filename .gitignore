@@ -1,6 +1,10 @@
-# Configuration files with secrets
+# Configuration files with secrets / URLs réelles (non exportés sur GitHub)
 mirai.json
 config/config.default.json
+config/keycloak-client-export.json
+config/profiles/config.default.integration.json
+config/profiles/config.default.production.json
+config/profiles/config.default.kubernetes.json
 
 # Build artifacts
 *.oxt
