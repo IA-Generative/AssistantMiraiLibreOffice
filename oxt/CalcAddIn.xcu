@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:component-data
+    xmlns:oor="http://openoffice.org/2001/registry"
+    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+    oor:name="CalcAddIns"
+    oor:package="org.openoffice.Office">
+
+  <node oor:name="AddInInfo">
+
+    <node oor:name="fr.gouv.interieur.mirai.PromptFunction">
+      <node oor:name="AddInFunctions">
+
+        <node oor:name="prompt">
+          <prop oor:name="DisplayName">
+            <value xml:lang="en">PROMPT</value>
+            <value xml:lang="fr">PROMPT</value>
+          </prop>
+          <prop oor:name="Description">
+            <value xml:lang="en">Send a prompt to the LLM and return the response.</value>
+            <value xml:lang="fr">Envoie un prompt au LLM et retourne la réponse.</value>
+          </prop>
+          <prop oor:name="Category">
+            <value>Text</value>
+          </prop>
+
+          <node oor:name="Parameters">
+
+            <node oor:name="message">
+              <prop oor:name="DisplayName">
+                <value xml:lang="en">message</value>
+                <value xml:lang="fr">message</value>
+              </prop>
+              <prop oor:name="Description">
+                <value xml:lang="en">The prompt / question to send to the LLM.</value>
+                <value xml:lang="fr">Le prompt ou la question à envoyer au LLM.</value>
+              </prop>
+            </node>
+
+            <node oor:name="system_prompt">
+              <prop oor:name="DisplayName">
+                <value xml:lang="en">system_prompt</value>
+                <value xml:lang="fr">system_prompt</value>
+              </prop>
+              <prop oor:name="Description">
+                <value xml:lang="en">(Optional) System instructions for the model.</value>
+                <value xml:lang="fr">(Facultatif) Instructions système pour le modèle.</value>
+              </prop>
+            </node>
+
+            <node oor:name="model">
+              <prop oor:name="DisplayName">
+                <value xml:lang="en">model</value>
+                <value xml:lang="fr">modèle</value>
+              </prop>
+              <prop oor:name="Description">
+                <value xml:lang="en">(Optional) Model name to use (overrides configured default).</value>
+                <value xml:lang="fr">(Facultatif) Nom du modèle à utiliser (remplace le modèle configuré).</value>
+              </prop>
+            </node>
+
+            <node oor:name="max_tokens">
+              <prop oor:name="DisplayName">
+                <value xml:lang="en">max_tokens</value>
+                <value xml:lang="fr">max_tokens</value>
+              </prop>
+              <prop oor:name="Description">
+                <value xml:lang="en">(Optional) Maximum number of tokens in the response (default: 2048).</value>
+                <value xml:lang="fr">(Facultatif) Nombre maximum de tokens dans la réponse (défaut : 2048).</value>
+              </prop>
+            </node>
+
+          </node>
+        </node>
+
+      </node>
+    </node>
+
+  </node>
+
+</oor:component-data>
