@@ -1,0 +1,11 @@
+{
+    "_note": "Copiez ce fichier en config.default.kubernetes.json et renseignez les URLs réelles (Scaleway/cloud).",
+    "configVersion": 1,
+    "enabled": true,
+    "bootstrap_url": "https://bootstrap.change-me.example.com",
+    "config_path": "/config/libreoffice/config.json?profile=prod",
+    "llm_base_urls": "https://chat.change-me.example.com/",
+    "keycloakIssuerUrl": "https://sso.change-me.example.com/realms/openwebui",
+    "keycloakRealm": "openwebui",
+    "keycloakClientId": "bootstrap-iassistant"
+}
