@@ -6,7 +6,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
-from com.sun.star.task import XJobExecutor
+from com.sun.star.task import XJobExecutor, XJob
 from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
 from com.sun.star.awt import XActionListener, XItemListener, XMouseListener, XWindowListener, XTopWindowListener
 import uno
@@ -303,7 +303,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
 
 # The MainJob is a UNO component derived from unohelper.Base class
 # and also the XJobExecutor, the implemented interface
-class MainJob(unohelper.Base, XJobExecutor):
+class MainJob(unohelper.Base, XJobExecutor, XJob):
     def __init__(self, ctx):
         log_to_file("=== MainJob.__init__ called ===")
         self.ctx = ctx
@@ -329,6 +329,7 @@ class MainJob(unohelper.Base, XJobExecutor):
         self._secure_flow = None
         self._secure_flow_lock = threading.RLock()
         self._secure_flow_init_error = None
+        self._enrollment_dismissed = False
         self._secure_legacy_fallback_logged = False
         self._last_loaded_ca_bundle = None
         self._last_ca_bundle_error = None
@@ -376,6 +377,12 @@ class MainJob(unohelper.Base, XJobExecutor):
             self._check_proxy_consistency()
         except Exception as e:
             log_to_file(f"Failed to check proxy consistency: {str(e)}")
+
+        # Auto-launch enrollment wizard on first use (deferred to let UI init)
+        try:
+            self._schedule_enrollment_check()
+        except Exception as e:
+            log_to_file(f"Failed to schedule enrollment check: {str(e)}")
     
     def _log(self, message):
         log_to_file(message)
@@ -758,6 +765,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                         self.config_cache = config_data
                         self.config_loaded_at = now
                         self._config_last_failure_at = 0
+                        self._persist_bootstrap_config(config_data)
                         return config_data
                     last_error = f"Invalid JSON root type: {type(config_data).__name__}"
                     log_to_file(f"Failed to fetch device management config ({mode}): {last_error}")
@@ -786,6 +794,30 @@ class MainJob(unohelper.Base, XJobExecutor):
             log_to_file("DM config fetch failed: using stale cache")
             return self.config_cache
         return None
+
+    def _persist_bootstrap_config(self, config_data):
+        """Write key bootstrap values (LLM, telemetry) into local config file."""
+        try:
+            inner = config_data.get("config", {}) if isinstance(config_data, dict) else {}
+            if not isinstance(inner, dict):
+                return
+            keys_to_sync = [
+                "llm_base_urls", "llm_default_models", "llm_api_tokens",
+                "systemPrompt", "model", "api_type", "is_openwebui",
+                "openai_compatibility",
+                "telemetryEndpoint", "telemetryKey",
+                "telemetryAuthorizationType", "telemetrySel",
+                "relayAssistantBaseUrl",
+            ]
+            for key in keys_to_sync:
+                if key in inner:
+                    val = inner[key]
+                    current = self._get_config_from_file(key, None)
+                    if val != current and val != "":
+                        self.set_config(key, val)
+            log_to_file("Bootstrap config persisted to local file")
+        except Exception as e:
+            log_to_file(f"Failed to persist bootstrap config: {str(e)}")
 
     def _get_setting(self, key):
         now = time.time()
@@ -1108,6 +1140,243 @@ class MainJob(unohelper.Base, XJobExecutor):
         except Exception as e:
             log_to_file(f"Failed to show confirm box: {str(e)}")
         return False
+
+    def _show_enrollment_wizard(self):
+        """Multi-step first-time enrollment wizard with mascot and progress."""
+        try:
+            from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+            ctx = uno.getComponentContext()
+            create = ctx.getServiceManager().createInstanceWithContext
+
+            WIDTH = 560
+            HEIGHT = 500
+            MARGIN = 24
+            IMG_SIZE = 130
+            BTN_W = 140
+            BTN_H = 32
+
+            wizard_steps = [
+                {
+                    "title": "Bienvenue dans IA'ssistant by MIrAI",
+                    "text": (
+                        "Votre assistant IA pour LibreOffice est presque prêt !\n\n"
+                        "IA'ssistant vous aide à rédiger, reformuler, résumer\n"
+                        "et enrichir vos documents en toute simplicité.\n\n"
+                        "Pour activer les fonctionnalités IA, une courte\n"
+                        "procédure d'enrôlement sécurisé est nécessaire.\n\n"
+                        "Cela ne prend que quelques secondes."
+                    ),
+                    "btn_next": "Commencer",
+                    "btn_cancel": "Plus tard",
+                    "step_label": "Étape 1/3 — Présentation",
+                },
+                {
+                    "title": "Connexion sécurisée",
+                    "text": (
+                        "Votre navigateur va s'ouvrir sur la page de connexion sécurisée MIrAI.\n\n"
+                        "Pourquoi ?\n"
+                        "  • Vérifier votre identité et obtenir un jeton de session chiffré\n"
+                        "  • Activer l'accès sécurisé à l'IA\n\n"
+                        "Vos données restent protégées : \n"
+                        "aucun mot de passe n'est stocké par le plugin.\n"
+                        "Après connexion, fermez la fenêtre et revenez dans LibreOffice."
+                    ),
+                    "btn_next": "Ouvrir le navigateur",
+                    "btn_cancel": "Annuler",
+                    "step_label": "Étape 2/3 — Authentification",
+                },
+                {
+                    "title": "Enrôlement de votre poste",
+                    "text": (
+                        "Dernière étape : votre poste sera enregistré\n"
+                        "auprès du service MIrAI.\n\n"
+                        "Cela permet :\n"
+                        "  • La configuration automatique du plugin\n"
+                        "  • Les mises à jour de sécurité\n"
+                        "  • L'accès aux modèles IA autorisés\n\n"
+                        "L'enrôlement est automatique après la connexion.\n"
+                        "Vous n'avez rien d'autre à faire !"
+                    ),
+                    "btn_next": "C'est parti !",
+                    "btn_cancel": "Annuler",
+                    "step_label": "Étape 3/3 — Finalisation",
+                },
+            ]
+
+            result = {"proceed": False, "step": 0}
+
+            dialog = create("com.sun.star.awt.UnoControlDialog", ctx)
+            dialog_model = create("com.sun.star.awt.UnoControlDialogModel", ctx)
+            dialog.setModel(dialog_model)
+            dialog.setVisible(False)
+            dialog.setTitle("IA'ssistant by MIrAI")
+            dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+
+            def add_control(name, ctrl_type, x, y, w, h, props):
+                try:
+                    model = dialog_model.createInstance(
+                        "com.sun.star.awt.UnoControl" + ctrl_type + "Model")
+                    dialog_model.insertByName(name, model)
+                    ctrl = dialog.getControl(name)
+                    ctrl.setPosSize(x, y, w, h, POSSIZE)
+                    for k, v in props.items():
+                        try:
+                            setattr(model, k, v)
+                        except Exception:
+                            pass
+                    return ctrl
+                except Exception as e:
+                    log_to_file(f"Wizard control error: {name} {str(e)}")
+                    return None
+
+            # Mascot image
+            logo_path = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png")
+            if not os.path.exists(logo_path):
+                logo_path = os.path.join(os.path.dirname(__file__), "icons", "iassistant.png")
+            if os.path.exists(logo_path):
+                logo_url = uno.systemPathToFileUrl(os.path.abspath(logo_path))
+                img_x = (WIDTH - IMG_SIZE) // 2
+                add_control("wiz_logo", "ImageControl", img_x, MARGIN,
+                            IMG_SIZE, IMG_SIZE, {
+                                "ImageURL": logo_url,
+                                "Border": 0,
+                                "ScaleImage": True
+                            })
+
+            # Title
+            title_y = MARGIN + IMG_SIZE + 10
+            add_control("wiz_title", "FixedText", MARGIN, title_y,
+                        WIDTH - MARGIN * 2, 22, {
+                            "Label": wizard_steps[0]["title"],
+                            "Align": 1,
+                            "NoLabel": True,
+                            "FontHeight": 13,
+                            "FontWeight": 150,
+                        })
+
+            # Body text
+            text_y = title_y + 30
+            text_h = 180
+            add_control("wiz_text", "FixedText", MARGIN + 10, text_y,
+                        WIDTH - MARGIN * 2 - 20, text_h, {
+                            "Label": wizard_steps[0]["text"],
+                            "MultiLine": True,
+                            "NoLabel": True,
+                            "FontHeight": 10,
+                        })
+
+            # Step indicator
+            step_y = text_y + text_h + 6
+            add_control("wiz_step", "FixedText", MARGIN, step_y,
+                        WIDTH - MARGIN * 2, 16, {
+                            "Label": wizard_steps[0]["step_label"],
+                            "Align": 1,
+                            "NoLabel": True,
+                            "TextColor": 0x888888,
+                            "FontHeight": 9,
+                        })
+
+            # Progress bar (simple colored bar)
+            bar_y = step_y + 18
+            bar_w = WIDTH - MARGIN * 2
+            add_control("wiz_bar_bg", "FixedText", MARGIN, bar_y,
+                        bar_w, 4, {"Label": "", "BackgroundColor": 0xE0E0E0, "NoLabel": True})
+            progress_w = bar_w // 3
+            add_control("wiz_bar_fill", "FixedText", MARGIN, bar_y,
+                        progress_w, 4, {"Label": "", "BackgroundColor": 0x2255AA, "NoLabel": True})
+
+            # Buttons
+            btn_y = bar_y + 16
+            btn_cancel_x = WIDTH // 2 - BTN_W - 10
+            btn_next_x = WIDTH // 2 + 10
+
+            add_control("wiz_btn_cancel", "Button", btn_cancel_x, btn_y,
+                        BTN_W, BTN_H, {
+                            "Label": wizard_steps[0]["btn_cancel"],
+                            "Name": "wiz_cancel",
+                        })
+            add_control("wiz_btn_next", "Button", btn_next_x, btn_y,
+                        BTN_W, BTN_H, {
+                            "Label": wizard_steps[0]["btn_next"],
+                            "Name": "wiz_next",
+                            "DefaultButton": True,
+                        })
+
+            dialog.setPosSize(0, 0, WIDTH, btn_y + BTN_H + 20, SIZE)
+
+            frame = create("com.sun.star.frame.Desktop", ctx).getCurrentFrame()
+            window = frame.getContainerWindow() if frame else None
+            toolkit = create("com.sun.star.awt.Toolkit", ctx)
+            dialog.createPeer(toolkit, window)
+            if window:
+                ps = window.getPosSize()
+                _x = ps.Width // 2 - WIDTH // 2
+                _y = ps.Height // 2 - HEIGHT // 2
+                dialog.setPosSize(_x, _y, 0, 0, POS)
+
+            def _update_step(step_idx):
+                step = wizard_steps[step_idx]
+                try:
+                    dialog.getControl("wiz_title").getModel().Label = step["title"]
+                    dialog.getControl("wiz_text").getModel().Label = step["text"]
+                    dialog.getControl("wiz_step").getModel().Label = step["step_label"]
+                    dialog.getControl("wiz_btn_next").getModel().Label = step["btn_next"]
+                    dialog.getControl("wiz_btn_cancel").getModel().Label = step["btn_cancel"]
+                    fill_w = (WIDTH - MARGIN * 2) * (step_idx + 1) // len(wizard_steps)
+                    dialog.getControl("wiz_bar_fill").setPosSize(
+                        MARGIN, 0, fill_w, 4, SIZE)
+                    toolkit.processEventsToIdle()
+                except Exception as e:
+                    log_to_file(f"Wizard update step error: {str(e)}")
+
+            class WizardNextListener(unohelper.Base, XActionListener):
+                def actionPerformed(self, event):
+                    result["step"] += 1
+                    if result["step"] >= len(wizard_steps):
+                        result["proceed"] = True
+                        try:
+                            dialog.endExecute()
+                        except Exception:
+                            pass
+                    else:
+                        _update_step(result["step"])
+
+                def disposing(self, event):
+                    pass
+
+            class WizardCancelListener(unohelper.Base, XActionListener):
+                def actionPerformed(self, event):
+                    result["proceed"] = False
+                    try:
+                        dialog.endExecute()
+                    except Exception:
+                        pass
+
+                def disposing(self, event):
+                    pass
+
+            btn_next = dialog.getControl("wiz_btn_next")
+            btn_cancel = dialog.getControl("wiz_btn_cancel")
+            if btn_next:
+                btn_next.addActionListener(WizardNextListener())
+            if btn_cancel:
+                btn_cancel.addActionListener(WizardCancelListener())
+
+            dialog.setVisible(True)
+            dialog.execute()
+            try:
+                dialog.dispose()
+            except Exception:
+                pass
+            log_to_file(f"Enrollment wizard completed: proceed={result['proceed']}")
+            return result["proceed"]
+        except Exception as e:
+            log_to_file(f"Enrollment wizard failed, falling back to confirm: {str(e)}")
+            return self._confirm_message(
+                "Connexion MIrAI requise",
+                "Vous allez être redirigé vers la page de connexion MIrAI.\n\n"
+                "Voulez-vous continuer ?"
+            )
 
     def _show_message_and_open_settings(self, title, message):
         try:
@@ -1564,13 +1833,16 @@ class MainJob(unohelper.Base, XJobExecutor):
             )
             return None
 
-        proceed = self._confirm_message(
-            "Connexion MIrAI requise",
-            "Vous allez être redirigé vers la page de connexion MIrAI dans votre navigateur.\n\n"
-            "Pourquoi : le plugin doit obtenir un jeton de session sécurisé pour accéder à l'API et à la configuration.\n\n"
-            "Après la connexion, revenez à LibreOffice.\n\n"
-            "Voulez-vous continuer ?"
-        )
+        is_first_enrollment = not self._as_bool(self._get_config_from_file("enrolled", False))
+        if is_first_enrollment:
+            proceed = self._show_enrollment_wizard()
+        else:
+            proceed = self._confirm_message(
+                "Connexion MIrAI requise",
+                "Vous allez être redirigé vers la page de connexion MIrAI dans votre navigateur.\n\n"
+                "Après la connexion, revenez à LibreOffice.\n\n"
+                "Voulez-vous continuer ?"
+            )
         if not proceed:
             log_to_file("Keycloak auth canceled by user before browser open")
             return None
@@ -1866,7 +2138,14 @@ class MainJob(unohelper.Base, XJobExecutor):
         if self._as_bool(self._get_config_from_file("enrolled", False)):
             return
 
-        device_name = config_data.get("device_name") or config_data.get("deviceName") or self._get_config_from_file("device_name", "")
+        inner = config_data.get("config", {}) if isinstance(config_data, dict) else {}
+        device_name = (
+            config_data.get("device_name")
+            or config_data.get("deviceName")
+            or inner.get("device_name")
+            or inner.get("deviceName")
+            or self._get_config_from_file("device_name", "")
+        )
         plugin_uuid = self._ensure_extension_uuid()
 
         enroll_payload = {
@@ -1874,6 +2153,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             "plugin_uuid": plugin_uuid,
             "email": email
         }
+        log_to_file(f"Device management enroll payload: device_name={device_name} plugin_uuid={plugin_uuid} email={email} has_token={bool(access_token)} endpoint={enroll_endpoint}")
         try:
             json_data = json.dumps(enroll_payload).encode("utf-8")
             headers = {"Content-Type": "application/json"}
@@ -1917,7 +2197,13 @@ class MainJob(unohelper.Base, XJobExecutor):
                 log_to_file("Device management enroll succeeded without relay credentials")
             self.set_config("enrolled", True)
         except Exception as e:
-            log_to_file(f"Device management enroll failed: {str(e)}")
+            error_body = ""
+            if hasattr(e, "read"):
+                try:
+                    error_body = e.read().decode("utf-8", errors="ignore")
+                except Exception:
+                    pass
+            log_to_file(f"Device management enroll failed: {str(e)} body={error_body}")
 
     def _get_openwebui_access_token(self):
         if not self._device_management_enabled():
@@ -2186,6 +2472,28 @@ class MainJob(unohelper.Base, XJobExecutor):
             self.set_config("proxy_consistency_checked_once", True)
         except Exception:
             pass
+
+    def _schedule_enrollment_check(self):
+        """Deferred enrollment check — fires ~3s after init to let UI start."""
+        def _deferred_enrollment():
+            try:
+                if self._enrollment_dismissed:
+                    return
+                if not self._needs_first_enrollment():
+                    log_to_file("[ENROLL] Auto-check: already enrolled, skipping wizard")
+                    return
+                log_to_file("[ENROLL] Auto-check: first enrollment needed, launching wizard")
+                if not self._run_first_enrollment():
+                    self._enrollment_dismissed = True
+                    log_to_file("[ENROLL] Auto-check: wizard cancelled by user")
+                else:
+                    log_to_file("[ENROLL] Auto-check: enrollment succeeded")
+            except Exception as e:
+                log_to_file(f"[ENROLL] Auto-check failed: {str(e)}")
+
+        timer = threading.Timer(3.0, _deferred_enrollment)
+        timer.daemon = True
+        timer.start()
 
     def proxy_settings_box(self, title="Proxy", x=None, y=None):
         WIDTH = 640
@@ -5880,12 +6188,62 @@ EDITED VERSION:
         return result
     #end sharealike section 
 
+    def _needs_first_enrollment(self):
+        """Check if user needs first-time enrollment (not yet enrolled)."""
+        try:
+            enrolled = self._as_bool(self._get_config_from_file("enrolled", False))
+            if enrolled:
+                return False
+            access_token = str(self._get_config_from_file("access_token", "")).strip()
+            if access_token and not self._token_is_expired(access_token):
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _run_first_enrollment(self):
+        """Run the first-time enrollment: wizard → fetch config → auth flow."""
+        log_to_file("First enrollment detected, starting wizard flow")
+        try:
+            self._schedule_config_refresh(force=True, reason="first_enrollment")
+            time.sleep(1)
+        except Exception:
+            pass
+        config_data = self._fetch_config(force=True)
+        if not config_data:
+            log_to_file("First enrollment: config fetch failed")
+            return False
+        try:
+            self._sync_keycloak_from_config(config_data)
+        except Exception:
+            pass
+        access_token = self._ensure_access_token(config_data, interactive=True)
+        if access_token:
+            log_to_file("First enrollment: auth succeeded")
+            return True
+        log_to_file("First enrollment: auth flow canceled or failed")
+        return False
+
+    def execute(self, args):
+        """XJob.execute — called automatically by Jobs framework on document open."""
+        log_to_file("=== XJob.execute called (document opened) ===")
+        # __init__ already scheduled the enrollment check via _schedule_enrollment_check
+        # Nothing else needed here — the timer handles the wizard auto-launch.
+        return
+
     def trigger(self, args):
         self._log(f"=== trigger called with args: {args} ===")
         try:
             self._schedule_config_refresh(force=True, reason=f"trigger:{args}")
         except Exception:
             pass
+
+        # First-time enrollment: intercept before any action
+        if not self._enrollment_dismissed and self._needs_first_enrollment():
+            if not self._run_first_enrollment():
+                self._enrollment_dismissed = True
+                return
+
         desktop = self.ctx.ServiceManager.createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.ctx)
         model = desktop.getCurrentComponent()
@@ -5917,6 +6275,6 @@ g_ImplementationHelper = unohelper.ImplementationHelper()
 g_ImplementationHelper.addImplementation(
     MainJob,  # UNO object class
     "fr.gouv.interieur.mirai.do",  # implementation name
-    ("com.sun.star.task.JobExecutor",), )  # implemented services
+    ("com.sun.star.task.JobExecutor", "com.sun.star.task.Job"), )  # implemented services
 log_to_file("=== mirai extension registered successfully ===")
 # vim: set shiftwidth=4 softtabstop=4 expandtab:
