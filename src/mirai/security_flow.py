@@ -3,6 +3,7 @@ import ctypes
 import email.utils
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,9 @@ def _b64d(value):
     return base64.urlsafe_b64decode(padded.encode("ascii"))
 
 
+_CONTENT_TYPE_JSON = "application/json"
+
+
 def _json_bytes(payload):
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
@@ -46,7 +50,9 @@ class VaultError(SecureFlowError):
     pass
 
 
-class FileJsonStore(object):
+class _BaseFileStore(object):
+    """Common atomic read/write logic for JSON-backed file stores."""
+
     def __init__(self, path):
         self.path = path
         self._lock = threading.RLock()
@@ -56,21 +62,18 @@ class FileJsonStore(object):
         if parent:
             os.makedirs(parent, exist_ok=True)
 
-    def read(self):
-        with self._lock:
-            try:
-                with open(self.path, "r", encoding="utf-8") as handle:
-                    data = json.load(handle)
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-            return {}
+    def _read_raw(self):
+        try:
+            with open(self.path, "r", encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return None
 
     def write(self, payload):
         with self._lock:
             self._ensure_parent()
-            fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=os.path.dirname(self.path) or None)
+            dir_path = os.path.dirname(self.path) or None
+            fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=dir_path)
             try:
                 with os.fdopen(fd, "w", encoding="utf-8") as handle:
                     json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
@@ -79,45 +82,22 @@ class FileJsonStore(object):
                 try:
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
-                except Exception:
+                except OSError:
                     pass
 
 
-class FileQueueStore(object):
-    def __init__(self, path):
-        self.path = path
-        self._lock = threading.RLock()
-
-    def _ensure_parent(self):
-        parent = os.path.dirname(self.path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-
+class FileJsonStore(_BaseFileStore):
     def read(self):
         with self._lock:
-            try:
-                with open(self.path, "r", encoding="utf-8") as handle:
-                    data = json.load(handle)
-                if isinstance(data, list):
-                    return data
-            except Exception:
-                pass
-            return []
+            data = self._read_raw()
+            return data if isinstance(data, dict) else {}
 
-    def write(self, payload):
+
+class FileQueueStore(_BaseFileStore):
+    def read(self):
         with self._lock:
-            self._ensure_parent()
-            fd, tmp_path = tempfile.mkstemp(prefix=".tmp-", suffix=".json", dir=os.path.dirname(self.path) or None)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle, ensure_ascii=False, separators=(",", ":"))
-                os.replace(tmp_path, self.path)
-            finally:
-                try:
-                    if os.path.exists(tmp_path):
-                        os.remove(tmp_path)
-                except Exception:
-                    pass
+            data = self._read_raw()
+            return data if isinstance(data, list) else []
 
 
 class MemoryVault(object):
@@ -385,19 +365,20 @@ class SecureBootstrapFlow(object):
             dt = email.utils.parsedate_to_datetime(date_value)
             server_ts = dt.timestamp()
             skew = float(server_ts - time.time())
-            self._clock_skew_seconds = skew
+            with self._lock:
+                self._clock_skew_seconds = skew
             if abs(skew) > 120:
                 self._log(f"[SECURE] clock skew detected: {int(skew)}s")
-        except Exception:
+        except ValueError:
             pass
 
     def _request_json(self, method, url, body=None, headers=None, timeout=10, use_proxy=False):
-        req_headers = {"Accept": "application/json"}
+        req_headers = {"Accept": _CONTENT_TYPE_JSON}
         if isinstance(headers, dict):
             req_headers.update(headers)
         payload = _json_bytes(body) if body is not None else None
         if payload is not None and "Content-Type" not in req_headers:
-            req_headers["Content-Type"] = "application/json"
+            req_headers["Content-Type"] = _CONTENT_TYPE_JSON
         if use_proxy is None:
             attempts = [False, True]
         else:
@@ -424,10 +405,11 @@ class SecureBootstrapFlow(object):
                 if isinstance(parsed, dict):
                     return parsed
                 raise SecureFlowError("JSON response is not an object")
-            except (urllib.error.URLError, SecureFlowError, HttpStatusError) as exc:
+            except (urllib.error.URLError, SecureFlowError) as exc:
                 last_exc = exc
-                if isinstance(exc, HttpStatusError):
-                    # HTTP errors are authoritative: no point retrying same request through another path.
+                if isinstance(exc, SecureFlowError):
+                    # Application-level errors are authoritative:
+                    # no point retrying same request through another path.
                     raise
         if last_exc:
             raise last_exc
@@ -476,7 +458,7 @@ class SecureBootstrapFlow(object):
         token = str(token_data.get("token") or "").strip()
         expires_at = float(token_data.get("expires_at") or 0)
         min_secs = self._min_refresh_seconds if min_validity is None else int(min_validity)
-        return bool(token) and (expires_at - self._effective_now()) > min_secs
+        return bool(token) and (expires_at - self._effective_now()) >= min_secs
 
     def _store_token(self, token, expires_in=None, expires_at=None, kind="preauth"):
         token_text = str(token or "").strip()
@@ -548,7 +530,7 @@ class SecureBootstrapFlow(object):
             decoded = _b64d(text)
             if decoded:
                 return decoded
-        except Exception:
+        except ValueError:
             pass
         return text.encode("utf-8")
 
@@ -748,7 +730,10 @@ class SecureBootstrapFlow(object):
 
     def _schedule_retry(self, item, reason):
         attempts = int(item.get("attempts") or 0) + 1
-        backoff = min(300, (2 ** min(attempts, 8)))
+        base_backoff = min(300, (2 ** min(attempts, 8)))
+        # Add ±10% jitter to avoid thundering herd when many clients retry simultaneously
+        jitter = random.uniform(-0.1, 0.1) * base_backoff
+        backoff = base_backoff + jitter
         item["attempts"] = attempts
         item["last_reason"] = str(reason or "")
         item["next_attempt_at"] = self._effective_now() + backoff
@@ -759,7 +744,7 @@ class SecureBootstrapFlow(object):
         if not endpoint:
             raise SecureFlowError("telemetry endpoint is empty")
         headers = {
-            "Content-Type": "application/json",
+            "Content-Type": _CONTENT_TYPE_JSON,
             "Authorization": f"Bearer {token}",
         }
         body = _json_bytes(payload)
@@ -800,8 +785,8 @@ class SecureBootstrapFlow(object):
                         if token:
                             self._http_post_trace(item.get("payload"), token)
                             continue
-                    except Exception:
-                        pass
+                    except (SecureFlowError, OSError) as refresh_exc:
+                        self._log(f"[SECURE] queue drain token refresh failed: {self._safe_log_error(refresh_exc)}")
                 new_items.append(self._schedule_retry(item, f"http_{exc.status}"))
             except Exception as exc:
                 new_items.append(self._schedule_retry(item, self._safe_log_error(exc)))
@@ -815,8 +800,8 @@ class SecureBootstrapFlow(object):
                 if not self._state.get("bootstrap_config"):
                     try:
                         self.fetch_bootstrap_config()
-                    except Exception:
-                        pass
+                    except (SecureFlowError, OSError) as cfg_exc:
+                        self._log(f"[SECURE] bootstrap config fetch failed: {self._safe_log_error(cfg_exc)}")
                 token = self.ensure_telemetry_token(min_validity=30)
                 if not token:
                     self._enqueue(payload, "no_token")
@@ -832,8 +817,8 @@ class SecureBootstrapFlow(object):
                             self._http_post_trace(payload, token)
                             self._drain_queue_locked()
                             return True
-                    except Exception:
-                        pass
+                    except (SecureFlowError, OSError) as refresh_exc:
+                        self._log(f"[SECURE] send_trace token refresh failed: {self._safe_log_error(refresh_exc)}")
                     kind = str(self._state.get("telemetry", {}).get("kind") or "")
                     if kind == "user":
                         self._state["needs_rebind"] = True
