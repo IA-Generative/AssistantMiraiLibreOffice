@@ -41,6 +41,25 @@ def _with_user_agent(headers=None):
         result["User-Agent"] = USER_AGENT
     return result
 
+def _redact_header_value(name, value):
+    key = str(name or "").strip().lower()
+    if key in ("authorization", "x-api-key", "api-key", "proxy-authorization", "x-relay-key"):
+        return "<redacted>"
+    return value
+
+def _redacted_headers(headers):
+    safe = {}
+    for key, value in (headers or {}).items():
+        safe[key] = _redact_header_value(key, value)
+    return safe
+
+def _curl_headers_for_log(headers):
+    parts = []
+    for key, value in (headers or {}).items():
+        safe_value = _redact_header_value(key, value)
+        parts.append(f"-H '{key}: {safe_value}'")
+    return " ".join(parts)
+
 def log_to_file(message):
     # Get the user's home directory
     home_directory = os.path.expanduser('~')
@@ -2231,7 +2250,7 @@ class MainJob(unohelper.Base, XJobExecutor):
             headers[header_name] = f"{header_prefix}{api_key}"
 
         try:
-            curl_headers = " ".join([f"-H '{k}: {v}'" for k, v in headers.items()])
+            curl_headers = _curl_headers_for_log(headers)
             log_to_file(f"Models list curl: curl -i {curl_headers} '{url}'")
         except Exception:
             pass
@@ -2889,9 +2908,9 @@ class MainJob(unohelper.Base, XJobExecutor):
 
         json_data = json.dumps(data, ensure_ascii=False).encode('utf-8')
         log_to_file(f"Request data: {json.dumps(data, ensure_ascii=False, indent=2)}")
-        log_to_file(f"Headers: {headers}")
+        log_to_file(f"Headers: {_redacted_headers(headers)}")
         try:
-            curl_headers = " ".join([f"-H '{k}: {v}'" for k, v in headers.items()])
+            curl_headers = _curl_headers_for_log(headers)
             log_to_file(f"Chat completions curl: curl -i -X POST {curl_headers} '{url}' -d '{json.dumps(data)}'")
         except Exception:
             pass
