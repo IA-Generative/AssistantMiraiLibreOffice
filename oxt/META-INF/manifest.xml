@@ -9,4 +9,5 @@
 	<manifest:file-entry manifest:media-type="application/vnd.sun.star.uno-component;type=Python"
 		manifest:full-path="src/mirai/calc_prompt_function.py"/>
 	<manifest:file-entry manifest:full-path="CalcAddIn.xcu" manifest:media-type="application/vnd.sun.star.configuration-data"/>
+	<manifest:file-entry manifest:full-path="Jobs.xcu" manifest:media-type="application/vnd.sun.star.configuration-data"/>
 </manifest:manifest>

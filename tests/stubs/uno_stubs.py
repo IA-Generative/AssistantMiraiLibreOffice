@@ -16,6 +16,7 @@ from unittest.mock import MagicMock
 # reusing `object` for all of them causes "duplicate base class" errors.
 class _UnoBase:          pass
 class _XJobExecutor:     pass
+class _XJob:             pass
 class _XActionListener:  pass
 class _XItemListener:    pass
 class _XMouseListener:   pass
@@ -45,6 +46,7 @@ def install():
     # --- com.sun.star.task ---
     com_sun_star_task = MagicMock()
     com_sun_star_task.XJobExecutor = _XJobExecutor
+    com_sun_star_task.XJob = _XJob
 
     # --- com.sun.star.awt ---
     com_sun_star_awt = MagicMock()
