@@ -77,10 +77,38 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
+        # Patterns that indicate the model answered conversationally instead of
+        # continuing the text (e.g. "En quoi puis-je vous aider ?").
+        _extend_question_patterns = [
+            "puis-je vous", "puis-je t'", "comment puis-je", "en quoi puis-je",
+            "que puis-je faire", "puis-je vous aider",
+            "pouvez-vous préciser", "pouvez-vous clarifier",
+            "could you clarify", "how can i help", "would you like me to",
+            "voulez-vous que je", "souhaitez-vous que",
+        ]
+
+        extend_text = ""
+        extend_done = [False]
+
         with _undo_context(model, "Générer la suite"):
             text.insertString(cursor, "\n\n---début-du-texte-généré---\n", False)
 
             def append_text(chunk_text):
+                nonlocal extend_text
+                if extend_done[0]:
+                    return
+                extend_text += chunk_text
+                lower = extend_text.lower()
+                for pattern in _extend_question_patterns:
+                    if pattern in lower:
+                        text.insertString(
+                            cursor,
+                            "\n[Le modèle a répondu par une question au lieu de continuer le texte."
+                            " Veuillez réessayer ou reformuler votre sélection.]",
+                            False,
+                        )
+                        extend_done[0] = True
+                        return
                 text.insertString(cursor, chunk_text, False)
                 _scroll_to_cursor(controller, cursor)
 
