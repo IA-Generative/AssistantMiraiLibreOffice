@@ -3,6 +3,24 @@
 from .shared import apply_settings_result
 
 
+def _check_stop_phrase(accumulated, chunk, stop_phrases):
+    """Return (text_to_insert, stop_detected) for the current streaming chunk.
+
+    When a stop phrase is found in *accumulated*, return the portion of *chunk*
+    that precedes the stop phrase (may be empty) and True.
+    Otherwise return *chunk* unchanged and False.
+    """
+    acc_lower = accumulated.lower()
+    for phrase in stop_phrases:
+        pos = acc_lower.find(phrase.lower())
+        if pos == -1:
+            continue
+        already_inserted = len(accumulated) - len(chunk)
+        partial = chunk[:max(0, pos - already_inserted)] if pos > already_inserted else ""
+        return partial, True
+    return chunk, False
+
+
 def _scroll_to_cursor(controller, cursor):
     """Move the view cursor to the text cursor so the document auto-scrolls."""
     try:
@@ -134,9 +152,8 @@ RÉSUMÉ :
         cursor.collapseToEnd()
 
         summary_text = ""
+        summary_done = [False]
         stop_phrases = [
-            "end of document",
-            "end of the document",
             "[END]",
             "---END---",
         ]
@@ -146,16 +163,16 @@ RÉSUMÉ :
 
             def append_summary(chunk_text):
                 nonlocal summary_text
+                if summary_done[0]:
+                    return
                 summary_text += chunk_text
-
-                for stop_phrase in stop_phrases:
-                    if stop_phrase.lower() in summary_text.lower():
-                        pos = summary_text.lower().find(stop_phrase.lower())
-                        summary_text = summary_text[:pos].rstrip()
-                        return
-
-                text.insertString(cursor, chunk_text, False)
-                _scroll_to_cursor(controller, cursor)
+                to_insert, done = _check_stop_phrase(summary_text, chunk_text, stop_phrases)
+                if done:
+                    summary_text = summary_text[:len(summary_text) - len(chunk_text) + len(to_insert)].rstrip()
+                    summary_done[0] = True
+                if to_insert:
+                    text.insertString(cursor, to_insert, False)
+                    _scroll_to_cursor(controller, cursor)
 
             job.stream_request(request, api_type, append_summary)
             text.insertString(cursor, "\n---fin-du-résumé---\n", False)
@@ -217,24 +234,15 @@ VERSION REFORMULÉE :
         cursor.collapseToEnd()
 
         simplified_text = ""
+        simplify_done = [False]
         stop_phrases = [
-            "end of document",
-            "end of the document",
             "[END]",
             "---END---",
         ]
         question_patterns = [
-            "would you like",
-            "do you want",
-            "should i",
-            "can i help",
-            "voulez-vous",
-            "souhaitez-vous",
-            "dois-je",
-            "puis-je",
-            "here is",
-            "voici",
-            "voilà",
+            "would you like", "do you want", "should i", "can i help",
+            "voulez-vous", "souhaitez-vous", "dois-je", "puis-je",
+            "here is", "voici", "voilà",
         ]
 
         with _undo_context(model, "Reformuler"):
@@ -242,25 +250,24 @@ VERSION REFORMULÉE :
 
             def append_simplified(chunk_text):
                 nonlocal simplified_text
+                if simplify_done[0]:
+                    return
                 simplified_text += chunk_text
-
                 lower_text = simplified_text.lower()
                 for pattern in question_patterns:
                     if pattern in lower_text:
                         cursor.gotoStart(False)
                         cursor.gotoEnd(True)
                         text.insertString(cursor, "[Le modèle a posé une question. Veuillez réessayer.]", False)
-                        simplified_text = ""
+                        simplify_done[0] = True
                         return
-
-                for stop_phrase in stop_phrases:
-                    if stop_phrase.lower() in simplified_text.lower():
-                        pos = simplified_text.lower().find(stop_phrase.lower())
-                        simplified_text = simplified_text[:pos].rstrip()
-                        return
-
-                text.insertString(cursor, chunk_text, False)
-                _scroll_to_cursor(controller, cursor)
+                to_insert, done = _check_stop_phrase(simplified_text, chunk_text, stop_phrases)
+                if done:
+                    simplified_text = simplified_text[:len(simplified_text) - len(chunk_text) + len(to_insert)].rstrip()
+                    simplify_done[0] = True
+                if to_insert:
+                    text.insertString(cursor, to_insert, False)
+                    _scroll_to_cursor(controller, cursor)
 
             job.stream_request(request, api_type, append_simplified)
             text.insertString(cursor, "\n---fin-de-reformulation---\n", False)
