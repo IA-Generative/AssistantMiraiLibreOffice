@@ -3296,8 +3296,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         api_type = "chat" if api_type == "chat" else "completions"
         model = str(self.get_config("llm_default_models", ""))
         
-        # Add default system prompt to ensure plain text output and language preservation
-        default_system_prompt = "Renvoie uniquement du texte brut. N'utilise pas de markdown, de blocs de code ni de symboles de formatage comme **, *, _, ou #. RÈGLE ABSOLUE : tu DOIS répondre dans la MÊME LANGUE que le texte fourni par l'utilisateur. Si le texte est en français, réponds en français. Si le texte est en anglais, réponds en anglais. Ne change jamais la langue."
+        # Add default system prompt to ensure plain text output and language preservation.
+        # /no_thinking prefix minimises reasoning tokens on Qwen3-style models.
+        default_system_prompt = "/no_thinking\nRenvoie uniquement du texte brut. N'utilise pas de markdown, de blocs de code ni de symboles de formatage comme **, *, _, ou #. RÈGLE ABSOLUE : tu DOIS répondre dans la MÊME LANGUE que le texte fourni par l'utilisateur. Si le texte est en français, réponds en français. Si le texte est en anglais, réponds en anglais. Ne change jamais la langue."
         if system_prompt:
             system_prompt = default_system_prompt + " " + system_prompt
         else:
@@ -3504,22 +3505,32 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 with self._urlopen(request, context=ssl_context,
                                    timeout=request_timeout) as response:
                     log_to_file(f"Response status: {response.status}")
+                    _line_count = 0
+                    _data_count = 0
                     for line in response:
+                        _line_count += 1
                         try:
                             if line.strip() and line.startswith(b"data: "):
+                                _data_count += 1
                                 payload = line[len(b"data: "):].decode("utf-8").strip()
                                 if payload == "[DONE]":
+                                    log_to_file(f"[stream] [DONE] after {_line_count} lines, {_data_count} data")
                                     break
                                 chunk = json.loads(payload)
                                 content, finish_reason = \
                                     self.extract_content_from_response(chunk, api_type)
+                                if _data_count <= 2:
+                                    log_to_file(f"[stream] sample chunk keys={list(chunk.keys())} content={content!r} finish={finish_reason}")
                                 if content:
                                     chunk_queue.put(content)
                                 if finish_reason:
+                                    log_to_file(f"[stream] finish_reason={finish_reason} after {_data_count} data chunks")
                                     break
                         except Exception as e:
                             log_to_file(f"Error processing line: {str(e)}")
                             chunk_queue.put(str(e))
+                    else:
+                        log_to_file(f"[stream] stream ended: {_line_count} lines, {_data_count} data chunks")
             except urllib.error.HTTPError as e:
                 try:
                     body = e.read().decode("utf-8")
@@ -3602,11 +3613,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         WIDTH = 720
         HORI_MARGIN = VERT_MARGIN = 8
         BUTTON_WIDTH = 100
-        BUTTON_HEIGHT = 26
+        BUTTON_HEIGHT = 30
         HORI_SEP = VERT_SEP = 8
         LABEL_HEIGHT = 26
         EDIT_HEIGHT = 80
-        HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT + VERT_SEP + BUTTON_HEIGHT
+        HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + VERT_SEP + EDIT_HEIGHT + VERT_SEP + BUTTON_HEIGHT + VERT_MARGIN
         import uno
         from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
         from com.sun.star.awt.PushButtonType import OK, CANCEL
@@ -3662,14 +3673,21 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         edit_y = VERT_MARGIN + LABEL_HEIGHT + VERT_SEP
         btn_y = edit_y + EDIT_HEIGHT + VERT_SEP
-        add("label", "FixedText", HORI_MARGIN, VERT_MARGIN, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": str(message), "NoLabel": True})
-        add("edit", "Edit", HORI_MARGIN, edit_y,
-                WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": str(default), "MultiLine": True})
-        add("btn_ok", "Button", HORI_MARGIN, btn_y,
+        try:
+            dialog_model.BackgroundColor = _UI["bg"]
+        except Exception:
+            pass
+        add("label", "FixedText", HORI_MARGIN, VERT_MARGIN, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": str(message), "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text"],
+        })
+        add("edit", "Edit", HORI_MARGIN, edit_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+            "Text": str(default), "MultiLine": True,
+            "BackgroundColor": _UI["bg_input"],
+        })
+        add("btn_ok", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH, btn_y,
                 BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": OK, "DefaultButton": True, "Label": ok_label})
-        add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, btn_y,
-                BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": CANCEL, "Label": cancel_label})
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
         dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
@@ -5047,6 +5065,400 @@ EDITED VERSION:
             threading.Thread(target=_selection_refresh_loop, daemon=True).start()
         except Exception:
             pass
+
+    # ── Calc-specific static suggestions (transform instructions) ──────────
+    _FALLBACK_CALC_TRANSFORM_PROMPTS = [
+        "Traduire en anglais",
+        "Mettre la première lettre en majuscule",
+        "Résumer en une phrase courte",
+        "Extraire les mots-clés (séparés par des virgules)",
+        "Classifier comme Positif / Négatif / Neutre",
+        "Corriger l'orthographe et la grammaire",
+        "Normaliser le format (ex: prénom nom → PRÉNOM NOM)",
+        "Extraire le premier nombre trouvé",
+        "Détecter la langue (ex: FR / EN / DE)",
+        "Reformuler de façon plus formelle",
+    ]
+
+    def _show_calc_input_dialog(self, context_label="", title="MIrAI — Transformer les cellules", ok_label="Transformer", cell_content="") -> str:
+        """DSFR-styled modal input dialog for Calc actions.
+
+        Mirrors the visual structure of _show_edit_selection_dialog:
+        section header in primary blue, selection-info label, text area,
+        suggestions list with click-to-fill, Send + Close buttons.
+
+        Returns the instruction string entered by the user, or "" on cancel.
+        """
+        WIDTH = 740
+        HORI_MARGIN = 14
+        VERT_MARGIN = 12
+        BUTTON_WIDTH = 140
+        BUTTON_HEIGHT = 30
+        HORI_SEP = 10
+        VERT_SEP = 8
+        LABEL_HEIGHT = 22
+        EDIT_HEIGHT = 120
+        SUGGEST_LABEL_HEIGHT = 18
+        SUGGEST_LIST_HEIGHT = 120
+        REGEN_BTN_WIDTH = 180
+        HEIGHT = (
+            VERT_MARGIN * 2
+            + LABEL_HEIGHT + VERT_SEP
+            + EDIT_HEIGHT + VERT_SEP
+            + BUTTON_HEIGHT + VERT_SEP
+            + SUGGEST_LABEL_HEIGHT + VERT_SEP
+            + SUGGEST_LIST_HEIGHT + VERT_MARGIN
+        )
+
+        from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+        ctx = uno.getComponentContext()
+        def create(name):
+            return ctx.getServiceManager().createInstanceWithContext(name, ctx)
+
+        dialog = create("com.sun.star.awt.UnoControlDialog")
+        dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
+        dialog.setModel(dialog_model)
+        dialog.setVisible(False)
+        dialog.setTitle(title)
+        dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+        try:
+            dialog_model.BackgroundColor = _UI["bg"]
+        except Exception:
+            pass
+        try:
+            dialog_model.AlwaysOnTop = True
+        except Exception:
+            pass
+        try:
+            dialog_model.Sizeable = True
+        except Exception:
+            pass
+        try:
+            dialog_model.Closeable = True
+        except Exception:
+            pass
+
+        def add(name, ctrl_type, x_, y_, width_, height_, props):
+            try:
+                m = dialog_model.createInstance("com.sun.star.awt.UnoControl" + ctrl_type + "Model")
+            except Exception as e:
+                log_to_file(f"_show_calc_input_dialog: unsupported control {name}/{ctrl_type}: {e}")
+                return None
+            try:
+                dialog_model.insertByName(name, m)
+            except Exception as e:
+                log_to_file(f"_show_calc_input_dialog: insert failed {name}: {e}")
+                return None
+            ctrl = dialog.getControl(name)
+            try:
+                ctrl.setPosSize(x_, y_, width_, height_, POSSIZE)
+            except Exception:
+                pass
+            for k, v in props.items():
+                try:
+                    setattr(m, k, v)
+                except Exception:
+                    pass
+            return ctrl
+
+        OFFSET_BELOW = 20
+        label_max_width = WIDTH - HORI_MARGIN * 2
+
+        # Section header
+        add("label_title", "FixedText", HORI_MARGIN, VERT_MARGIN, label_max_width, LABEL_HEIGHT, {
+            "Label": ok_label + " les cellules", "NoLabel": True,
+            "FontHeight": _UI["font_section"],
+            "TextColor": _UI["primary"],
+            "FontWeight": 150,
+        })
+
+        # Selection-info label (cell range + count)
+        add("label_context", "FixedText",
+            HORI_MARGIN, VERT_MARGIN + LABEL_HEIGHT - 6 + OFFSET_BELOW,
+            label_max_width, SUGGEST_LABEL_HEIGHT, {
+            "Label": context_label, "NoLabel": True,
+            "FontHeight": _UI["font_small"],
+            "TextColor": _UI["text_light"],
+        })
+
+        # Instruction edit area
+        edit_y = VERT_MARGIN + LABEL_HEIGHT + VERT_SEP + OFFSET_BELOW
+        edit_control = add("edit_instruction", "Edit",
+            HORI_MARGIN, edit_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+            "Text": "", "MultiLine": True,
+            "BackgroundColor": _UI["bg_section"],
+            "FontHeight": _UI["font_label"],
+        })
+
+        # Send button with mascot icon
+        send_y = edit_y + EDIT_HEIGHT + VERT_SEP
+        _mascot_path = os.path.join(os.path.dirname(__file__), "icons", "mascot16.png")
+        _mascot_hover_path = os.path.join(os.path.dirname(__file__), "icons", "mascot16_hover.png")
+        _mascot_url = ""
+        _mascot_hover_url = ""
+        try:
+            if os.path.exists(_mascot_path):
+                _mascot_url = uno.systemPathToFileUrl(_mascot_path)
+            if os.path.exists(_mascot_hover_path):
+                _mascot_hover_url = uno.systemPathToFileUrl(_mascot_hover_path)
+        except Exception:
+            pass
+
+        send_btn_props = {
+            "Label": f"  {ok_label}",
+            "FontHeight": _UI["font_label"],
+            "FontWeight": 150,
+            "TextColor": _UI["btn_primary_fg"],
+            "BackgroundColor": _UI["btn_primary_bg"],
+        }
+        if _mascot_url:
+            send_btn_props["ImageURL"] = _mascot_url
+            send_btn_props["ImagePosition"] = 0
+            send_btn_props["ImageAlign"] = 0
+        btn_send = add("btn_send", "Button",
+            WIDTH - HORI_MARGIN - BUTTON_WIDTH, send_y,
+            BUTTON_WIDTH, BUTTON_HEIGHT + 4, send_btn_props)
+
+        def _add_rollover(ctrl, normal_bg, hover_bg, icon_url="", icon_hover_url=""):
+            if not ctrl:
+                return
+            class _RL(unohelper.Base, XMouseListener):
+                def mousePressed(self, e): return
+                def mouseReleased(self, e): return
+                def mouseEntered(self, e):
+                    try:
+                        m = ctrl.getModel()
+                        m.BackgroundColor = hover_bg
+                        m.FontWeight = 200
+                        if icon_hover_url:
+                            m.ImageURL = icon_hover_url
+                    except Exception:
+                        pass
+                def mouseExited(self, e):
+                    try:
+                        m = ctrl.getModel()
+                        m.BackgroundColor = normal_bg
+                        m.FontWeight = 150
+                        if icon_url:
+                            m.ImageURL = icon_url
+                    except Exception:
+                        pass
+                def disposing(self, e): return
+            try:
+                ctrl.addMouseListener(_RL())
+            except Exception:
+                pass
+
+        _add_rollover(btn_send, _UI["btn_primary_bg"], _UI["primary_hover"],
+                      _mascot_url, _mascot_hover_url)
+
+        # Separator + suggestions
+        suggest_y = send_y + BUTTON_HEIGHT + VERT_SEP + 4
+        add("line_sep", "FixedLine",
+            HORI_MARGIN, suggest_y - VERT_SEP // 2, WIDTH - HORI_MARGIN * 2, 6, {})
+        add("label_suggestions", "FixedText",
+            HORI_MARGIN, suggest_y + 12, WIDTH - HORI_MARGIN * 2, SUGGEST_LABEL_HEIGHT, {
+            "Label": "Suggestions...", "NoLabel": True,
+            "FontHeight": _UI["font_small"],
+            "TextColor": _UI["text_secondary"],
+            "FontSlant": 2,
+        })
+        suggest_y += SUGGEST_LABEL_HEIGHT + VERT_SEP + 5
+
+        suggestions_list = add("list_suggestions", "ListBox",
+            HORI_MARGIN, suggest_y,
+            WIDTH - HORI_MARGIN * 2 - REGEN_BTN_WIDTH - HORI_SEP, SUGGEST_LIST_HEIGHT, {
+            "Dropdown": False,
+            "BackgroundColor": _UI["bg_section"],
+            "FontHeight": _UI["font_small"],
+            "TextColor": _UI["text_light"],
+            "Border": 1,
+            "BorderColor": _UI["border"],
+        })
+        def _generate_calc_suggestions(content):
+            """Generate contextual Calc transform suggestions via LLM, fallback to static list."""
+            if not content or len(content.strip()) < 3:
+                return list(self._FALLBACK_CALC_TRANSFORM_PROMPTS)
+            try:
+                system = (
+                    "Tu es un assistant de transformation de données pour un tableur. "
+                    "Réponds UNIQUEMENT avec une liste numérotée de 8 transformations courtes "
+                    "(une par ligne, format: '1. transformation'). "
+                    "Chaque transformation doit être une consigne concrète commençant par un verbe "
+                    "à l'impératif, adaptée au type et au contenu des cellules fournies. "
+                    "Pas de commentaire, pas d'explication."
+                )
+                prompt = (
+                    "Voici des exemples de valeurs des cellules sélectionnées :\n\n"
+                    f"«{content[:500]}»\n\n"
+                    "Propose 8 transformations pertinentes pour ces données."
+                )
+                api_type = str(self.get_config("api_type", "completions")).lower()
+                request = self.make_api_request(prompt, system, max_tokens=400, api_type=api_type)
+                accumulated = []
+                def _collect(chunk):
+                    accumulated.append(chunk)
+                self.stream_request(request, api_type, _collect)
+                raw = "".join(accumulated).strip()
+                if not raw:
+                    return list(self._FALLBACK_CALC_TRANSFORM_PROMPTS)
+                lines = []
+                for line in raw.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    cleaned = re.sub(r"^\d+[\.\)\-]\s*", "", line).strip()
+                    if cleaned and len(cleaned) > 5:
+                        lines.append(cleaned)
+                if len(lines) >= 3:
+                    return lines[:10]
+                return list(self._FALLBACK_CALC_TRANSFORM_PROMPTS)
+            except Exception:
+                return list(self._FALLBACK_CALC_TRANSFORM_PROMPTS)
+
+        def _load_calc_suggestions(use_ai=False):
+            if suggestions_list:
+                try:
+                    suggestions_list.removeItems(0, suggestions_list.getItemCount())
+                except Exception:
+                    pass
+            if use_ai:
+                if suggestions_list:
+                    try:
+                        suggestions_list.addItems(("Génération en cours...",), 0)
+                    except Exception:
+                        pass
+                suggestions = _generate_calc_suggestions(cell_content)
+            else:
+                suggestions = list(self._FALLBACK_CALC_TRANSFORM_PROMPTS)
+            if suggestions_list:
+                try:
+                    suggestions_list.removeItems(0, suggestions_list.getItemCount())
+                except Exception:
+                    pass
+                if suggestions:
+                    try:
+                        suggestions_list.addItems(tuple(suggestions), 0)
+                    except Exception:
+                        pass
+
+        _load_calc_suggestions(use_ai=False)
+        def _bg_ai_suggestions():
+            try:
+                _load_calc_suggestions(use_ai=True)
+            except Exception:
+                pass
+        threading.Thread(target=_bg_ai_suggestions, daemon=True).start()
+
+        regen_props = {
+            "Label": "  Nouvelles suggestions",
+            "FontHeight": _UI["font_small"],
+            "FontWeight": 150,
+            "TextColor": _UI["text_secondary"],
+            "BackgroundColor": _UI["bg_section"],
+        }
+        if _mascot_url:
+            regen_props["ImageURL"] = _mascot_url
+            regen_props["ImagePosition"] = 0
+            regen_props["ImageAlign"] = 0
+        btn_regen = add("btn_regen", "Button",
+            WIDTH - HORI_MARGIN - REGEN_BTN_WIDTH, suggest_y,
+            REGEN_BTN_WIDTH, BUTTON_HEIGHT, regen_props)
+        _add_rollover(btn_regen, _UI["bg_section"], _UI["bg_accent"],
+                      _mascot_url, _mascot_hover_url)
+
+        # Position dialog
+        frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
+        window = frame.getContainerWindow() if frame else None
+        dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
+        saved_x = self.get_config("calc_input_dialog_x", None)
+        saved_y = self.get_config("calc_input_dialog_y", None)
+        if window:
+            ps = window.getPosSize()
+            if isinstance(saved_x, (int, float)) and isinstance(saved_y, (int, float)):
+                _x, _y = int(saved_x), int(saved_y)
+            else:
+                _x = ps.Width / 2 - WIDTH / 2
+                _y = ps.Height / 2 - HEIGHT / 2
+            dialog.setPosSize(_x, _y, 0, 0, POS)
+
+        # State
+        result = {"text": ""}
+
+        def _save_pos():
+            try:
+                ps = dialog.getPosSize()
+                self.set_config("calc_input_dialog_x", int(ps.X))
+                self.set_config("calc_input_dialog_y", int(ps.Y))
+            except Exception:
+                pass
+
+        # Listeners
+        class SendListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, event):
+                try:
+                    result["text"] = edit_control.getModel().Text.strip()
+                except Exception:
+                    pass
+                _save_pos()
+                try:
+                    dialog.endExecute()
+                except Exception:
+                    pass
+            def disposing(self, event):
+                return
+
+        class RegenListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, event):
+                try:
+                    threading.Thread(
+                        target=lambda: _load_calc_suggestions(use_ai=True),
+                        daemon=True,
+                    ).start()
+                except Exception:
+                    pass
+            def disposing(self, event):
+                return
+
+        class SuggestItemListener(unohelper.Base, XItemListener):
+            def itemStateChanged(self, event):
+                try:
+                    selected = suggestions_list.getSelectedItem() if suggestions_list else ""
+                    if selected and edit_control:
+                        edit_control.getModel().Text = selected
+                except Exception:
+                    pass
+            def disposing(self, event):
+                return
+
+        if btn_send:
+            try:
+                btn_send.addActionListener(SendListener())
+            except Exception:
+                pass
+        if btn_regen:
+            try:
+                btn_regen.addActionListener(RegenListener())
+            except Exception:
+                pass
+        if suggestions_list:
+            try:
+                suggestions_list.addItemListener(SuggestItemListener())
+            except Exception:
+                pass
+
+        if edit_control:
+            try:
+                edit_control.setFocus()
+            except Exception:
+                pass
+
+        dialog.execute()
+        try:
+            dialog.dispose()
+        except Exception:
+            pass
+        return result["text"]
 
     def credentials_box(self, title="Device Management", login_label="Login", password_label="Mot de passe"):
         """Dialog with login + password and a show/hide toggle."""

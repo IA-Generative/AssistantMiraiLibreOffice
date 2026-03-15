@@ -5,6 +5,26 @@ from .shared import apply_settings_result
 _ERR_PREFIX = "#ERREUR: "
 
 
+def _col_letter(col: int) -> str:
+    """Convert 0-based column index to spreadsheet letter (0→A, 25→Z, 26→AA…)."""
+    result = ""
+    col += 1
+    while col:
+        col, rem = divmod(col - 1, 26)
+        result = chr(ord("A") + rem) + result
+    return result
+
+
+def _range_label(area) -> str:
+    """Return a human-readable label like '5 cellules (A4:A8)'."""
+    sc, ec = area.StartColumn, area.EndColumn
+    sr, er = area.StartRow, area.EndRow
+    n = (ec - sc + 1) * (er - sr + 1)
+    ref = f"{_col_letter(sc)}{sr + 1}:{_col_letter(ec)}{er + 1}"
+    noun = "cellule" if n == 1 else "cellules"
+    return f"{n} {noun} sélectionnée{'s' if n > 1 else ''} ({ref})"
+
+
 def _open_settings(job):
     try:
         result = job.settings_box("Settings")
@@ -92,29 +112,64 @@ def _transform_to_column(job, sheet, col_range, row_range, user_input):
         "Réponds UNIQUEMENT avec le résultat transformé, sans explication ni ponctuation autour."
     )
     out_col = col_range.stop  # column immediately to the right of the selection
+    job._log(f"[transform] api_type={api_type} out_col={out_col} rows={list(row_range)}")
 
     for row in row_range:
         parts = [sheet.getCellByPosition(col, row).getString() for col in col_range]
         source_text = " | ".join(p for p in parts if p)
         if not source_text:
+            job._log(f"[transform] row={row} skipped (empty)")
             continue
 
+        job._log(f"[transform] row={row} source={source_text!r}")
         target_cell = sheet.getCellByPosition(out_col, row)
         target_cell.setString("")
+        try:
+            target_cell.setPropertyValue("IsTextWrapped", True)
+        except Exception:
+            pass
         prompt = (
             "VALEUR SOURCE :\n" + source_text
             + "\n\nINSTRUCTION : " + user_input
             + "\n\nRÉSULTAT :"
         )
         try:
-            request = job.make_api_request(prompt, system_prompt, 300, api_type=api_type)
+            request = job.make_api_request(prompt, system_prompt, 2000, api_type=api_type)
+            _chunks = []
 
-            def append_result(chunk_text, tc=target_cell):
-                tc.setString(tc.getString() + chunk_text)
+            def append_result(chunk_text, tc=target_cell, acc=_chunks):
+                acc.append(chunk_text)
+                try:
+                    tc.setString(tc.getString() + chunk_text)
+                except Exception as _e:
+                    job._log(f"[transform] setString error: {_e}")
 
             job.stream_request(request, api_type, append_result)
+            job._log(f"[transform] row={row} done total_chars={sum(len(c) for c in _chunks)}")
         except Exception as e:
+            job._log(f"[transform] row={row} ERROR: {e}")
             target_cell.setString(_ERR_PREFIX + str(e))
+
+        # Row height: optimal for short content, capped at ~5 lines for long content
+        try:
+            row_obj = sheet.getRows().getByIndex(row)
+            row_obj.OptimalHeight = True
+            if row_obj.Height > 2500:   # 25 mm ≈ 5 lines
+                row_obj.Height = 2500
+                row_obj.OptimalHeight = False
+        except Exception:
+            pass
+
+    # Output column: at least 80 mm (≈ 3-4 standard cols), max 150 mm
+    try:
+        col_obj = sheet.getColumns().getByIndex(out_col)
+        col_obj.OptimalWidth = True
+        if col_obj.Width < 8000:
+            col_obj.Width = 8000
+        elif col_obj.Width > 15000:
+            col_obj.Width = 15000
+    except Exception:
+        pass
 
 
 def _generate_formula(job, target_cell, user_input):
@@ -125,11 +180,12 @@ def _generate_formula(job, target_cell, user_input):
     """
     api_type = str(job.get_config("api_type", "completions")).lower()
     system_prompt = (
-        "Tu es un expert LibreOffice Calc. "
-        "Tu génères uniquement des formules Calc valides. "
-        "Tu réponds UNIQUEMENT avec la formule commençant par =, sans explication ni texte autour."
+        "You are a LibreOffice Calc expert. "
+        "You generate only valid Calc formulas using ENGLISH function names "
+        "(e.g. AVERAGE, SUM, IF, VLOOKUP, COUNTIF). "
+        "Reply ONLY with the formula starting with =, no explanation, no text around it."
     )
-    prompt = "Génère une formule LibreOffice Calc pour : " + user_input + "\n\nFORMULE :"
+    prompt = "Generate a LibreOffice Calc formula for: " + user_input + "\n\nFORMULA:"
     try:
         result_parts = []
 
@@ -198,6 +254,12 @@ def _analyze_range(job, sheet, col_range, row_range):
         except Exception:
             pass
 
+    # Enable text wrapping so long analysis fits in the cell
+    try:
+        result_cell.setPropertyValue("IsTextWrapped", True)
+    except Exception:
+        pass
+
     try:
         request = job.make_api_request(prompt, system_prompt, 1000, api_type=api_type)
 
@@ -207,6 +269,12 @@ def _analyze_range(job, sheet, col_range, row_range):
         job.stream_request(request, api_type, append_analysis)
     except Exception as e:
         result_cell.setString(_ERR_PREFIX + str(e))
+
+    # Auto-fit row height after content is written
+    try:
+        sheet.getRows().getByIndex(out_row).OptimalHeight = True
+    except Exception:
+        pass
 
 
 def handle_calc_action(job, args, model):
@@ -234,13 +302,18 @@ def handle_calc_action(job, args, model):
                 always_on_top=True,
             )
         elif args == "TransformToColumn":
-            user_input = job.input_box(
-                "Quelle transformation appliquer à chaque cellule ?",
-                "Transformer → colonne résultat",
-                "",
-                ok_label="Transformer",
-                cancel_label="Annuler",
-                always_on_top=True,
+            _area = selection.getRangeAddress()
+            _sample = []
+            for _r in range(_area.StartRow, min(_area.EndRow + 1, _area.StartRow + 5)):
+                for _c in range(_area.StartColumn, _area.EndColumn + 1):
+                    _v = sheet.getCellByPosition(_c, _r).getString()
+                    if _v:
+                        _sample.append(_v)
+            user_input = job._show_calc_input_dialog(
+                _range_label(_area),
+                "MIrAI — Transformer les cellules",
+                "Transformer",
+                cell_content=" | ".join(_sample[:10]),
             )
         elif args == "GenerateFormula":
             user_input = job.input_box(
