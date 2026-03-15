@@ -25,12 +25,132 @@ def _range_label(area) -> str:
     return f"{n} {noun} sélectionnée{'s' if n > 1 else ''} ({ref})"
 
 
+def _collect_headers(sheet, num_cols):
+    """Return {col_letter: header_text} for row 0, up to 26 columns."""
+    headers = {}
+    for c in range(min(num_cols, 26)):
+        h = sheet.getCellByPosition(c, 0).getString()
+        if h:
+            headers[_col_letter(c)] = h
+    return headers
+
+
+def _find_last_data_row(sheet, num_cols, num_rows):
+    """Return the 0-based index of the last row that has any non-empty cell."""
+    for r in range(min(num_rows, 200) - 1, 0, -1):
+        for c in range(min(num_cols, 26)):
+            if sheet.getCellByPosition(c, r).getString():
+                return r
+    return 0
+
+
+def _collect_row_values(sheet, headers, num_cols, target_row):
+    """Return {header_name: value} for all header columns in target_row."""
+    row_vals = {}
+    for c in range(min(num_cols, 26)):
+        col_letter = _col_letter(c)
+        if col_letter in headers:
+            v = sheet.getCellByPosition(c, target_row).getString()
+            if v:
+                row_vals[headers[col_letter]] = v
+    return row_vals
+
+
+def _build_schema_context(sheet, area) -> str:
+    """Return a concise table description to feed the formula LLM as context.
+
+    Provides target cell, column headers, data range, and current row values.
+    """
+    target_col = area.StartColumn
+    target_row = area.StartRow
+    lines = [f"Target cell: {_col_letter(target_col)}{target_row + 1}"]
+
+    try:
+        num_cols = sheet.getColumns().Count
+        num_rows = sheet.getRows().Count
+        headers = _collect_headers(sheet, num_cols)
+
+        if headers:
+            h_str = ", ".join(f"{k}={v!r}" for k, v in list(headers.items())[:15])
+            lines.append(f"Column headers (row 1): {h_str}")
+
+        last_data_row = _find_last_data_row(sheet, num_cols, num_rows)
+        if last_data_row > 0 and headers:
+            lines.append(f"Data range: row 2 to row {last_data_row + 1} ({last_data_row} data rows)")
+
+        if target_row > 0:
+            row_vals = _collect_row_values(sheet, headers, num_cols, target_row)
+            if row_vals:
+                rv_str = ", ".join(f"{k}={v!r}" for k, v in list(row_vals.items())[:10])
+                lines.append(f"Current row values: {rv_str}")
+
+    except Exception:
+        pass
+
+    return "\n".join(lines)
+
+
+def _get_cell_error(target_cell) -> str:
+    """Return the error token if the cell shows a formula error, else ''."""
+    try:
+        val = target_cell.getString()
+        if val and val.startswith("#"):
+            return val
+    except Exception:
+        pass
+    return ""
+
+
 def _open_settings(job):
     try:
         result = job.settings_box("Settings")
         apply_settings_result(job, result)
     except Exception:
         pass
+
+
+def _strip_markdown(text):
+    """Remove common LLM markdown artifacts from plain-text cell content.
+
+    Targets only unambiguous formatting markers: bold (**…** / __…__),
+    italic (*…* / _…_), ATX headers (# …) and inline code (`…`).
+    Single bare ``*`` or ``_`` characters that aren't paired are left alone.
+    """
+    import re
+    # Bold — greedy enough to handle multi-line but not across paragraphs
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'__(.+?)__',     r'\1', text, flags=re.DOTALL)
+    # Italic (only when surrounded by non-space)
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text, flags=re.DOTALL)
+    text = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)',       r'\1', text, flags=re.DOTALL)
+    # ATX headers
+    text = re.sub(r'(?m)^#{1,6}\s+', '', text)
+    # Inline code
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    return text
+
+
+def _safe_set_string(cell, text):
+    """Set a Calc cell's string content without losing a leading apostrophe.
+
+    LibreOffice treats a leading ``'`` in ``setString()`` as a text-prefix
+    marker (invisible, forces text type) and drops it from the stored value.
+    This is harmless for most content, but breaks text that genuinely starts
+    with an apostrophe (e.g. French contractions at the very start of a
+    generated response).  In that case we fall back to the XText API which
+    does not apply the prefix logic.
+    """
+    if text.startswith("'"):
+        try:
+            ct = cell.getText()
+            cur = ct.createTextCursor()
+            cur.gotoStart(False)
+            cur.gotoEnd(True)
+            ct.insertString(cur, text, True)
+            return
+        except Exception:
+            pass
+    cell.setString(text)
 
 
 def _extend_cells(job, sheet, col_range, row_range):
@@ -51,9 +171,11 @@ def _extend_cells(job, sheet, col_range, row_range):
                     extend_max_tokens,
                     api_type=api_type,
                 )
+                _acc = [cell_text]
 
-                def append_cell_text(chunk_text, target_cell=cell):
-                    target_cell.setString(target_cell.getString() + chunk_text)
+                def append_cell_text(chunk_text, target_cell=cell, acc=_acc):
+                    acc.append(chunk_text)
+                    _safe_set_string(target_cell, _strip_markdown("".join(acc)))
 
                 job.stream_request(request, api_type, append_cell_text)
             except Exception as e:
@@ -89,29 +211,135 @@ def _edit_cells(job, sheet, col_range, row_range, user_input):
                 max_tokens = len(cell.getString()) + edit_max_new_tokens
                 request = job.make_api_request(prompt, edit_system_prompt, max_tokens, api_type=api_type)
                 cell.setString("")
+                _acc_edit = []
 
-                def append_edit_text(chunk_text, target_cell=cell):
-                    target_cell.setString(target_cell.getString() + chunk_text)
+                def append_edit_text(chunk_text, target_cell=cell, acc=_acc_edit):
+                    acc.append(chunk_text)
+                    _safe_set_string(target_cell, _strip_markdown("".join(acc)))
 
                 job.stream_request(request, api_type, append_edit_text)
             except Exception as e:
                 cell.setString(cell.getString() + ": " + str(e))
 
 
+_RESULT_BASE = "Résultat IA"
+
+
+def _next_result_header(sheet):
+    """Return the next available 'Résultat IA' label.
+
+    Scans row 0 for existing headers that start with _RESULT_BASE and returns
+    the next name in the series: 'Résultat IA', 'Résultat IA ×2', '×3', …
+    """
+    import re
+    try:
+        num_cols = sheet.getColumns().Count
+    except Exception:
+        num_cols = 1024
+    existing = set()
+    for c in range(min(int(num_cols), 1024)):
+        try:
+            val = sheet.getCellByPosition(c, 0).getString()
+        except Exception:
+            break
+        if val.startswith(_RESULT_BASE):
+            m = re.match(r"^" + re.escape(_RESULT_BASE) + r"(?:\s+×(\d+))?$", val)
+            if m:
+                existing.add(int(m.group(1)) if m.group(1) else 1)
+    if not existing:
+        return _RESULT_BASE
+    n = 2
+    while n in existing:
+        n += 1
+    return f"{_RESULT_BASE} ×{n}"
+
+
+_HEADER_STYLE_PROPS = (
+    "CharHeight", "CharWeight", "CharPosture", "CharColor",
+    "CellBackColor", "CharUnderline", "CharFontName",
+    "HoriJustify", "VertJustify", "IsTextWrapped",
+)
+
+
+def _apply_dominant_header_style(target_cell, sheet, col_range):
+    """Copy the most common header-row style from col_range cols to target_cell.
+
+    Reads row-0 cells across the selection, finds the modal value for each
+    style property, and applies them to the target cell.  Any property that
+    cannot be read or written is silently skipped.
+    """
+    from collections import Counter
+    samples = [sheet.getCellByPosition(c, 0) for c in col_range]
+    for prop in _HEADER_STYLE_PROPS:
+        values = []
+        for cell in samples:
+            try:
+                values.append(cell.getPropertyValue(prop))
+            except Exception:
+                pass
+        if not values:
+            continue
+        # Most common value (Counter.most_common returns (value, count) pairs)
+        dominant = Counter(str(v) for v in values).most_common(1)[0][0]
+        # Map back to typed value (use first sample that matches)
+        for v in values:
+            if str(v) == dominant:
+                try:
+                    target_cell.setPropertyValue(prop, v)
+                except Exception:
+                    pass
+                break
+
+
+def _find_free_output_column(sheet, col_range, row_range):
+    """Return (col_index, needs_header).
+
+    If the column immediately right of col_range is free, return it unchanged
+    (needs_header=False — existing behaviour).  If it has content, walk right
+    until an empty column is found and return it with needs_header=True so the
+    caller can label it 'Résultat IA'.  Falls back to col_range.stop after
+    50 columns.
+    """
+    first = col_range.stop
+    check_rows = list(row_range) + [0]  # include header row in occupation check
+    for offset in range(50):
+        candidate = first + offset
+        try:
+            occupied = any(
+                sheet.getCellByPosition(candidate, r).getString()
+                for r in check_rows
+            )
+        except Exception:
+            return first, False
+        if not occupied:
+            return candidate, (candidate != first)
+    return first, False  # fallback
+
+
 def _transform_to_column(job, sheet, col_range, row_range, user_input):
     """Transform source cells → adjacent output column (non-destructive).
 
     For each row, joins all selected cells with ' | ', sends to LLM with
-    the user instruction, writes the result to the column immediately to
-    the right of the selection.
+    the user instruction, writes the result to the first free column to the
+    right of the selection. If the adjacent column already has content the
+    function walks right until it finds an empty column and labels it
+    'Résultat IA'.
     """
     api_type = str(job.get_config("api_type", "completions")).lower()
     system_prompt = (
         "Tu es un assistant de transformation de données. "
         "Pour chaque valeur fournie, applique l'instruction demandée. "
-        "Réponds UNIQUEMENT avec le résultat transformé, sans explication ni ponctuation autour."
+        "Réponds UNIQUEMENT avec le résultat transformé, sans explication ni ponctuation autour. "
+        "N'utilise aucun formatage markdown (pas de **, *, _, #, `, etc.)."
     )
-    out_col = col_range.stop  # column immediately to the right of the selection
+    out_col, needs_header = _find_free_output_column(sheet, col_range, row_range)
+    if needs_header:
+        try:
+            hdr = sheet.getCellByPosition(out_col, 0)
+            hdr.setString(_next_result_header(sheet))
+            _apply_dominant_header_style(hdr, sheet, col_range)
+        except Exception:
+            pass
     job._log(f"[transform] api_type={api_type} out_col={out_col} rows={list(row_range)}")
 
     for row in row_range:
@@ -140,7 +368,7 @@ def _transform_to_column(job, sheet, col_range, row_range, user_input):
             def append_result(chunk_text, tc=target_cell, acc=_chunks):
                 acc.append(chunk_text)
                 try:
-                    tc.setString(tc.getString() + chunk_text)
+                    _safe_set_string(tc, _strip_markdown("".join(acc)))
                 except Exception as _e:
                     job._log(f"[transform] setString error: {_e}")
 
@@ -172,39 +400,166 @@ def _transform_to_column(job, sheet, col_range, row_range, user_input):
         pass
 
 
-def _generate_formula(job, target_cell, user_input):
-    """Generate a Calc formula from a natural-language description.
+def _fill_formula_down(job, sheet, formula, area):
+    """Replicate formula across all rows of the selection, adjusting row refs.
 
-    Collects the full streamed response before writing, since a partial
-    formula is not valid and must not be committed to the cell mid-stream.
+    Stops at the first row that has no data in the columns to the left of the
+    output column — prevents writing to tens of thousands of empty rows when
+    the user selects an entire column.
+    """
+    import re
+    out_col = area.StartColumn
+    num_cols = sheet.getColumns().Count
+    filled = 0
+
+    for row_idx in range(area.StartRow + 1, area.EndRow + 1):
+        # Stop at first fully empty row. Check columns left of output first;
+        # if the output column is leftmost, check a few columns to the right.
+        left = range(min(out_col, num_cols))
+        right = range(out_col + 1, min(num_cols, out_col + 5))
+        check = left if out_col > 0 else right
+        has_data = any(sheet.getCellByPosition(c, row_idx).getString() for c in check)
+        if not has_data:
+            job._log(f"[formula_fill] stopping at empty row {row_idx + 1}")
+            break
+
+        delta = row_idx - area.StartRow
+        def _shift(m, d=delta):
+            return m.group(1) + str(int(m.group(2)) + d)
+        adjusted = re.sub(r'(\$?[A-Z]+\$?)(\d+)', _shift, formula)
+        try:
+            sheet.getCellByPosition(out_col, row_idx).setFormula(adjusted)
+            filled += 1
+        except Exception as e:
+            job._log(f"[formula_fill] row={row_idx + 1} error={e}")
+
+    job._log(f"[formula_fill] done — {filled} rows filled")
+
+
+_FORMULA_SYSTEM = (
+    "You are a LibreOffice Calc expert. "
+    "You generate only valid Calc formulas using ENGLISH function names "
+    "(e.g. AVERAGE, SUM, IF, VLOOKUP, COUNTIF, AVERAGEIF, IFERROR, INDEX, MATCH). "
+    "IMPORTANT: use SEMICOLONS (;) as function argument separators, not commas. "
+    "Examples: =IF(A1>0;A1;0)  =VLOOKUP(A1;B:C;2;0)  =IFERROR(SUM(C2:F2);0) "
+    "Use COLON (:) for ranges (e.g. C2:F2). "
+    "Reply ONLY with the formula starting with =, no markdown, no explanation."
+)
+
+
+def _build_from_selection(job, sheet, raw_selection):
+    """Build (on_generate_fn, schema_ctx) from a raw UNO cell selection.
+
+    Returns (None, None) if the selection has no valid range address.
+    Each call creates fresh messages/area state — suitable for both the
+    initial open and XSelectionChangeListener updates.
+    """
+    from types import SimpleNamespace
+    try:
+        area_r = raw_selection.getRangeAddress()
+    except Exception:
+        return None, None
+
+    sr = max(area_r.StartRow, 1)
+    tc = sheet.getCellByPosition(area_r.StartColumn, sr)
+    # Cap EndRow: if the user selected an entire column the raw EndRow is ~1M.
+    # Shrink it to the last row that actually has data in the sheet.
+    raw_end = area_r.EndRow
+    if raw_end > sr + 1000:
+        num_cols = sheet.getColumns().Count
+        num_rows = sheet.getRows().Count
+        raw_end = max(_find_last_data_row(sheet, num_cols, num_rows), sr)
+    area = SimpleNamespace(
+        StartColumn=area_r.StartColumn,
+        EndColumn=area_r.EndColumn,
+        StartRow=sr,
+        EndRow=max(raw_end, sr),
+    )
+    job._log(f"[formula] target={_col_letter(area.StartColumn)}{sr + 1} "
+             f"range={_col_letter(area.StartColumn)}{sr + 1}:"
+             f"{_col_letter(area.EndColumn)}{area.EndRow + 1}")
+    sc = _build_schema_context(sheet, area)
+    msgs = []
+
+    def _on_gen(user_input):
+        formula = _generate_formula(job, tc, user_input, schema_context=sc, messages=msgs)
+        new_lines = [f"▶ {user_input}"]
+        if formula:
+            if area.EndRow > area.StartRow:
+                _fill_formula_down(job, sheet, formula, area)
+                new_lines.append(f"↓ Appliqué sur {area.EndRow - area.StartRow + 1} lignes")
+            new_lines.append(f"◀ {formula}")
+            err = _get_cell_error(tc)
+            if err:
+                new_lines.append(f"⚠ Erreur : {err}")
+                msgs.append({
+                    "role": "user",
+                    "content": (
+                        f"La formule produit l'erreur LibreOffice : {err}. "
+                        "Analyse le contexte et corrige la formule."
+                    ),
+                })
+        return new_lines
+
+    return _on_gen, sc
+
+
+def _generate_formula(job, target_cell, user_input, schema_context="", messages=None):
+    """Generate (or refine) a Calc formula.
+
+    When *messages* is provided the full conversation history is forwarded to
+    the LLM so it can refine a previous answer.  On the first call pass
+    messages=[] and the function will initialise it with the system message.
+
+    Returns the formula string (with leading "=") that was applied, or "".
     """
     api_type = str(job.get_config("api_type", "completions")).lower()
-    system_prompt = (
-        "You are a LibreOffice Calc expert. "
-        "You generate only valid Calc formulas using ENGLISH function names "
-        "(e.g. AVERAGE, SUM, IF, VLOOKUP, COUNTIF). "
-        "Reply ONLY with the formula starting with =, no explanation, no text around it."
-    )
-    prompt = "Generate a LibreOffice Calc formula for: " + user_input + "\n\nFORMULA:"
+
+    if messages is None:
+        messages = []
+
+    # Build / refresh system message on first turn
+    if not messages:
+        system_content = _FORMULA_SYSTEM
+        if schema_context:
+            system_content += "\n\nTable context:\n" + schema_context
+        job._log(f"[formula] schema_context: {schema_context!r}")
+        messages.append({"role": "system", "content": system_content})
+
+    messages.append({"role": "user", "content": user_input})
+
     try:
         result_parts = []
 
         def collect(chunk_text):
             result_parts.append(chunk_text)
 
-        request = job.make_api_request(prompt, system_prompt, 200, api_type=api_type)
+        request = job.make_chat_request(messages, max_tokens=2000, api_type=api_type)
         job.stream_request(request, api_type, collect)
 
         formula = "".join(result_parts).strip()
-        if formula:
-            if not formula.startswith("="):
-                formula = "=" + formula
-            try:
-                target_cell.setFormula(formula)
-            except Exception:
-                target_cell.setString(formula)
+        # Strip stray markdown fences if the model wrapped it
+        for fence in ("```python", "```", "`"):
+            formula = formula.strip(fence).strip()
+        if not formula:
+            return ""
+        if not formula.startswith("="):
+            formula = "=" + formula
+
+        messages.append({"role": "assistant", "content": formula})
+        job._log(f"[formula] generated: {formula!r}")
+
+        try:
+            target_cell.setFormula(formula)
+            job._log(f"[formula] setFormula OK, getString={target_cell.getString()!r}")
+        except Exception as e:
+            job._log(f"[formula] setFormula FAILED ({e}), using setString")
+            target_cell.setString(formula)
+        return formula
     except Exception as e:
+        job._log(f"[formula] error: {e}")
         target_cell.setString(_ERR_PREFIX + str(e))
+        return ""
 
 
 def _analyze_range(job, sheet, col_range, row_range):
@@ -309,28 +664,51 @@ def handle_calc_action(job, args, model):
                     _v = sheet.getCellByPosition(_c, _r).getString()
                     if _v:
                         _sample.append(_v)
+            # Preview output column in the dialog label
+            _col_range_prev = range(_area.StartColumn, _area.EndColumn + 1)
+            _row_range_prev = range(_area.StartRow, min(_area.EndRow + 1, _area.StartRow + 200))
+            _prev_out, _prev_new = _find_free_output_column(sheet, _col_range_prev, _row_range_prev)
+            _prev_letter = _col_letter(_prev_out)
+            if _prev_new:
+                _prev_name = _next_result_header(sheet)
+                _out_info = f"  →  nouvelle colonne « {_prev_name} » (col. {_prev_letter})"
+            else:
+                _existing_hdr = sheet.getCellByPosition(_prev_out, 0).getString()
+                _out_info = f"  →  col. {_prev_letter}" + (f" « {_existing_hdr} »" if _existing_hdr else "")
             user_input = job._show_calc_input_dialog(
-                _range_label(_area),
+                _range_label(_area) + _out_info,
                 "MIrAI — Transformer les cellules",
                 "Transformer",
                 cell_content=" | ".join(_sample[:10]),
             )
-        elif args == "GenerateFormula":
-            user_input = job.input_box(
-                "Décrivez la formule souhaitée :",
-                "Générer une formule",
-                "",
-                ok_label="Générer",
-                cancel_label="Annuler",
-                always_on_top=True,
-            )
-
-        # GenerateFormula only needs the active cell, not a range
+        # GenerateFormula uses a dedicated multi-turn assistant dialog
         if args == "GenerateFormula":
-            if user_input:
-                area = selection.getRangeAddress()
-                target_cell = sheet.getCellByPosition(area.StartColumn, area.StartRow)
-                _generate_formula(job, target_cell, user_input)
+            # Build initial state from current selection
+            on_gen, schema_ctx = _build_from_selection(job, sheet, selection)
+            if on_gen is None:
+                return True
+            history_lines = []
+
+            def schema_builder(raw_sel):
+                """Rebuild (on_generate, schema_ctx) when the user changes selection."""
+                return _build_from_selection(job, sheet, raw_sel)
+
+            # If the dialog is already open, just focus it — the selection listener
+            # keeps the context up-to-date automatically.
+            if job._formula_dialog is not None:
+                try:
+                    job._formula_dialog.setVisible(True)
+                    job._formula_dialog.getPeer().setFocus()
+                except Exception:
+                    pass
+                return True
+
+            job._show_formula_assistant_dialog(
+                schema_context=schema_ctx,
+                history_lines=history_lines,
+                on_generate=on_gen,
+                schema_builder=schema_builder,
+            )
             return True
 
         area = selection.getRangeAddress()

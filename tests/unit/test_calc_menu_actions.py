@@ -14,9 +14,11 @@ install()
 from src.mirai.menu_actions.calc import (  # noqa: E402
     _ERR_PREFIX,
     _analyze_range,
+    _build_schema_context,
     _edit_cells,
     _extend_cells,
     _generate_formula,
+    _get_cell_error,
     _transform_to_column,
     handle_calc_action,
 )
@@ -56,6 +58,8 @@ def _make_job(stream_chunks=None):
 
     job.stream_request.side_effect = _stream
     job.get_config.return_value = ""
+    job._formula_dialog = None
+    job._formula_dialog_state = None
     return job
 
 
@@ -123,8 +127,8 @@ class TestTransformToColumn(unittest.TestCase):
         sheet, cells = _make_sheet({(0, 0): "", (0, 1): "Lyon"})
         job = _make_job(["France"])
         _transform_to_column(job, sheet, range(0, 1), range(0, 2), "pays")
-        # row 0 is empty → skipped entirely (output cell never written)
-        self.assertNotIn((1, 0), cells)
+        # row 0 is empty → skipped; output cell at (1,0) is not written to
+        self.assertEqual(cells.get((1, 0), _make_cell()).getString(), "")
         self.assertEqual(cells[(1, 1)].getString(), "France")
         self.assertEqual(job.make_api_request.call_count, 1)
 
@@ -185,7 +189,7 @@ class TestGenerateFormula(unittest.TestCase):
     def test_error_writes_err_prefix(self):
         target = _make_cell()
         job = _make_job()
-        job.make_api_request.side_effect = RuntimeError("network error")
+        job.make_chat_request.side_effect = RuntimeError("network error")
         _generate_formula(job, target, "formula")
         target.setString.assert_called_once()
         self.assertTrue(target.setString.call_args[0][0].startswith(_ERR_PREFIX))
@@ -325,15 +329,20 @@ class TestHandleCalcAction(unittest.TestCase):
 
     def test_generate_formula_empty_input_does_nothing(self):
         job = _make_job(["=SUM(A1)"])
-        job.input_box.return_value = ""
+        # Mock does nothing — on_generate is never called → no API request
+        job._show_formula_assistant_dialog.return_value = None
         model, *_ = self._make_model()
         handle_calc_action(job, "GenerateFormula", model)
-        job.make_api_request.assert_not_called()
+        job.make_chat_request.assert_not_called()
 
     def test_generate_formula_with_input_writes_formula(self):
         target = _make_cell()
         job = _make_job(["=AVERAGE(A1:A10)"])
-        job.input_box.return_value = "average of A1 to A10"
+        # Mock calls on_generate once with the user input
+        def _fake_dialog(schema_context="", history_lines=None, on_generate=None, title="", schema_builder=None):
+            if on_generate:
+                on_generate("average of A1 to A10")
+        job._show_formula_assistant_dialog.side_effect = _fake_dialog
         model, sheet, _ = self._make_model()
         sheet.getCellByPosition.return_value = target
         handle_calc_action(job, "GenerateFormula", model)
@@ -354,10 +363,157 @@ class TestHandleCalcAction(unittest.TestCase):
                     "AnalyzeRange", "GenerateFormula", "settings"):
             job = _make_job()
             job.input_box.return_value = "x"
+            # GenerateFormula: mock does nothing (on_generate never called)
+            job._show_formula_assistant_dialog.return_value = None
+            job._show_calc_input_dialog.return_value = ""
             model, sheet, _ = self._make_model()
             sheet.getCellByPosition.return_value = _make_cell("v")
             result = handle_calc_action(job, arg, model)
             self.assertTrue(result, msg=f"Expected True for arg={arg!r}")
+
+
+# ---------------------------------------------------------------------------
+# _get_cell_error
+# ---------------------------------------------------------------------------
+
+class TestGetCellError(unittest.TestCase):
+
+    def test_returns_empty_for_normal_value(self):
+        cell = _make_cell("42")
+        self.assertEqual(_get_cell_error(cell), "")
+
+    def test_returns_error_token_for_hash_value(self):
+        cell = _make_cell("#NAME?")
+        self.assertEqual(_get_cell_error(cell), "#NAME?")
+
+    def test_returns_empty_for_empty_cell(self):
+        cell = _make_cell("")
+        self.assertEqual(_get_cell_error(cell), "")
+
+    def test_returns_empty_on_exception(self):
+        cell = MagicMock()
+        cell.getString.side_effect = Exception("UNO error")
+        self.assertEqual(_get_cell_error(cell), "")
+
+
+# ---------------------------------------------------------------------------
+# _build_schema_context
+# ---------------------------------------------------------------------------
+
+class TestBuildSchemaContext(unittest.TestCase):
+
+    def _make_area(self, start_col=0, start_row=2):
+        area = MagicMock()
+        area.StartColumn = start_col
+        area.StartRow = start_row
+        return area
+
+    def _make_sheet_with_data(self):
+        """Sheet with headers in row 0 and sample values in rows 1-3."""
+        data = {
+            (0, 0): "Nom", (1, 0): "Ventes", (2, 0): "Région",
+            (0, 1): "Alice", (0, 2): "Bob", (0, 3): "Carol",
+        }
+        sheet, _ = _make_sheet(data)
+        cols = MagicMock()
+        cols.Count = 3
+        sheet.getColumns.return_value = cols
+        rows = MagicMock()
+        rows.Count = 5
+        sheet.getRows.return_value = rows
+        return sheet
+
+    def test_includes_target_cell_ref(self):
+        sheet = self._make_sheet_with_data()
+        area = self._make_area(start_col=0, start_row=2)
+        ctx = _build_schema_context(sheet, area)
+        self.assertIn("A3", ctx)  # col 0, row 2 → A3
+
+    def test_includes_column_headers(self):
+        sheet = self._make_sheet_with_data()
+        area = self._make_area()
+        ctx = _build_schema_context(sheet, area)
+        self.assertIn("Nom", ctx)
+        self.assertIn("Ventes", ctx)
+
+    def test_includes_sample_values(self):
+        sheet = self._make_sheet_with_data()
+        area = self._make_area()  # start_row=2 → row 2 data = "Bob"
+        ctx = _build_schema_context(sheet, area)
+        self.assertIn("Bob", ctx)
+
+    def test_returns_string_on_exception(self):
+        sheet = MagicMock()
+        sheet.getColumns.side_effect = Exception("no columns")
+        area = self._make_area()
+        ctx = _build_schema_context(sheet, area)
+        self.assertIsInstance(ctx, str)
+
+
+# ---------------------------------------------------------------------------
+# GenerateFormula multi-turn loop (handle_calc_action)
+# ---------------------------------------------------------------------------
+
+class TestGenerateFormulaMultiTurn(unittest.TestCase):
+
+    def _make_model(self, start_col=0, start_row=0):
+        area = MagicMock()
+        area.StartColumn = start_col
+        area.StartRow = start_row
+        area.EndColumn = start_col
+        area.EndRow = start_row
+
+        selection = MagicMock()
+        selection.getRangeAddress.return_value = area
+
+        sheet = MagicMock()
+        cols = MagicMock(); cols.Count = 1
+        rows_mock = MagicMock(); rows_mock.Count = 1
+        sheet.getColumns.return_value = cols
+        sheet.getRows.return_value = rows_mock
+
+        model = MagicMock(spec=["Sheets", "CurrentController"])
+        model.CurrentController.ActiveSheet = sheet
+        model.CurrentController.Selection = selection
+        return model, sheet
+
+    def test_multi_turn_sends_two_requests(self):
+        """Two user inputs → make_chat_request called twice."""
+        target = _make_cell()
+        job = _make_job(["=SUM(A1:A5)"])
+        def _fake_dialog(schema_context="", history_lines=None, on_generate=None, title="", schema_builder=None):
+            if on_generate:
+                on_generate("sum of column A")
+                on_generate("make it robust")
+        job._show_formula_assistant_dialog.side_effect = _fake_dialog
+        model, sheet = self._make_model()
+        sheet.getCellByPosition.return_value = target
+        handle_calc_action(job, "GenerateFormula", model)
+        self.assertEqual(job.make_chat_request.call_count, 2)
+
+    def test_error_feedback_auto_injected_on_formula_error(self):
+        """When the cell shows #NAME?, an extra message is appended before the next turn."""
+        target = _make_cell("#NAME?")
+        job = _make_job(["=BADFUNCTION()"])
+        captured = {}
+        def _fake_dialog(schema_context="", history_lines=None, on_generate=None, title="", schema_builder=None):
+            if on_generate:
+                new_lines = on_generate("bad formula")
+                captured["lines"] = new_lines
+        job._show_formula_assistant_dialog.side_effect = _fake_dialog
+        model, sheet = self._make_model()
+        sheet.getCellByPosition.return_value = target
+        handle_calc_action(job, "GenerateFormula", model)
+        # The error line should appear in the returned history lines
+        self.assertTrue(any("⚠" in l or "#NAME?" in l for l in captured.get("lines", [])))
+
+    def test_returns_true_even_when_dialog_immediately_closed(self):
+        job = _make_job()
+        job._show_formula_assistant_dialog.return_value = None
+        model, sheet = self._make_model()
+        sheet.getCellByPosition.return_value = _make_cell()
+        result = handle_calc_action(job, "GenerateFormula", model)
+        self.assertTrue(result)
 
 
 if __name__ == "__main__":
