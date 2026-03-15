@@ -101,7 +101,7 @@ Les fonctions **Modifier**, **Résumer** et **Simplifier** n'effacent jamais le 
 ### Limitations connues
 
 - Certains modèles modifient les sauts de ligne ou la ponctuation
-- Les modèles très verbeux (`holo2-30b-a3b`) peuvent épuiser le budget de tokens en préambule — voir `tests/results/scaleway_model_comparison.md`
+- Les modèles très verbeux (`holo2-30b-a3b`) peuvent épuiser le budget de tokens en préambule — voir `bench/scaleway_model_comparison.md`
 - Performances optimales en français et en anglais
 
 ---
@@ -219,10 +219,11 @@ scripts/
 tests/
 ├── unit/                      # Tests unitaires (pytest, sans LibreOffice)
 ├── fixtures/                  # Fichiers ODS de test
-├── sim_scaleway_models.py     # Benchmark headless des modèles Scaleway
-└── results/                   # Rapports de benchmark
-    ├── scaleway_model_comparison.md
-    └── gpt_oss_production_tokens.md
+└── sim_scaleway_models.py     # Benchmark headless des modèles Scaleway
+
+bench/                         # Rapports de benchmark
+├── scaleway_model_comparison.md
+└── gpt_oss_production_tokens.md
 ```
 
 ---
@@ -334,7 +335,7 @@ Wizard en 5 étapes qui reste ouvert pendant le login Keycloak. Affiche un écra
 | Version / Date | Changements principaux |
 | --- | --- |
 | 2026-03 | **GenerateFormula Calc** : contexte schéma, boucle retry erreur, nettoyage markdown |
-| 2026-03 | **Benchmark Scaleway** : 10/13 modèles ✅ sur textes Wikipedia ; rapport dans `tests/results/` |
+| 2026-03 | **Benchmark Scaleway** : 10/13 modèles ✅ sur textes Wikipedia ; rapport dans `bench/` |
 | 2026-03 | **writer.py** : suppression appel `stream_request` en double, suppression faux positifs « voici/voilà » dans simplify, ajout `_strip_think_blocks()` pour deepseek-r1 |
 | 2026-03 | **Wizard d'enrôlement** : UX 5 étapes, écran résultat, verrou threading |
 | 2026-03 | **Menu Documentation** : `doc_url` depuis bootstrap, repli `portal_url` |
