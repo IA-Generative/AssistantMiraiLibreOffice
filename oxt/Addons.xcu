@@ -9,6 +9,14 @@
           <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument</value>
         </prop>
         <node oor:name="Submenu">
+
+          <!--
+            Tri alphabétique : M0-M1 (commun) → MA* (Writer) → MB* (Calc)
+            Les items contextuels sont toujours EN FIN de séquence visible
+            dans leur contexte → évite le bug de rendu LibreOffice.
+          -->
+
+          <!-- ── Commun (M0-M1) ────────────────────────────────────────── -->
           <node oor:name="M0" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">🤖 MIrAI IA'ssistant</value>
@@ -19,15 +27,17 @@
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>
             </prop>
-          </node>  
+          </node>
           <node oor:name="M1" oor:op="replace">
             <prop oor:name="URL" oor:type="xs:string">
               <value>private:separator</value>
             </prop>
           </node>
-          <node oor:name="M2" oor:op="replace">
+
+          <!-- ── Bloc Writer (MA*) — masqué en Calc ───────────────────── -->
+          <node oor:name="MA1" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">✨ Générer la suite (de la sélection)</value>
+              <value xml:lang="en-US">✨ Générer la suite (⌘Q)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?ExtendSelection</value>
@@ -35,10 +45,13 @@
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>
             </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
           </node>
-           <node oor:name="M3" oor:op="replace">
+          <node oor:name="MA2" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">🖊️ Modifier la sélection</value>
+              <value xml:lang="en-US">🖊️ Modifier la sélection (⌘E)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?EditSelection</value>
@@ -46,10 +59,13 @@
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>
             </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
           </node>
-          <node oor:name="M4" oor:op="replace">
+          <node oor:name="MA3" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">📝 Résumer la sélection</value>
+              <value xml:lang="en-US">📝 Résumer la sélection (⌘R)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?SummarizeSelection</value>
@@ -57,10 +73,13 @@
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>
             </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
           </node>
-          <node oor:name="M5" oor:op="replace">
+          <node oor:name="MA4" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">💬 Reformuler la sélection</value>
+              <value xml:lang="en-US">💬 Reformuler la sélection (⌘L)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?SimplifySelection</value>
@@ -68,13 +87,19 @@
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>
             </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
           </node>
-          <node oor:name="M6" oor:op="replace">
+          <node oor:name="MA5" oor:op="replace">
             <prop oor:name="URL" oor:type="xs:string">
               <value>private:separator</value>
             </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
           </node>
-          <node oor:name="M7" oor:op="replace">
+          <node oor:name="MA6" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">🌐 Accéder au site mirai</value>
             </prop>
@@ -84,13 +109,19 @@
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>
             </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
           </node>
-          <node oor:name="M8" oor:op="replace">
+          <node oor:name="MA7" oor:op="replace">
             <prop oor:name="URL" oor:type="xs:string">
               <value>private:separator</value>
             </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
           </node>
-          <node oor:name="M9" oor:op="replace">
+          <node oor:name="MA8" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">⚙️ Paramètres</value>
             </prop>
@@ -100,23 +131,15 @@
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>
             </prop>
-          </node>
-          <node oor:name="M10" oor:op="replace">
-            <prop oor:name="URL" oor:type="xs:string">
-              <value>private:separator</value>
-            </prop>
-          </node>
-          <node oor:name="MC0" oor:op="replace">
-            <prop oor:name="URL" oor:type="xs:string">
-              <value>private:separator</value>
-            </prop>
             <prop oor:name="Context" oor:type="xs:string">
-              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
-          <node oor:name="MC1" oor:op="replace">
+
+          <!-- ── Bloc Calc (MB*) — masqué en Writer ───────────────────── -->
+          <node oor:name="MB1" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">🔄 Transformer → colonne résultat</value>
+              <value xml:lang="en-US">🔄 Transformer → colonne résultat (⌘T)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?TransformToColumn</value>
@@ -128,9 +151,9 @@
               <value>com.sun.star.sheet.SpreadsheetDocument</value>
             </prop>
           </node>
-          <node oor:name="MC2" oor:op="replace">
+          <node oor:name="MB2" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">🧮 Générer une formule</value>
+              <value xml:lang="en-US">🧮 Générer une formule (⌘G)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?GenerateFormula</value>
@@ -142,9 +165,9 @@
               <value>com.sun.star.sheet.SpreadsheetDocument</value>
             </prop>
           </node>
-          <node oor:name="MC3" oor:op="replace">
+          <node oor:name="MB3" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">📊 Analyser la plage</value>
+              <value xml:lang="en-US">📊 Analyser la plage (⌘K)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?AnalyzeRange</value>
@@ -156,6 +179,51 @@
               <value>com.sun.star.sheet.SpreadsheetDocument</value>
             </prop>
           </node>
+          <node oor:name="MB4" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MB5" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🌐 Accéder au site mirai</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?OpenmiraiWebsite</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MB6" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MB7" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">⚙️ Paramètres</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?settings</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+
         </node>
       </node>
     </node>

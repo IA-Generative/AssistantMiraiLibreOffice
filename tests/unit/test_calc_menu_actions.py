@@ -158,21 +158,21 @@ class TestGenerateFormula(unittest.TestCase):
 
     def test_writes_formula_to_target_cell(self):
         target = _make_cell()
-        job = _make_job(["=SUM(A1:A10)"])
-        _generate_formula(job, target, "somme de A1 à A10")
-        target.setFormula.assert_called_once_with("=SUM(A1:A10)")
+        job = _make_job(["=AVERAGE(A1:A10)"])
+        _generate_formula(job, target, "average of A1 to A10")
+        target.setFormula.assert_called_once_with("=AVERAGE(A1:A10)")
 
     def test_prepends_equals_if_missing(self):
         target = _make_cell()
-        job = _make_job(["SUM(A1:A10)"])  # LLM forgot the =
-        _generate_formula(job, target, "somme")
-        target.setFormula.assert_called_once_with("=SUM(A1:A10)")
+        job = _make_job(["AVERAGE(A1:A10)"])  # LLM forgot the =
+        _generate_formula(job, target, "average")
+        target.setFormula.assert_called_once_with("=AVERAGE(A1:A10)")
 
     def test_collects_all_chunks_before_writing(self):
         """Partial chunks must be joined; setFormula called exactly once."""
         target = _make_cell()
         job = _make_job(["=SUM", "(A1", ":A10)"])
-        _generate_formula(job, target, "somme")
+        _generate_formula(job, target, "sum")
         target.setFormula.assert_called_once_with("=SUM(A1:A10)")
 
     def test_fallback_to_setstring_on_setformula_error(self):
@@ -310,14 +310,14 @@ class TestHandleCalcAction(unittest.TestCase):
 
     def test_transform_to_column_empty_input_does_nothing(self):
         job = _make_job(["result"])
-        job.input_box.return_value = ""  # user cancelled
+        job._show_calc_input_dialog.return_value = ""  # user cancelled
         model, *_ = self._make_model()
         handle_calc_action(job, "TransformToColumn", model)
         job.make_api_request.assert_not_called()
 
     def test_transform_to_column_with_input_calls_llm(self):
         job = _make_job(["FR"])
-        job.input_box.return_value = "pays"
+        job._show_calc_input_dialog.return_value = "pays"
         model, sheet, _ = self._make_model(start_col=0, end_col=0, start_row=0, end_row=0)
         sheet.getCellByPosition.return_value = _make_cell("Paris")
         handle_calc_action(job, "TransformToColumn", model)
@@ -332,12 +332,12 @@ class TestHandleCalcAction(unittest.TestCase):
 
     def test_generate_formula_with_input_writes_formula(self):
         target = _make_cell()
-        job = _make_job(["=SUM(A1:A10)"])
-        job.input_box.return_value = "somme de A1 à A10"
+        job = _make_job(["=AVERAGE(A1:A10)"])
+        job.input_box.return_value = "average of A1 to A10"
         model, sheet, _ = self._make_model()
         sheet.getCellByPosition.return_value = target
         handle_calc_action(job, "GenerateFormula", model)
-        target.setFormula.assert_called_once_with("=SUM(A1:A10)")
+        target.setFormula.assert_called_once_with("=AVERAGE(A1:A10)")
 
     def test_analyze_range_triggers_llm(self):
         job = _make_job(["analyse"])
