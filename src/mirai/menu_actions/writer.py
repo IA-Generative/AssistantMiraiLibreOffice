@@ -143,7 +143,7 @@ RÉSUMÉ :
             "les informations clés. Tu réponds TOUJOURS dans la même langue "
             "que le texte fourni."
         )
-        max_tokens = max(100, len(original_text) // 4)
+        max_tokens = int(job.get_config("summarize_selection_max_tokens", 15000))
 
         api_type = str(job.get_config("api_type", "completions")).lower()
         request = job.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
