@@ -17,6 +17,7 @@ __pycache__/
 *.swp
 *.swo
 *~
+.~lock.*
 
 # Log files
 log.txt
@@ -28,3 +29,6 @@ log.txt
 
 # Temporary files
 *.tmp
+
+# Claude Code worktrees
+.claude/worktrees/

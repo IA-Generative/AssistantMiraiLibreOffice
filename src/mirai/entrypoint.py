@@ -35,6 +35,42 @@ from .security_flow import (
 
 USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/120.0"
 
+# ── UI colour palette (DSFR-inspired) ──────────────────────────────
+_UI = {
+    "bg":              0xFFFFFF,   # white background
+    "bg_section":      0xF6F6F6,   # light-grey section background
+    "bg_input":        0xFCFCFC,   # very light input background
+    "bg_header":      0x000091,   # Bleu France (DSFR primary)
+    "bg_accent":       0xF5F5FE,   # light blue accent
+    "text":            0x161616,   # almost-black text
+    "text_secondary":  0x666666,   # secondary grey text
+    "text_light":      0x929292,   # light hint text
+    "text_on_dark":    0xFFFFFF,   # white text on dark backgrounds
+    "border":          0xDDDDDD,   # subtle border grey
+    "primary":         0x000091,   # Bleu France
+    "primary_hover":   0x1212FF,   # lighter blue
+    "success":         0x18753C,   # DSFR success green
+    "warning":         0xB34000,   # DSFR warning orange
+    "error":           0xCE0500,   # DSFR error red
+    "info":            0x0063CB,   # DSFR info blue
+    "status_ok":       0x18753C,   # connected
+    "status_warn":     0xB34000,   # anonymous ok
+    "status_neutral":  0x929292,   # not tested
+    "status_fail":     0xCE0500,   # not accessible
+    "btn_primary_bg":  0x000091,   # primary button bg
+    "btn_primary_fg":  0xFFFFFF,   # primary button text
+    "btn_secondary_bg": 0xF6F6F6,  # secondary button bg
+    "btn_secondary_fg": 0x161616,  # secondary button text
+    "btn_danger_bg":   0xCE0500,   # danger button bg
+    "btn_danger_fg":   0xFFFFFF,   # danger button text
+    "separator":       0xE5E5E5,   # separator lines
+    "font_title":      14,         # title font size
+    "font_section":    11,         # section header font size
+    "font_label":      10,         # label font size
+    "font_body":       9,          # body text font size
+    "font_small":      8,          # small caption font size
+}
+
 # Configure logging once at module level (thread-safe, not per-call)
 _log_file_path = os.path.join(os.path.expanduser('~'), 'log.txt')
 logging.basicConfig(filename=_log_file_path, level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -877,6 +913,135 @@ class MainJob(unohelper.Base, XJobExecutor):
         if not isinstance(exp, (int, float)):
             return False
         return time.time() >= (exp - skew_seconds)
+
+    # ── Thinking widget (floating indicator while LLM works) ───────────
+    _thinking_widget = None
+    _thinking_container = None
+    _thinking_dots_count = 0
+
+    def _show_thinking(self):
+        """Show a small floating window with the plume icon
+        and an animated 'MIrAI réfléchit...' label.
+        Minimal chrome: no close button, not sizeable, empty title."""
+        try:
+            self._close_thinking()
+            from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+            ctx = uno.getComponentContext()
+            sm = ctx.getServiceManager()
+            def _cr(n):
+                return sm.createInstanceWithContext(n, ctx)
+
+            W, H = 180, 64
+            dlg = _cr("com.sun.star.awt.UnoControlDialog")
+            dlg_m = _cr("com.sun.star.awt.UnoControlDialogModel")
+            dlg.setModel(dlg_m)
+            dlg.setVisible(False)
+            dlg.setTitle("")
+            dlg.setPosSize(0, 0, W, H, SIZE)
+            try:
+                dlg_m.BackgroundColor = 0xFFFFFF
+                dlg_m.Closeable = False
+                dlg_m.Sizeable = False
+                dlg_m.Moveable = True
+            except Exception:
+                pass
+
+            def _add(name, ctrl_type, x, y, w, h, props):
+                m = dlg_m.createInstance(
+                    "com.sun.star.awt.UnoControl" + ctrl_type + "Model")
+                dlg_m.insertByName(name, m)
+                c = dlg.getControl(name)
+                c.setPosSize(x, y, w, h, POSSIZE)
+                for k, v in props.items():
+                    try:
+                        setattr(m, k, v)
+                    except Exception:
+                        pass
+                return c
+
+            # Icon
+            plume_path = os.path.join(
+                os.path.dirname(__file__), "icons", "plume.png")
+            plume_url = ""
+            if os.path.exists(plume_path):
+                plume_url = uno.systemPathToFileUrl(plume_path)
+            _add("img_plume", "ImageControl", 6, 6, 48, 48, {
+                "ImageURL": plume_url,
+                "BackgroundColor": 0xFFFFFF,
+                "Border": 0,
+                "ScaleImage": True,
+            })
+
+            # Label "MIrAI"
+            from com.sun.star.awt.FontWeight import BOLD
+            _add("lbl_thinking", "FixedText", 60, 10, W - 68, 20, {
+                "Label": "MIrAI",
+                "FontHeight": 11,
+                "FontWeight": BOLD,
+                "TextColor": _UI["primary"],
+                "BackgroundColor": 0xFFFFFF,
+            })
+
+            # Sub-label "réfléchit..."
+            from com.sun.star.awt.FontSlant import ITALIC
+            _add("lbl_dots", "FixedText", 60, 32, W - 68, 18, {
+                "Label": "réfléchit...",
+                "FontHeight": 9,
+                "FontSlant": ITALIC,
+                "TextColor": _UI["text_secondary"],
+                "BackgroundColor": 0xFFFFFF,
+            })
+
+            # Position: centered horizontally, 2/3 down the document window
+            frame = _cr("com.sun.star.frame.Desktop").getCurrentFrame()
+            window = frame.getContainerWindow() if frame else None
+            toolkit = _cr("com.sun.star.awt.Toolkit")
+            dlg.createPeer(toolkit, window)
+            if window:
+                ps = window.getPosSize()
+                _x = ps.X + (ps.Width - W) // 2
+                _y = ps.Y + int(ps.Height * 2 / 3) - H // 2
+                dlg.setPosSize(_x, _y, 0, 0, POS)
+            dlg.setVisible(True)
+            self._thinking_widget = dlg
+            self._thinking_container = dlg
+            self._thinking_dots_count = 0
+
+            try:
+                toolkit.processEventsToIdle()
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _update_thinking_dots(self):
+        """Animate the dots on the thinking widget (call from main loop)."""
+        if not self._thinking_container:
+            return
+        try:
+            self._thinking_dots_count = (self._thinking_dots_count + 1) % 4
+            dots = "." * (self._thinking_dots_count + 1)
+            lbl = self._thinking_container.getControl("lbl_dots")
+            if lbl:
+                lbl.getModel().Label = f"réfléchit{dots}"
+        except Exception:
+            pass
+
+    def _close_thinking(self):
+        """Close the thinking widget if open."""
+        try:
+            if self._thinking_container:
+                self._thinking_container.dispose()
+        except Exception:
+            pass
+        try:
+            if self._thinking_widget:
+                self._thinking_widget.setVisible(False)
+                self._thinking_widget.dispose()
+        except Exception:
+            pass
+        self._thinking_widget = None
+        self._thinking_container = None
 
     def _show_message(self, title, message):
         try:
@@ -2023,14 +2188,15 @@ class MainJob(unohelper.Base, XJobExecutor):
             pass
 
     def proxy_settings_box(self, title="Proxy", x=None, y=None):
-        WIDTH = 620
-        HORI_MARGIN = VERT_MARGIN = 10
-        LABEL_HEIGHT = 18
-        EDIT_HEIGHT = 24
-        BUTTON_WIDTH = 130
-        BUTTON_HEIGHT = 26
-        HORI_SEP = 8
-        VERT_SEP = 6
+        WIDTH = 640
+        HORI_MARGIN = 16
+        VERT_MARGIN = 12
+        LABEL_HEIGHT = 20
+        EDIT_HEIGHT = 28
+        BUTTON_WIDTH = 140
+        BUTTON_HEIGHT = 30
+        HORI_SEP = 10
+        VERT_SEP = 8
         import uno
         from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
         from com.sun.star.awt.PushButtonType import OK, CANCEL
@@ -2077,62 +2243,109 @@ class MainJob(unohelper.Base, XJobExecutor):
         dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
 
         current_y = VERT_MARGIN
-        add("label_proxy", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": "Paramètres proxy MIrAI", "NoLabel": True})
+        # Section header
+        add("label_proxy", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": "Paramètres proxy", "NoLabel": True,
+            "FontHeight": _UI["font_section"],
+            "TextColor": _UI["primary"],
+            "FontWeight": 150,
+        })
         current_y += LABEL_HEIGHT + VERT_SEP
 
-        add("label_enabled", "FixedText", HORI_MARGIN, current_y, 180, LABEL_HEIGHT,
-            {"Label": "Utiliser un proxy:", "NoLabel": True})
-        chk_enabled = add("chk_enabled", "CheckBox", HORI_MARGIN + 190, current_y, 50, LABEL_HEIGHT,
+        add("label_enabled", "FixedText", HORI_MARGIN, current_y, 200, LABEL_HEIGHT, {
+            "Label": "Utiliser un proxy :", "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text"],
+        })
+        chk_enabled = add("chk_enabled", "CheckBox", HORI_MARGIN + 210, current_y, 50, LABEL_HEIGHT,
             {"State": 1 if cfg["enabled"] else 0})
         current_y += LABEL_HEIGHT + VERT_SEP
 
-        add("label_url", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": "Proxy (host:port):", "NoLabel": True})
+        add("label_url", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": "Proxy (host:port) :", "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text"],
+        })
         current_y += LABEL_HEIGHT + VERT_SEP
-        edit_url = add("edit_url", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
-            {"Text": proxy_url_value})
+        edit_url = add("edit_url", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+            "Text": proxy_url_value, "BackgroundColor": _UI["bg_input"],
+        })
         current_y += EDIT_HEIGHT + VERT_SEP * 2
 
-        add("label_user", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": "Login proxy (optionnel):", "NoLabel": True})
+        add("label_user", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": "Login proxy (optionnel) :", "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text_secondary"],
+        })
         current_y += LABEL_HEIGHT + VERT_SEP
-        edit_user = add("edit_user", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
-            {"Text": cfg["username"]})
+        edit_user = add("edit_user", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+            "Text": cfg["username"], "BackgroundColor": _UI["bg_input"],
+        })
         current_y += EDIT_HEIGHT + VERT_SEP * 2
 
-        add("label_pass", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": "Mot de passe proxy (optionnel):", "NoLabel": True})
+        add("label_pass", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": "Mot de passe proxy (optionnel) :", "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text_secondary"],
+        })
         current_y += LABEL_HEIGHT + VERT_SEP
-        edit_pass = add("edit_pass", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
-            {"Text": cfg["password"], "EchoChar": ord("*")})
+        edit_pass = add("edit_pass", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+            "Text": cfg["password"], "EchoChar": ord("*"),
+            "BackgroundColor": _UI["bg_input"],
+        })
         current_y += EDIT_HEIGHT + VERT_SEP * 2
 
-        add("label_insecure", "FixedText", HORI_MARGIN, current_y, 240, LABEL_HEIGHT,
-            {"Label": "Autoriser HTTPS sans vérification (-k):", "NoLabel": True})
-        chk_insecure = add("chk_insecure", "CheckBox", HORI_MARGIN + 250, current_y, 50, LABEL_HEIGHT,
+        add("label_insecure", "FixedText", HORI_MARGIN, current_y, 260, LABEL_HEIGHT, {
+            "Label": "Autoriser HTTPS sans vérification (-k) :", "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text"],
+        })
+        chk_insecure = add("chk_insecure", "CheckBox", HORI_MARGIN + 270, current_y, 50, LABEL_HEIGHT,
             {"State": 1 if cfg["allow_insecure_ssl"] else 0})
         current_y += LABEL_HEIGHT + VERT_SEP * 2
 
-        lo_text = "LibreOffice: "
+        # Separator
+        add("line_lo_info", "FixedLine", HORI_MARGIN, current_y,
+            WIDTH - HORI_MARGIN * 2, 2, {})
+        current_y += VERT_SEP
+
+        lo_text = "Proxy LibreOffice : "
         if lo["enabled"] and lo["host"]:
             lo_text += f"{lo['host']}:{lo['port']}" if lo["port"] else lo["host"]
         else:
-            lo_text += "Proxy désactivé"
-        add("label_lo", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": lo_text, "NoLabel": True})
+            lo_text += "désactivé"
+        add("label_lo", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": lo_text, "NoLabel": True,
+            "FontHeight": _UI["font_small"],
+            "TextColor": _UI["text_light"],
+        })
         current_y += LABEL_HEIGHT + VERT_SEP * 2
 
-        btn_test = add("btn_test", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH + 20, BUTTON_HEIGHT,
-            {"Label": "Tester connexion", "Name": "test_proxy"})
-        btn_copy = add("btn_copy", "Button", HORI_MARGIN + BUTTON_WIDTH + 30, current_y, BUTTON_WIDTH + 30, BUTTON_HEIGHT,
-            {"Label": "Copier LibreOffice", "Name": "copy_lo"})
+        btn_test = add("btn_test", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH + 20, BUTTON_HEIGHT, {
+            "Label": "Tester connexion", "Name": "test_proxy",
+            "FontHeight": _UI["font_small"],
+        })
+        btn_copy = add("btn_copy", "Button", HORI_MARGIN + BUTTON_WIDTH + 30, current_y, BUTTON_WIDTH + 40, BUTTON_HEIGHT, {
+            "Label": "Copier depuis LibreOffice", "Name": "copy_lo",
+            "FontHeight": _UI["font_small"],
+        })
         current_y += BUTTON_HEIGHT + VERT_SEP * 2
 
-        add("btn_ok", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
-            {"PushButtonType": OK, "DefaultButton": True, "Label": "OK"})
-        add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
-            {"PushButtonType": CANCEL, "Label": "Annuler"})
+        # Separator
+        add("line_before_proxy_btns", "FixedLine", HORI_MARGIN, current_y,
+            WIDTH - HORI_MARGIN * 2, 2, {})
+        current_y += VERT_SEP
+
+        add("btn_ok", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH * 2 - HORI_SEP, current_y,
+            BUTTON_WIDTH, BUTTON_HEIGHT, {
+                "PushButtonType": OK, "DefaultButton": True, "Label": "Enregistrer",
+                "FontHeight": _UI["font_label"],
+            })
+        add("btn_cancel", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH, current_y,
+            BUTTON_WIDTH, BUTTON_HEIGHT, {
+                "PushButtonType": CANCEL, "Label": "Annuler",
+                "FontHeight": _UI["font_label"],
+            })
 
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
@@ -2775,8 +2988,8 @@ class MainJob(unohelper.Base, XJobExecutor):
         api_type = "chat" if api_type == "chat" else "completions"
         model = str(self.get_config("llm_default_models", ""))
         
-        # Add default system prompt to ensure plain text output
-        default_system_prompt = "Return only plain text. Do not use markdown, code blocks, or formatting symbols like **, *, _, or #. French characters and punctuation are allowed (accents, apostrophes, guillemets « », etc.). Return natural, simple text only."
+        # Add default system prompt to ensure plain text output and language preservation
+        default_system_prompt = "Renvoie uniquement du texte brut. N'utilise pas de markdown, de blocs de code ni de symboles de formatage comme **, *, _, ou #. RÈGLE ABSOLUE : tu DOIS répondre dans la MÊME LANGUE que le texte fourni par l'utilisateur. Si le texte est en français, réponds en français. Si le texte est en anglais, réponds en anglais. Ne change jamais la langue."
         if system_prompt:
             system_prompt = default_system_prompt + " " + system_prompt
         else:
@@ -2951,8 +3164,13 @@ class MainJob(unohelper.Base, XJobExecutor):
 
     def stream_request(self, request, api_type, append_callback):
         """
-        Stream a completion/chat response and append incremental chunks via the provided callback.
+        Stream a completion/chat response and append incremental chunks via
+        the provided callback.  The HTTP I/O runs in a background thread so
+        the LibreOffice UI stays responsive (processEventsToIdle pumped on
+        the main thread).
         """
+        import queue as _queue
+
         toolkit = self.ctx.getServiceManager().createInstanceWithContext(
             "com.sun.star.awt.Toolkit", self.ctx
         )
@@ -2963,53 +3181,102 @@ class MainJob(unohelper.Base, XJobExecutor):
             request_timeout = 45
         if request_timeout < 5:
             request_timeout = 5
-        
-        log_to_file(f"=== Starting stream request ===")
+
+        log_to_file("=== Starting stream request ===")
         log_to_file(f"Request URL: {request.full_url}")
-        log_to_file(f"Request method: {request.get_method()}")
         log_to_file(f"Request timeout: {request_timeout}s")
-        
-        try:
-            with self._urlopen(request, context=ssl_context, timeout=request_timeout) as response:
-                log_to_file(f"Response status: {response.status}")
-                log_to_file(f"Response headers: {response.headers}")
-                
-                for line in response:
-                    try:
-                        if line.strip() and line.startswith(b"data: "):
-                            payload = line[len(b"data: "):].decode("utf-8").strip()
-                            if payload == "[DONE]":
-                                break
-                            chunk = json.loads(payload)
-                            content, finish_reason = self.extract_content_from_response(chunk, api_type)
-                            if content:
-                                append_callback(content)
-                                toolkit.processEventsToIdle()
-                            if finish_reason:
-                                break
-                    except Exception as e:
-                        log_to_file(f"Error processing line: {str(e)}")
-                        append_callback(str(e))
-                        toolkit.processEventsToIdle()
-        except urllib.error.HTTPError as e:
+
+        _DONE = object()          # sentinel
+        _ERROR_401 = object()     # sentinel for auth error
+        chunk_queue = _queue.Queue()
+
+        def _network_thread():
+            """Runs in background – reads HTTP stream, pushes chunks."""
             try:
-                body = e.read().decode("utf-8")
-            except Exception:
-                body = ""
-            if e.code == 401 or ("\"401\"" in body or "status\":401" in body or "code\":401" in body):
+                with self._urlopen(request, context=ssl_context,
+                                   timeout=request_timeout) as response:
+                    log_to_file(f"Response status: {response.status}")
+                    for line in response:
+                        try:
+                            if line.strip() and line.startswith(b"data: "):
+                                payload = line[len(b"data: "):].decode("utf-8").strip()
+                                if payload == "[DONE]":
+                                    break
+                                chunk = json.loads(payload)
+                                content, finish_reason = \
+                                    self.extract_content_from_response(chunk, api_type)
+                                if content:
+                                    chunk_queue.put(content)
+                                if finish_reason:
+                                    break
+                        except Exception as e:
+                            log_to_file(f"Error processing line: {str(e)}")
+                            chunk_queue.put(str(e))
+            except urllib.error.HTTPError as e:
                 try:
-                    self._show_message_and_open_settings(
-                        "Token invalide",
-                        "Votre token n'est plus valide.\n\n"
-                        "Voulez-vous ouvrir les préférences pour le vérifier ?"
-                    )
+                    body = e.read().decode("utf-8")
+                except Exception:
+                    body = ""
+                if e.code == 401 or ("\"401\"" in body or "status\":401" in body
+                                     or "code\":401" in body):
+                    chunk_queue.put(_ERROR_401)
+                log_to_file(
+                    f"ERROR in stream_request: HTTP {e.code} {e.reason} "
+                    f"body={body[:2000]}")
+            except Exception as e:
+                log_to_file(f"ERROR in stream_request: {str(e)}")
+            finally:
+                chunk_queue.put(_DONE)
+
+        t = threading.Thread(target=_network_thread, daemon=True)
+        t.start()
+
+        # Show the thinking widget (plume icon + animated dots)
+        self._show_thinking()
+        _dots_tick = 0
+        _got_first_chunk = False
+
+        # Main-thread loop: drain queue, call callback, keep UI alive
+        try:
+            while True:
+                try:
+                    item = chunk_queue.get(timeout=0.05)
+                except _queue.Empty:
+                    # No data yet — animate dots and pump UI events
+                    _dots_tick += 1
+                    if _dots_tick % 6 == 0:  # ~every 300ms
+                        self._update_thinking_dots()
+                    try:
+                        toolkit.processEventsToIdle()
+                    except Exception:
+                        pass
+                    continue
+
+                if item is _DONE:
+                    break
+                if item is _ERROR_401:
+                    try:
+                        self._show_message_and_open_settings(
+                            "Token invalide",
+                            "Votre token n'est plus valide.\n\n"
+                            "Voulez-vous ouvrir les préférences pour le vérifier ?"
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+                # Close thinking widget on first real chunk
+                if not _got_first_chunk:
+                    _got_first_chunk = True
+                    self._close_thinking()
+
+                append_callback(item)
+                try:
+                    toolkit.processEventsToIdle()
                 except Exception:
                     pass
-            log_to_file(f"ERROR in stream_request: HTTP {e.code} {e.reason} body={body[:2000]}")
-            toolkit.processEventsToIdle()
-        except Exception as e:
-            log_to_file(f"ERROR in stream_request: {str(e)}")
-            toolkit.processEventsToIdle()
+        finally:
+            self._close_thinking()
 
     #retrieved from https://wiki.documentfoundation.org/Macros/General/IO_to_Screen
     #License: Creative Commons Attribution-ShareAlike 3.0 Unported License,
@@ -3113,10 +3380,336 @@ class MainJob(unohelper.Base, XJobExecutor):
         dialog.dispose()
         return ret
 
+    def _chunk_doc_paragraphs(self, doc):
+        """Enumerate paragraphs and group into smart chunks for LLM processing.
+
+        Break points (priority): page break > style change > empty paragraph >
+        end-of-sentence punctuation > any paragraph boundary when over limit.
+        """
+        chunk_max = int(self.get_config("edit_chunk_max_chars", 3000))
+        paragraphs = []
+        enum = doc.Text.createEnumeration()
+        while enum.hasMoreElements():
+            para = enum.nextElement()
+            if not para.supportsService("com.sun.star.text.Paragraph"):
+                continue
+            p_text = para.getString()
+            p_style = ""
+            p_break = False
+            try:
+                p_style = para.getPropertyValue("ParaStyleName")
+            except Exception:
+                pass
+            try:
+                bt = para.getPropertyValue("BreakType")
+                # PAGE_BEFORE=4, PAGE_AFTER=5, PAGE_BOTH=6
+                if hasattr(bt, 'value'):
+                    p_break = bt.value in ("PAGE_BEFORE", "PAGE_AFTER", "PAGE_BOTH")
+                else:
+                    p_break = bt in (4, 5, 6)
+            except Exception:
+                pass
+            paragraphs.append({
+                "text": p_text, "style": p_style,
+                "page_break": p_break, "obj": para,
+            })
+
+        if not paragraphs:
+            return []
+
+        chunks = []
+        current_chunk = []
+        current_len = 0
+        prev_style = paragraphs[0]["style"]
+
+        for p in paragraphs:
+            p_len = len(p["text"]) + 1  # +1 for separator
+
+            should_break = False
+            if current_len > 0:
+                if p["page_break"]:
+                    should_break = True
+                elif current_len + p_len > chunk_max:
+                    should_break = True
+                elif current_len > chunk_max * 0.6:
+                    if p["style"] != prev_style:
+                        should_break = True
+                    elif p["text"].strip() == "":
+                        should_break = True
+                    elif current_chunk and current_chunk[-1]["text"].rstrip().endswith(
+                            (".", "!", "?", "\u2026", ";")):
+                        should_break = True
+
+            if should_break and current_chunk:
+                chunks.append(current_chunk)
+                current_chunk = []
+                current_len = 0
+
+            current_chunk.append(p)
+            current_len += p_len
+            prev_style = p["style"]
+
+        if current_chunk:
+            chunks.append(current_chunk)
+
+        return chunks
+
+    @staticmethod
+    def _parse_find_replace(text):
+        """Parse <<<FIND>>>...<<<REPLACE>>>...<<<END>>> blocks from LLM output.
+
+        Handles multiline FIND blocks by splitting them into per-line pairs
+        (UNO's findFirst cannot match across paragraph boundaries).
+        Also strips [Pn] markers the LLM may echo back from the prompt.
+        """
+        import re
+        raw_blocks = re.findall(
+            r'<<<FIND>>>\s*\n?(.*?)<<<REPLACE>>>\s*\n?(.*?)<<<END>>>',
+            text, re.DOTALL,
+        )
+        # Strip [Pn] markers that may be echoed by the LLM
+        _strip_pn = re.compile(r'^\[P\d+\]\s*', re.MULTILINE)
+        result = []
+        for f_raw, r_raw in raw_blocks:
+            f_clean = _strip_pn.sub('', f_raw).strip()
+            r_clean = _strip_pn.sub('', r_raw).strip()
+            if not f_clean:
+                continue
+            # If FIND spans multiple lines, split into per-line pairs
+            f_lines = f_clean.split('\n')
+            r_lines = r_clean.split('\n')
+            if len(f_lines) > 1:
+                # Pair each FIND line with corresponding REPLACE line
+                for i, fl in enumerate(f_lines):
+                    fl = fl.strip()
+                    if not fl:
+                        continue
+                    rl = r_lines[i].strip() if i < len(r_lines) else fl
+                    result.append((fl, rl))
+            else:
+                result.append((f_clean, r_clean))
+        return result
+
+    def _run_whole_doc_edit(self, doc, user_input):
+        """Edit the whole document chunk-by-chunk with surgical FIND/REPLACE."""
+        chunks = self._chunk_doc_paragraphs(doc)
+        if not chunks:
+            self._show_message("Modification", "Document vide.")
+            return
+
+        log_to_file(f"WholeDocEdit: {len(chunks)} chunk(s)")
+
+        system_prompt = (
+            "Tu es un éditeur de texte professionnel. "
+            "Tu appliques les instructions sans poser de question. "
+            "Tu réponds UNIQUEMENT avec des blocs <<<FIND>>>...<<<REPLACE>>>...<<<END>>>. "
+            "Si aucune modification n'est nécessaire, réponds uniquement : <<<NOCHANGE>>>"
+        )
+        api_type = str(self.get_config("api_type", "completions")).lower()
+
+        # ── Wait dialog ──────────────────────────────────────────────────
+        wait_dialog = {"dialog": None, "bg": None, "label": None, "toolkit": None}
+        cancelled = {"value": False}
+
+        def _show_progress(chunk_idx, total):
+            try:
+                from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+                WIDTH, HEIGHT = 420, 160
+                ctx = uno.getComponentContext()
+                def _cr(n):
+                    return ctx.getServiceManager().createInstanceWithContext(n, ctx)
+                if not wait_dialog["dialog"]:
+                    dlg = _cr("com.sun.star.awt.UnoControlDialog")
+                    dlg_m = _cr("com.sun.star.awt.UnoControlDialogModel")
+                    dlg.setModel(dlg_m)
+                    dlg.setVisible(False)
+                    dlg.setTitle("MIrAI – Édition du document")
+                    dlg.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+                    try:
+                        dlg_m.BackgroundColor = _UI["bg_accent"]
+                    except Exception:
+                        pass
+                    def _add(name, typ, x, y, w, h, props):
+                        m = dlg_m.createInstance("com.sun.star.awt.UnoControl" + typ + "Model")
+                        dlg_m.insertByName(name, m)
+                        c = dlg.getControl(name)
+                        c.setPosSize(x, y, w, h, POSSIZE)
+                        for k, v in props.items():
+                            try:
+                                setattr(m, k, v)
+                            except Exception:
+                                pass
+                        return c
+                    lbl = _add("lbl_progress", "FixedText", 8, 8, WIDTH - 16, 20, {
+                        "Label": f"Bloc {chunk_idx + 1} / {total}...",
+                        "FontHeight": _UI["font_label"],
+                        "TextColor": _UI["primary"],
+                    })
+                    bg = _add("edit_stream", "Edit", 8, 34, WIDTH - 16, 80, {
+                        "Text": "", "MultiLine": True, "ReadOnly": True,
+                        "BackgroundColor": _UI["bg_accent"],
+                        "TextColor": _UI["primary"],
+                        "FontHeight": 7, "Border": 0,
+                    })
+                    btn = _add("btn_cancel", "Button", WIDTH // 2 - 50, 122, 100, 26, {
+                        "Label": "Annuler",
+                    })
+                    class _CL(unohelper.Base, XActionListener):
+                        def actionPerformed(self, ev):
+                            cancelled["value"] = True
+                        def disposing(self, ev):
+                            pass
+                    btn.addActionListener(_CL())
+                    frame = _cr("com.sun.star.frame.Desktop").getCurrentFrame()
+                    window = frame.getContainerWindow() if frame else None
+                    toolkit = _cr("com.sun.star.awt.Toolkit")
+                    dlg.createPeer(toolkit, window)
+                    if window:
+                        ps = window.getPosSize()
+                        dlg.setPosSize(ps.Width // 2 - WIDTH // 2 + int(ps.Width * 0.15),
+                                       ps.Height // 2 - HEIGHT // 2, 0, 0, POS)
+                    dlg.setVisible(True)
+                    wait_dialog["dialog"] = dlg
+                    wait_dialog["bg"] = bg
+                    wait_dialog["label"] = lbl
+                    wait_dialog["toolkit"] = toolkit
+                else:
+                    wait_dialog["label"].getModel().Label = f"Bloc {chunk_idx + 1} / {total}..."
+                    wait_dialog["bg"].getModel().Text = ""
+                if wait_dialog["toolkit"]:
+                    wait_dialog["toolkit"].processEventsToIdle()
+            except Exception:
+                pass
+
+        stream_buf = {"text": ""}
+
+        def _update_stream(chunk_text):
+            if cancelled["value"]:
+                return
+            stream_buf["text"] += chunk_text
+            if len(stream_buf["text"]) > 1200:
+                stream_buf["text"] = stream_buf["text"][-1200:]
+            try:
+                if wait_dialog["bg"]:
+                    wait_dialog["bg"].getModel().Text = stream_buf["text"]
+                    # Auto-scroll to bottom
+                    try:
+                        end_pos = len(stream_buf["text"])
+                        sel = uno.createUnoStruct("com.sun.star.awt.Selection", end_pos, end_pos)
+                        wait_dialog["bg"].setSelection(sel)
+                    except Exception:
+                        pass
+                if wait_dialog["toolkit"]:
+                    wait_dialog["toolkit"].processEventsToIdle()
+            except Exception:
+                pass
+
+        def _close_progress():
+            try:
+                if wait_dialog["dialog"]:
+                    wait_dialog["dialog"].setVisible(False)
+                    wait_dialog["dialog"].dispose()
+            except Exception:
+                pass
+
+        # ── Process each chunk ───────────────────────────────────────────
+        total_replacements = 0
+        total_chunks = len(chunks)
+
+        try:
+            for chunk_idx, chunk in enumerate(chunks):
+                if cancelled["value"]:
+                    break
+                # Build numbered paragraph list (skip empty paragraphs)
+                numbered_lines = []
+                for pi, p in enumerate(chunk):
+                    if p["text"].strip():
+                        numbered_lines.append(f"[P{pi + 1}] {p['text']}")
+                if not numbered_lines:
+                    continue
+                chunk_text = "\n".join(numbered_lines)
+
+                _show_progress(chunk_idx, total_chunks)
+                stream_buf["text"] = ""
+
+                prompt = (
+                    f"TEXTE À MODIFIER (bloc {chunk_idx + 1}/{total_chunks}) :\n"
+                    f"{chunk_text}\n\n"
+                    f"INSTRUCTIONS : {user_input}\n\n"
+                    "RÈGLES STRICTES :\n"
+                    "- Chaque [Pn] est un paragraphe SÉPARÉ\n"
+                    "- Produis UN bloc <<<FIND>>>...<<<REPLACE>>>...<<<END>>> PAR PARAGRAPHE modifié\n"
+                    "- Dans <<<FIND>>>, mets le texte EXACT et COMPLET du paragraphe (sans le [Pn])\n"
+                    "- Dans <<<REPLACE>>>, mets le texte de remplacement\n"
+                    "- Ne fusionne JAMAIS plusieurs paragraphes dans un seul bloc FIND\n"
+                    "- Ne pose AUCUNE question, n'ajoute AUCUN commentaire\n"
+                    "- Si aucune modification nécessaire : <<<NOCHANGE>>>\n"
+                )
+
+                accumulated = ""
+                def _append(t):
+                    nonlocal accumulated
+                    accumulated += t
+                    _update_stream(t)
+
+                max_tokens = len(chunk_text) + int(
+                    self.get_config("edit_selection_max_new_tokens", 15000))
+                request = self.make_api_request(
+                    prompt, system_prompt, max_tokens, api_type=api_type)
+                self.stream_request(request, api_type, _append)
+
+                if cancelled["value"]:
+                    break
+
+                if "<<<NOCHANGE>>>" in accumulated:
+                    log_to_file(f"WholeDocEdit: chunk {chunk_idx + 1} – no changes")
+                    continue
+
+                replacements = self._parse_find_replace(accumulated)
+                log_to_file(
+                    f"WholeDocEdit: chunk {chunk_idx + 1} → "
+                    f"{len(replacements)} replacement(s)")
+
+                for find_text, replace_text in replacements:
+                    try:
+                        search = doc.createSearchDescriptor()
+                        search.SearchRegularExpression = False
+                        search.SearchString = find_text
+                        found = doc.findFirst(search)
+                        if found:
+                            found.setString(replace_text)
+                            total_replacements += 1
+                        else:
+                            log_to_file(
+                                f"WholeDocEdit: not found: "
+                                f"{find_text[:60]}...")
+                    except Exception as e:
+                        log_to_file(f"WholeDocEdit: replace error: {e}")
+        finally:
+            _close_progress()
+
+        log_to_file(f"WholeDocEdit: done – {total_replacements} replacement(s)")
+        if cancelled["value"]:
+            return
+        if total_replacements == 0:
+            self._show_message(
+                "Modification",
+                "Aucune modification applicable trouvée dans le document.")
+
     def _run_edit_selection(self, text, text_range, user_input):
         original_text = text_range.getString()
         if len(original_text.strip()) == 0:
-            original_text = ""
+            # No selection → whole-document chunked edit (preserves styles)
+            try:
+                desktop = self.ctx.ServiceManager.createInstanceWithContext(
+                    "com.sun.star.frame.Desktop", self.ctx)
+                doc = desktop.getCurrentComponent()
+                if doc and hasattr(doc, "Text"):
+                    log_to_file("EditSelection: no selection → whole-doc edit mode")
+                    self._run_whole_doc_edit(doc, user_input)
+                    return
+            except Exception as e:
+                log_to_file(f"EditSelection: whole-doc edit failed, fallback: {e}")
 
         wait_dialog = {"dialog": None, "bg": None, "toolkit": None}
         wait_buffer = {"text": "Contacte MIrAI..."}
@@ -3141,7 +3734,7 @@ class MainJob(unohelper.Base, XJobExecutor):
                 dialog.setTitle("MIrAI")
                 dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
                 try:
-                    dialog_model.BackgroundColor = 0xE6F7E6
+                    dialog_model.BackgroundColor = _UI["bg_accent"]
                 except Exception:
                     pass
                 def add(name, type, x_, y_, width_, height_, props):
@@ -3160,16 +3753,19 @@ class MainJob(unohelper.Base, XJobExecutor):
                         return None
                 add("label_wait", "FixedText", HORI_MARGIN, VERT_MARGIN,
                     WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-                    {"Label": "MIrAI réfléchi...", "NoLabel": True})
+                    {"Label": "MIrAI réfléchit...", "NoLabel": True,
+                     "FontHeight": _UI["font_label"],
+                     "TextColor": _UI["primary"],
+                    })
                 bg_y = VERT_MARGIN + LABEL_HEIGHT + VERT_SEP
                 bg = add("edit_wait_bg", "Edit", HORI_MARGIN, bg_y,
                     WIDTH - HORI_MARGIN * 2, BG_HEIGHT,
                     {"Text": wait_buffer["text"], "MultiLine": True, "ReadOnly": True})
                 if bg:
                     try:
-                        bg.getModel().BackgroundColor = 0xE6F7E6
-                        bg.getModel().TextColor = 0x2F5D2F
-                        bg.getModel().FontHeight = 6
+                        bg.getModel().BackgroundColor = _UI["bg_accent"]
+                        bg.getModel().TextColor = _UI["primary"]
+                        bg.getModel().FontHeight = 7
                         bg.getModel().Border = 0
                     except Exception:
                         pass
@@ -3228,6 +3824,13 @@ class MainJob(unohelper.Base, XJobExecutor):
                 if len(wait_buffer["text"]) > 1200:
                     wait_buffer["text"] = wait_buffer["text"][-1200:]
                 wait_dialog["bg"].getModel().Text = wait_buffer["text"]
+                # Auto-scroll to bottom
+                try:
+                    end_pos = len(wait_buffer["text"])
+                    sel = uno.createUnoStruct("com.sun.star.awt.Selection", end_pos, end_pos)
+                    wait_dialog["bg"].setSelection(sel)
+                except Exception:
+                    pass
                 if wait_dialog.get("toolkit"):
                     wait_dialog["toolkit"].processEventsToIdle()
                 time.sleep(0.01)
@@ -3448,15 +4051,17 @@ EDITED VERSION:
 
         current_selection = {"range": text_range}
 
-        WIDTH = 720
-        HORI_MARGIN = VERT_MARGIN = 8
-        BUTTON_WIDTH = 130
-        BUTTON_HEIGHT = 26
-        HORI_SEP = VERT_SEP = 8
+        WIDTH = 740
+        HORI_MARGIN = 14
+        VERT_MARGIN = 12
+        BUTTON_WIDTH = 140
+        BUTTON_HEIGHT = 30
+        HORI_SEP = 10
+        VERT_SEP = 8
         LABEL_HEIGHT = 22
         EDIT_HEIGHT = 120
-        SUGGEST_LABEL_HEIGHT = 16
-        SUGGEST_LIST_HEIGHT = 70
+        SUGGEST_LABEL_HEIGHT = 18
+        SUGGEST_LIST_HEIGHT = 120
         SUGGEST_BTN_WIDTH = int((WIDTH - HORI_MARGIN * 2 - HORI_SEP) / 2)
         HEIGHT = (
             VERT_MARGIN * 2
@@ -3477,10 +4082,10 @@ EDITED VERSION:
         dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
         dialog.setModel(dialog_model)
         dialog.setVisible(False)
-        dialog.setTitle("Modifier la sélection")
+        dialog.setTitle("MIrAI — Modifier la sélection")
         dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
         try:
-            dialog_model.BackgroundColor = 0xFFFFFF
+            dialog_model.BackgroundColor = _UI["bg"]
         except Exception:
             pass
         try:
@@ -3583,8 +4188,12 @@ EDITED VERSION:
 
         PROMPT_BTN_WIDTH = 150
         label_max_width = WIDTH - HORI_MARGIN * 2 - PROMPT_BTN_WIDTH - HORI_SEP
-        add("label_edit", "FixedText", HORI_MARGIN, VERT_MARGIN, label_max_width, LABEL_HEIGHT,
-            {"Label": "Saisissez votre prompt d'édition :", "NoLabel": True})
+        add("label_edit", "FixedText", HORI_MARGIN, VERT_MARGIN, label_max_width, LABEL_HEIGHT, {
+            "Label": "Editer avec l'IA", "NoLabel": True,
+            "FontHeight": _UI["font_section"],
+            "TextColor": _UI["primary"],
+            "FontWeight": 150,
+        })
         OFFSET_BELOW = 20
         selection_width = label_max_width
         label_selection_control = add(
@@ -3594,37 +4203,104 @@ EDITED VERSION:
             VERT_MARGIN + LABEL_HEIGHT - 6 + OFFSET_BELOW,
             selection_width,
             SUGGEST_LABEL_HEIGHT,
-            {"Label": _selection_info(), "NoLabel": True, "FontHeight": 8, "TextColor": 0x777777}
+            {"Label": _selection_info(), "NoLabel": True,
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_light"]}
         )
         if label_selection_control:
             try:
                 if _has_multiple_styles():
-                    label_selection_control.getModel().TextColor = 0xFF8800
+                    label_selection_control.getModel().TextColor = _UI["warning"]
                 else:
-                    label_selection_control.getModel().TextColor = 0x777777
+                    label_selection_control.getModel().TextColor = _UI["text_light"]
             except Exception:
                 pass
         edit_control = add("edit_prompt", "Edit", HORI_MARGIN, VERT_MARGIN + LABEL_HEIGHT + VERT_SEP + OFFSET_BELOW,
-            WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": "", "MultiLine": True})
+            WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+                "Text": "", "MultiLine": True,
+                "BackgroundColor": _UI["bg_input"],
+                "FontHeight": _UI["font_label"],
+            })
         if edit_control:
             try:
-                edit_control.getModel().BackgroundColor = 0xF2F2F2
+                edit_control.getModel().BackgroundColor = _UI["bg_section"]
             except Exception:
                 pass
 
         send_y = VERT_MARGIN + LABEL_HEIGHT + VERT_SEP + OFFSET_BELOW + EDIT_HEIGHT + VERT_SEP
+
+        # Mascot icon paths (shared by buttons)
+        _mascot_path = os.path.join(os.path.dirname(__file__), "icons", "mascot16.png")
+        _mascot_hover_path = os.path.join(os.path.dirname(__file__), "icons", "mascot16_hover.png")
+        _mascot_url = ""
+        _mascot_hover_url = ""
+        try:
+            if os.path.exists(_mascot_path):
+                _mascot_url = uno.systemPathToFileUrl(_mascot_path)
+            if os.path.exists(_mascot_hover_path):
+                _mascot_hover_url = uno.systemPathToFileUrl(_mascot_hover_path)
+        except Exception:
+            pass
+
+        def _add_rollover(control, normal_bg, hover_bg, icon_url="", icon_hover_url=""):
+            """Attach a mouse listener for rollover effect on a button."""
+            if not control:
+                return
+            class _RolloverListener(unohelper.Base, XMouseListener):
+                def mousePressed(self, event):
+                    return
+                def mouseReleased(self, event):
+                    return
+                def mouseEntered(self, event):
+                    try:
+                        m = control.getModel()
+                        m.BackgroundColor = hover_bg
+                        m.FontWeight = 200
+                        if icon_hover_url:
+                            m.ImageURL = icon_hover_url
+                    except Exception:
+                        pass
+                def mouseExited(self, event):
+                    try:
+                        m = control.getModel()
+                        m.BackgroundColor = normal_bg
+                        m.FontWeight = 150
+                        if icon_url:
+                            m.ImageURL = icon_url
+                    except Exception:
+                        pass
+                def disposing(self, event):
+                    return
+            try:
+                control.addMouseListener(_RolloverListener())
+            except Exception:
+                pass
+
+        # Send button with mascot icon
+        send_btn_props = {
+            "Label": "  Envoyer",
+            "FontHeight": _UI["font_label"],
+            "FontWeight": 150,
+            "TextColor": _UI["btn_primary_fg"],
+            "BackgroundColor": _UI["btn_primary_bg"],
+        }
+        if _mascot_url:
+            send_btn_props["ImageURL"] = _mascot_url
+            send_btn_props["ImagePosition"] = 0
+            send_btn_props["ImageAlign"] = 0
         btn_send = add(
             "btn_send",
             "Button",
             WIDTH - HORI_MARGIN - BUTTON_WIDTH,
             send_y,
             BUTTON_WIDTH,
-            BUTTON_HEIGHT,
-            {"Label": "Envoyer 🤖✨"}
+            BUTTON_HEIGHT + 4,
+            send_btn_props,
         )
+        _add_rollover(btn_send, _UI["btn_primary_bg"], _UI["primary_hover"],
+                       _mascot_url, _mascot_hover_url)
 
-        suggest_y = send_y + BUTTON_HEIGHT + VERT_SEP
-        original_suggest_y = suggest_y - OFFSET_BELOW
+        suggest_y = send_y + BUTTON_HEIGHT + VERT_SEP + 4
         add(
             "line_suggestions",
             "FixedLine",
@@ -3638,33 +4314,82 @@ EDITED VERSION:
             "label_suggestions",
             "FixedText",
             HORI_MARGIN,
-            suggest_y + 5,
+            suggest_y + 12,
             WIDTH - HORI_MARGIN * 2,
             SUGGEST_LABEL_HEIGHT,
-            {"Label": "Suggestion de prompts", "NoLabel": True, "FontHeight": 8}
+            {"Label": "Suggestions...", "NoLabel": True,
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_secondary"],
+             "FontSlant": 2,
+            }
         )
         suggest_y += SUGGEST_LABEL_HEIGHT + VERT_SEP + 5
 
-        suggest_list_height = max(10, SUGGEST_LIST_HEIGHT - OFFSET_BELOW)
+        # Visible list (not dropdown) — shows all suggestions at once
+        REGEN_BTN_WIDTH = 180
         suggestions_list = add(
             "list_suggestions",
             "ListBox",
             HORI_MARGIN,
-            suggest_y + 5,
-            WIDTH - HORI_MARGIN * 2,
-            suggest_list_height,
-            {"Dropdown": True}
+            suggest_y,
+            WIDTH - HORI_MARGIN * 2 - REGEN_BTN_WIDTH - HORI_SEP,
+            SUGGEST_LIST_HEIGHT,
+            {"Dropdown": False,
+             "BackgroundColor": _UI["bg_section"],
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_light"],
+             "Border": 1,
+             "BorderColor": _UI["border"],
+            }
         )
-        suggest_btn_y = original_suggest_y + SUGGEST_LABEL_HEIGHT + VERT_SEP + SUGGEST_LIST_HEIGHT + VERT_SEP - 5
+
+        # Regen button aligned to the right of the list, with mascot
+        regen_props = {
+            "Label": "  Nouvelles suggestions",
+            "FontHeight": _UI["font_small"],
+            "FontWeight": 150,
+            "TextColor": _UI["text_secondary"],
+            "BackgroundColor": _UI["bg_section"],
+        }
+        if _mascot_url:
+            regen_props["ImageURL"] = _mascot_url
+            regen_props["ImagePosition"] = 0
+            regen_props["ImageAlign"] = 0
         btn_regen_suggestions = add(
             "btn_regen_suggestions",
             "Button",
-            HORI_MARGIN,
-            suggest_btn_y,
-            WIDTH - HORI_MARGIN * 2,
+            WIDTH - HORI_MARGIN - REGEN_BTN_WIDTH,
+            suggest_y,
+            REGEN_BTN_WIDTH,
             BUTTON_HEIGHT,
-            {"Label": "🔁 Nouveaux"}
+            regen_props,
         )
+        _add_rollover(btn_regen_suggestions, _UI["bg_section"], _UI["bg_accent"],
+                       _mascot_url, _mascot_hover_url)
+
+        # Rollover on the list: highlight selected item color
+        if suggestions_list:
+            class SuggestionsMouseListener(unohelper.Base, XMouseListener):
+                def mousePressed(self, event):
+                    return
+                def mouseReleased(self, event):
+                    return
+                def mouseEntered(self, event):
+                    try:
+                        suggestions_list.getModel().BackgroundColor = _UI["bg_accent"]
+                    except Exception:
+                        pass
+                def mouseExited(self, event):
+                    try:
+                        suggestions_list.getModel().BackgroundColor = _UI["bg_section"]
+                    except Exception:
+                        pass
+                def disposing(self, event):
+                    return
+            try:
+                suggestions_list.addMouseListener(SuggestionsMouseListener())
+            except Exception:
+                pass
 
         link_control = add(
             "link_prompt_file",
@@ -3673,7 +4398,11 @@ EDITED VERSION:
             VERT_MARGIN + 4,
             PROMPT_BTN_WIDTH,
             LABEL_HEIGHT,
-            {"Label": "📄 Ouvrir prompt", "FontHeight": 8, "Tabstop": True}
+            {"Label": "Ouvrir prompt.txt",
+             "FontHeight": _UI["font_small"],
+             "Tabstop": True,
+             "TextColor": _UI["text_secondary"],
+            }
         )
         if link_control is None:
             log_to_file("Open prompt button not created")
@@ -3697,27 +4426,106 @@ EDITED VERSION:
             value = " ".join((text_value or "").split())
             return value[:limit].rstrip()
 
-        def _generate_prompt_suggestions(text_value):
-            prompts = [
-                "Corrige l’orthographe et la grammaire.",
-                "Reformule en style formel et concis.",
-                "Simplifie pour un public non spécialiste.",
-                "Rends le texte plus clair avec des phrases courtes.",
-                "Transforme en style administratif.",
-                "Rends la formulation plus positive et professionnelle.",
-                "Réorganise pour améliorer la logique et la structure.",
-                "Supprime les répétitions et les tournures lourdes.",
-                "Rends le texte plus convaincant sans changer le sens.",
-                "Résume le contenu en gardant l’essentiel.",
-            ]
-            return prompts
+        _FALLBACK_PROMPTS = [
+            "Corrige l’orthographe et la grammaire.",
+            "Reformule en style formel et concis.",
+            "Simplifie pour un public non spécialiste.",
+            "Rends le texte plus clair avec des phrases courtes.",
+            "Transforme en style administratif.",
+            "Rends la formulation plus positive et professionnelle.",
+            "Réorganise pour améliorer la logique et la structure.",
+            "Supprime les répétitions et les tournures lourdes.",
+            "Rends le texte plus convaincant sans changer le sens.",
+            "Résume le contenu en gardant l’essentiel.",
+        ]
 
-        def _load_suggestions():
+        def _generate_prompt_suggestions(text_value):
+            """Generate contextual suggestions via the LLM, fallback to static list."""
+            snippet = _extract_snippet(text_value, limit=1500)
+            if not snippet or len(snippet.strip()) < 10:
+                return list(_FALLBACK_PROMPTS)
             try:
-                _refresh_selection_range()
-                suggestions = _generate_prompt_suggestions(current_selection["range"].getString())
-            except Exception:
-                suggestions = []
+                system = (
+                    "Tu es un assistant qui propose des instructions d’édition de texte. "
+                    "Réponds UNIQUEMENT avec une liste numérotée de 8 instructions courtes "
+                    "(une par ligne, format: ‘1. instruction’). "
+                    "Chaque instruction doit être une consigne d’édition concrète et directe "
+                    "(commence par un verbe à l’impératif). "
+                    "Adapte les suggestions au contenu, au style et au domaine du texte. "
+                    "Ne répète pas le texte. Pas de commentaire. Pas d’explication."
+                )
+                prompt = (
+                    f"Voici un extrait de texte sélectionné par l’utilisateur :\n\n"
+                    f"«{snippet}»\n\n"
+                    f"Propose 8 instructions d’édition pertinentes et contextualisées pour ce texte."
+                )
+                api_type = str(self.get_config("api_type", "completions")).lower()
+                request = self.make_api_request(prompt, system, max_tokens=600, api_type=api_type)
+                accumulated = []
+                def _collect(chunk):
+                    accumulated.append(chunk)
+                self.stream_request(request, api_type, _collect)
+                raw = "".join(accumulated).strip()
+                if not raw:
+                    return list(_FALLBACK_PROMPTS)
+                # Parse numbered lines: "1. ...", "2. ...", etc.
+                lines = []
+                for line in raw.split("\n"):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # Remove leading number + dot/parenthesis
+                    cleaned = re.sub(r"^\d+[\.\)\-]\s*", "", line).strip()
+                    if cleaned and len(cleaned) > 5:
+                        lines.append(cleaned)
+                if len(lines) >= 3:
+                    log_to_file(f"AI suggestions generated: {len(lines)} items")
+                    return lines[:10]
+                log_to_file(f"AI suggestions too few ({len(lines)}), using fallback")
+                return list(_FALLBACK_PROMPTS)
+            except Exception as e:
+                log_to_file(f"AI suggestion generation failed: {str(e)}")
+                return list(_FALLBACK_PROMPTS)
+
+        def _load_suggestions(use_ai=False):
+            """Load suggestions into the list. use_ai=True triggers LLM generation."""
+            if suggestions_list:
+                try:
+                    suggestions_list.removeItems(0, suggestions_list.getItemCount())
+                except Exception:
+                    pass
+            if use_ai:
+                # Show loading state
+                if suggestions_list:
+                    try:
+                        suggestions_list.addItems(("Génération en cours...",), 0)
+                    except Exception:
+                        pass
+                text_value = ""
+                try:
+                    _refresh_selection_range()
+                    text_value = current_selection["range"].getString()
+                except Exception:
+                    pass
+                # If no selection, grab document body (capped for LLM context)
+                if not text_value or len(text_value.strip()) < 10:
+                    try:
+                        desktop = self.ctx.ServiceManager.createInstanceWithContext(
+                            "com.sun.star.frame.Desktop", self.ctx)
+                        doc = desktop.getCurrentComponent()
+                        if doc and hasattr(doc, "Text"):
+                            full_text = doc.Text.getString()
+                            # Cap at ~2000 chars to stay within LLM context
+                            if len(full_text) > 2000:
+                                text_value = full_text[:1000] + "\n[...]\n" + full_text[-800:]
+                            else:
+                                text_value = full_text
+                            log_to_file(f"Suggestions: no selection, using document body ({len(full_text)} chars)")
+                    except Exception as e:
+                        log_to_file(f"Suggestions: failed to read document body: {str(e)}")
+                suggestions = _generate_prompt_suggestions(text_value)
+            else:
+                suggestions = list(_FALLBACK_PROMPTS)
             if suggestions_list:
                 try:
                     suggestions_list.removeItems(0, suggestions_list.getItemCount())
@@ -3726,20 +4534,26 @@ EDITED VERSION:
                 if suggestions:
                     try:
                         suggestions_list.addItems(tuple(suggestions), 0)
-                        suggestions_list.selectItemPos(0, True)
                     except Exception:
                         pass
 
-        _load_suggestions()
+        # Show static suggestions immediately, then generate AI suggestions in background
+        _load_suggestions(use_ai=False)
+        def _bg_load_ai_suggestions():
+            try:
+                _load_suggestions(use_ai=True)
+            except Exception:
+                pass
+        threading.Thread(target=_bg_load_ai_suggestions, daemon=True).start()
 
         def _refresh_selection_label():
             if label_selection_control:
                 try:
                     label_selection_control.getModel().Label = _selection_info()
                     if _has_multiple_styles():
-                        label_selection_control.getModel().TextColor = 0xFF8800
+                        label_selection_control.getModel().TextColor = _UI["warning"]
                     else:
-                        label_selection_control.getModel().TextColor = 0x777777
+                        label_selection_control.getModel().TextColor = _UI["text_light"]
                 except Exception:
                     pass
 
@@ -3773,7 +4587,7 @@ EDITED VERSION:
                         log_to_file(f"EditSelection dialog failed: {str(e)}")
                 elif source == btn_regen_suggestions:
                     _refresh_selection_label()
-                    _load_suggestions()
+                    _load_suggestions(use_ai=True)
 
             def __init__(self, outer):
                 self.outer = outer
@@ -3928,13 +4742,15 @@ EDITED VERSION:
 
     def credentials_box(self, title="Device Management", login_label="Login", password_label="Mot de passe"):
         """Dialog with login + password and a show/hide toggle."""
-        WIDTH = 520
-        HORI_MARGIN = VERT_MARGIN = 8
-        BUTTON_WIDTH = 100
-        BUTTON_HEIGHT = 26
-        HORI_SEP = VERT_SEP = 8
-        LABEL_HEIGHT = 18
-        EDIT_HEIGHT = 24
+        WIDTH = 540
+        HORI_MARGIN = 16
+        VERT_MARGIN = 14
+        BUTTON_WIDTH = 110
+        BUTTON_HEIGHT = 30
+        HORI_SEP = 10
+        VERT_SEP = 8
+        LABEL_HEIGHT = 20
+        EDIT_HEIGHT = 28
         TOGGLE_WIDTH = 90
         HEIGHT = VERT_MARGIN * 2 + (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP) * 2 + BUTTON_HEIGHT + VERT_SEP * 2
         import uno
@@ -3947,7 +4763,7 @@ EDITED VERSION:
         dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
         dialog.setModel(dialog_model)
         try:
-            dialog_model.BackgroundColor = 0xFFFFFF
+            dialog_model.BackgroundColor = _UI["bg"]
         except Exception:
             pass
         dialog.setVisible(False)
@@ -3978,25 +4794,59 @@ EDITED VERSION:
             return control
 
         current_y = VERT_MARGIN
-        add("label_login", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": str(login_label), "NoLabel": True})
+        # Section header
+        add("section_auth", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": "Authentification", "NoLabel": True,
+            "FontHeight": _UI["font_section"],
+            "TextColor": _UI["primary"],
+            "FontWeight": 150,
+        })
         current_y += LABEL_HEIGHT + VERT_SEP
-        add("edit_login", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": ""})
+
+        add("label_login", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": str(login_label), "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text"],
+        })
+        current_y += LABEL_HEIGHT + VERT_SEP
+        add("edit_login", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+            "Text": "", "BackgroundColor": _UI["bg_input"],
+        })
         current_y += EDIT_HEIGHT + VERT_SEP
 
-        add("label_password", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": str(password_label), "NoLabel": True})
+        add("label_password", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": str(password_label), "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text"],
+        })
         current_y += LABEL_HEIGHT + VERT_SEP
         password_width = WIDTH - HORI_MARGIN * 2 - TOGGLE_WIDTH - HORI_SEP
-        add("edit_password", "Edit", HORI_MARGIN, current_y, password_width, EDIT_HEIGHT, {"Text": "", "EchoChar": ord("*")})
+        add("edit_password", "Edit", HORI_MARGIN, current_y, password_width, EDIT_HEIGHT, {
+            "Text": "", "EchoChar": ord("*"),
+            "BackgroundColor": _UI["bg_input"],
+        })
         add("btn_toggle", "Button", HORI_MARGIN + password_width + HORI_SEP, current_y,
-            TOGGLE_WIDTH, EDIT_HEIGHT, {"Label": "Afficher"})
+            TOGGLE_WIDTH, EDIT_HEIGHT, {
+                "Label": "Afficher",
+                "FontHeight": _UI["font_small"],
+            })
 
         current_y += EDIT_HEIGHT + VERT_SEP * 2
-        add("btn_ok", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
-            {"PushButtonType": OK, "DefaultButton": True})
-        add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, current_y,
-            BUTTON_WIDTH, BUTTON_HEIGHT, {"PushButtonType": CANCEL, "Label": "Annuler"})
+        # Separator
+        add("line_before_btns", "FixedLine", HORI_MARGIN, current_y,
+            WIDTH - HORI_MARGIN * 2, 2, {})
+        current_y += VERT_SEP
+
+        add("btn_ok", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH * 2 - HORI_SEP, current_y,
+            BUTTON_WIDTH, BUTTON_HEIGHT, {
+                "PushButtonType": OK, "DefaultButton": True,
+                "FontHeight": _UI["font_label"],
+            })
+        add("btn_cancel", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH, current_y,
+            BUTTON_WIDTH, BUTTON_HEIGHT, {
+                "PushButtonType": CANCEL, "Label": "Annuler",
+                "FontHeight": _UI["font_label"],
+            })
 
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
@@ -4040,18 +4890,20 @@ EDITED VERSION:
 
     def settings_box(self,title="", x=None, y=None):
         """ Settings dialog with configurable backend options """
-        WIDTH = 720
-        HORI_MARGIN = VERT_MARGIN = 10
-        BUTTON_WIDTH = 140
-        BUTTON_HEIGHT = 32
-        HORI_SEP = 8
-        VERT_SEP = 6
+        WIDTH = 740
+        HORI_MARGIN = 16
+        VERT_MARGIN = 12
+        BUTTON_WIDTH = 150
+        BUTTON_HEIGHT = 34
+        HORI_SEP = 10
+        VERT_SEP = 8
         LABEL_HEIGHT = 22
-        EDIT_HEIGHT = 24
+        EDIT_HEIGHT = 28
         IMAGE_HEIGHT = 132
         EXTRA_BOTTOM = 60
         DESC_HEIGHT = EDIT_HEIGHT * 2
         TEST_ROW_HEIGHT = BUTTON_HEIGHT + VERT_SEP
+        SECTION_PAD = 10  # inner padding for visual sections
         import uno
         from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
         from com.sun.star.awt.PushButtonType import OK, CANCEL
@@ -4062,8 +4914,12 @@ EDITED VERSION:
         dialog = create("com.sun.star.awt.UnoControlDialog")
         dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
         dialog.setModel(dialog_model)
+        try:
+            dialog_model.BackgroundColor = _UI["bg"]
+        except Exception:
+            pass
         dialog.setVisible(False)
-        dialog.setTitle(title)
+        dialog.setTitle(title or "MIrAI — Paramètres")
 
         def _mask_value(value):
             try:
@@ -4119,13 +4975,17 @@ EDITED VERSION:
         _log_launch_config()
 
         def show_wait_dialog():
-            wait_width = 260
-            wait_height = 80
+            wait_width = 300
+            wait_height = 90
             wait_dialog = create("com.sun.star.awt.UnoControlDialog")
             wait_model = create("com.sun.star.awt.UnoControlDialogModel")
             wait_dialog.setModel(wait_model)
+            try:
+                wait_model.BackgroundColor = _UI["bg"]
+            except Exception:
+                pass
             wait_dialog.setVisible(False)
-            wait_dialog.setTitle("")
+            wait_dialog.setTitle("MIrAI")
             wait_dialog.setPosSize(0, 0, wait_width, wait_height, SIZE)
 
             try:
@@ -4133,8 +4993,13 @@ EDITED VERSION:
                 wait_model.insertByName("wait_label", label_model)
                 label_model.Label = "Contacte MIrAI..."
                 label_model.NoLabel = True
+                try:
+                    label_model.FontHeight = _UI["font_label"]
+                    label_model.TextColor = _UI["text"]
+                except Exception:
+                    pass
                 wait_label = wait_dialog.getControl("wait_label")
-                wait_label.setPosSize(10, 20, wait_width - 20, 20, POSSIZE)
+                wait_label.setPosSize(20, 28, wait_width - 40, 24, POSSIZE)
             except Exception:
                 wait_label = None
 
@@ -4228,25 +5093,63 @@ EDITED VERSION:
                 available_width = WIDTH - HORI_MARGIN * 2
                 image_width = int(min(available_width, IMAGE_HEIGHT * (1505.0 / 400.0)))
                 image_x = HORI_MARGIN + int((available_width - image_width) / 2)
-                add("img_splash", "ImageControl", image_x, current_y,
+                img_splash = add("img_splash", "ImageControl", image_x, current_y,
                     image_width, IMAGE_HEIGHT, {
                         "ImageURL": image_url,
                         "Border": 0,
                         "ScaleImage": True
                     })
-                proxy_btn_width = 70
-                proxy_btn_height = LABEL_HEIGHT
-                proxy_btn_x = WIDTH - HORI_MARGIN - 69
-                proxy_btn_y = VERT_MARGIN + IMAGE_HEIGHT + VERT_SEP
-                add("btn_proxy", "Button", proxy_btn_x, proxy_btn_y,
+
+                # Make image clickable → opens mirai website
+                if img_splash:
+                    class SplashClickListener(unohelper.Base, XMouseListener):
+                        def __init__(self, outer):
+                            self.outer = outer
+                        def mousePressed(self, event):
+                            try:
+                                import webbrowser
+                                webbrowser.open("https://mirai.interieur.gouv.fr")
+                            except Exception as e:
+                                log_to_file(f"Splash click open URL failed: {str(e)}")
+                        def mouseReleased(self, event):
+                            return
+                        def mouseEntered(self, event):
+                            return
+                        def mouseExited(self, event):
+                            return
+                        def disposing(self, event):
+                            return
+                    try:
+                        img_splash.addMouseListener(SplashClickListener(self))
+                    except Exception:
+                        pass
+
+                current_y += IMAGE_HEIGHT + VERT_SEP
+                # Separator after image
+                add("line_after_image", "FixedLine", HORI_MARGIN, current_y,
+                    WIDTH - HORI_MARGIN * 2, 2, {})
+                current_y += VERT_SEP
+                # Section header: Connexion
+                add("section_connexion", "FixedText", HORI_MARGIN, current_y,
+                    WIDTH - HORI_MARGIN * 2 - 90, LABEL_HEIGHT, {
+                        "Label": "Connexion", "NoLabel": True,
+                        "FontHeight": _UI["font_section"],
+                        "TextColor": _UI["primary"],
+                        "FontWeight": 150,
+                    })
+                proxy_btn_width = 80
+                proxy_btn_height = LABEL_HEIGHT + 4
+                proxy_btn_x = WIDTH - HORI_MARGIN - proxy_btn_width
+                add("btn_proxy", "Button", proxy_btn_x, current_y - 2,
                     proxy_btn_width, proxy_btn_height, {
                         "Label": "Proxy",
                         "Name": "proxy_settings",
                         "Tabstop": True,
                         "Enabled": True,
-                        "FontHeight": 8
+                        "FontHeight": _UI["font_small"],
+                        "TextColor": _UI["text_secondary"],
                     })
-                current_y += IMAGE_HEIGHT + VERT_SEP * 2
+                current_y += LABEL_HEIGHT + VERT_SEP
             except Exception:
                 pass
         api_key_plain_control = None
@@ -4255,17 +5158,24 @@ EDITED VERSION:
             edit_name = f"edit_{field['name']}"
             label_width = WIDTH - HORI_MARGIN * 2
             if field.get("name") == "api_key":
-                label_width -= (80 + HORI_SEP)
-            add(label_name, "FixedText", HORI_MARGIN, current_y, label_width, LABEL_HEIGHT,
-                {"Label": field["label"], "NoLabel": True})
+                label_width -= (90 + HORI_SEP)
+            add(label_name, "FixedText", HORI_MARGIN, current_y, label_width, LABEL_HEIGHT, {
+                "Label": field["label"], "NoLabel": True,
+                "FontHeight": _UI["font_label"],
+                "TextColor": _UI["text"],
+            })
             if field.get("name") == "api_key":
-                add("toggle_api_key", "Button", HORI_MARGIN + label_width + HORI_SEP, current_y, 80, BUTTON_HEIGHT,
-                    {"Label": "Révéler", "NoLabel": True})
+                add("toggle_api_key", "Button", HORI_MARGIN + label_width + HORI_SEP, current_y, 90, BUTTON_HEIGHT, {
+                    "Label": "Révéler", "NoLabel": True,
+                    "FontHeight": _UI["font_small"],
+                })
             current_y += (BUTTON_HEIGHT if field.get("name") == "api_key" else LABEL_HEIGHT) + VERT_SEP
             if field.get("type") == "list":
                 items = field.get("items") or []
-                control = add(edit_name, "ListBox", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
-                    {"StringItemList": tuple(items), "Dropdown": True})
+                control = add(edit_name, "ListBox", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
+                    "StringItemList": tuple(items), "Dropdown": True,
+                    "BackgroundColor": _UI["bg_input"],
+                })
                 if control:
                     try:
                         if field["value"]:
@@ -4274,7 +5184,7 @@ EDITED VERSION:
                         pass
                     field_controls[field["name"]] = control
             else:
-                props = {"Text": field["value"]}
+                props = {"Text": field["value"], "BackgroundColor": _UI["bg_input"]}
                 if field.get("type") == "password":
                     props["EchoChar"] = ord("*")
                 control = add(edit_name, "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT,
@@ -4283,7 +5193,7 @@ EDITED VERSION:
                     field_controls[field["name"]] = control
                 if field.get("name") == "api_key":
                     api_key_plain_control = add("edit_api_key_plain", "Edit", HORI_MARGIN, current_y,
-                        WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": field["value"]})
+                        WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {"Text": field["value"], "BackgroundColor": _UI["bg_input"]})
                     if api_key_plain_control:
                         try:
                             api_key_plain_control.setVisible(False)
@@ -4291,18 +5201,33 @@ EDITED VERSION:
                             pass
             current_y += EDIT_HEIGHT + VERT_SEP * 2
             if field.get("name") == "api_key":
-                add("btn_test_token", "Button", HORI_MARGIN, current_y - VERT_SEP, 140, BUTTON_HEIGHT,
-                    {"Label": "♻️ Rafraîchir", "Name": "test_token", "NoLabel": True})
+                add("btn_test_token", "Button", HORI_MARGIN, current_y - VERT_SEP, 150, BUTTON_HEIGHT, {
+                    "Label": "♻️ Rafraîchir le token", "Name": "test_token", "NoLabel": True,
+                    "FontHeight": _UI["font_small"],
+                })
                 current_y += TEST_ROW_HEIGHT
 
-        description_label = "Description du modèle:"
-        add("label_model_desc", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
-            {"Label": description_label, "NoLabel": True})
+        description_label = "Description du modèle :"
+        add("label_model_desc", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": description_label, "NoLabel": True,
+            "FontHeight": _UI["font_label"],
+            "TextColor": _UI["text_secondary"],
+        })
         current_y += LABEL_HEIGHT + VERT_SEP
 
-        add("edit_model_desc", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, DESC_HEIGHT,
-            {"Text": "", "ReadOnly": True, "MultiLine": True})
-        current_y += DESC_HEIGHT + VERT_SEP * 2
+        add("edit_model_desc", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, DESC_HEIGHT, {
+            "Text": "", "ReadOnly": True, "MultiLine": True,
+            "BackgroundColor": _UI["bg_section"],
+            "TextColor": _UI["text_secondary"],
+            "FontHeight": _UI["font_body"],
+            "Border": 0,
+        })
+        current_y += DESC_HEIGHT + VERT_SEP
+
+        # Separator before status
+        add("line_before_status", "FixedLine", HORI_MARGIN, current_y,
+            WIDTH - HORI_MARGIN * 2, 2, {})
+        current_y += VERT_SEP
 
         access_token = str(self._get_config_from_file("access_token", "")).strip()
         email = self._token_email(access_token, allow_network=False) if access_token else None
@@ -4310,35 +5235,72 @@ EDITED VERSION:
 
         def _status_style(anon_ok, auth_ok, email_value):
             if auth_ok:
-                return ("Connecté", 0x2ECC71)
+                return ("Connecté", _UI["status_ok"])
             if anon_ok and not auth_ok:
-                return ("Anonyme OK", 0xF39C12)
+                return ("Anonyme OK", _UI["status_warn"])
             if not anon_ok and not auth_ok and email_value is None:
-                return ("Non testé", 0x888888)
-            return ("Non accessible", 0x111111)
+                return ("Non testé", _UI["status_neutral"])
+            return ("Non accessible", _UI["status_fail"])
 
         status_label, status_color = _status_style(anon_ok, auth_ok, email)
         status_text = f"{status_label}" + (f" ({email})" if email else "")
 
-        add("label_status_dot", "FixedText", HORI_MARGIN, current_y,
-            12, LABEL_HEIGHT, {"Label": "●", "NoLabel": True, "TextColor": status_color})
-        add("label_status_text", "FixedText", HORI_MARGIN + 16, current_y,
-            WIDTH - HORI_MARGIN * 2 - 16, LABEL_HEIGHT, {"Label": status_text, "NoLabel": True})
+        # Status section header
+        add("section_status", "FixedText", HORI_MARGIN, current_y,
+            WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+                "Label": "État de la connexion", "NoLabel": True,
+                "FontHeight": _UI["font_section"],
+                "TextColor": _UI["primary"],
+                "FontWeight": 150,
+            })
+        current_y += LABEL_HEIGHT + VERT_SEP
+
+        add("label_status_dot", "FixedText", HORI_MARGIN + 4, current_y,
+            16, LABEL_HEIGHT, {"Label": "●", "NoLabel": True, "TextColor": status_color,
+                               "FontHeight": 12})
+        add("label_status_text", "FixedText", HORI_MARGIN + 24, current_y,
+            WIDTH - HORI_MARGIN * 2 - 24, LABEL_HEIGHT, {
+                "Label": status_text, "NoLabel": True,
+                "FontHeight": _UI["font_label"],
+                "TextColor": _UI["text"],
+            })
         current_y += LABEL_HEIGHT + VERT_SEP * 2
 
-        add("btn_ok", "Button", HORI_MARGIN, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
-            {"PushButtonType": OK, "DefaultButton": True, "Label": "OK"})
-        add("btn_cancel", "Button", HORI_MARGIN + BUTTON_WIDTH + HORI_SEP, current_y, BUTTON_WIDTH, BUTTON_HEIGHT,
-            {"PushButtonType": CANCEL, "Label": "Annuler"})
-        keycloak_width = 96
-        keycloak_x = HORI_MARGIN + (BUTTON_WIDTH + HORI_SEP) * 2
-        reload_x = keycloak_x + keycloak_width + HORI_SEP
-        reload_width = WIDTH - HORI_MARGIN - reload_x
-        add("btn_keycloak", "Button", keycloak_x, current_y,
-            keycloak_width, BUTTON_HEIGHT, {"Label": "🔐 Login", "Name": "keycloak_login", "Tabstop": True, "Enabled": True, "NoLabel": True})
-        add("btn_reload_config", "Button", reload_x,
-            current_y, reload_width, BUTTON_HEIGHT, {"Label": "🔄 Recharger configuration", "Name": "reload_config", "Tabstop": True, "Enabled": True, "NoLabel": True})
-        dialog.setPosSize(0, 0, WIDTH, current_y + BUTTON_HEIGHT + 20, SIZE)
+        # Separator before action buttons
+        add("line_before_actions", "FixedLine", HORI_MARGIN, current_y,
+            WIDTH - HORI_MARGIN * 2, 2, {})
+        current_y += VERT_SEP + 4
+
+        # Action buttons row
+        keycloak_width = 120
+        reload_width = 210
+        add("btn_keycloak", "Button", HORI_MARGIN, current_y,
+            keycloak_width, BUTTON_HEIGHT, {
+                "Label": "🔐 Login SSO", "Name": "keycloak_login",
+                "Tabstop": True, "Enabled": True, "NoLabel": True,
+                "FontHeight": _UI["font_small"],
+            })
+        add("btn_reload_config", "Button", HORI_MARGIN + keycloak_width + HORI_SEP,
+            current_y, reload_width, BUTTON_HEIGHT, {
+                "Label": "🔄 Recharger la configuration", "Name": "reload_config",
+                "Tabstop": True, "Enabled": True, "NoLabel": True,
+                "FontHeight": _UI["font_small"],
+            })
+        current_y += BUTTON_HEIGHT + VERT_SEP * 2
+
+        # OK / Cancel row - right-aligned
+        ok_cancel_width = BUTTON_WIDTH
+        add("btn_ok", "Button", WIDTH - HORI_MARGIN - ok_cancel_width * 2 - HORI_SEP, current_y,
+            ok_cancel_width, BUTTON_HEIGHT, {
+                "PushButtonType": OK, "DefaultButton": True, "Label": "Enregistrer",
+                "FontHeight": _UI["font_label"],
+            })
+        add("btn_cancel", "Button", WIDTH - HORI_MARGIN - ok_cancel_width, current_y,
+            ok_cancel_width, BUTTON_HEIGHT, {
+                "PushButtonType": CANCEL, "Label": "Annuler",
+                "FontHeight": _UI["font_label"],
+            })
+        dialog.setPosSize(0, 0, WIDTH, current_y + BUTTON_HEIGHT + 16, SIZE)
 
         frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
         window = frame.getContainerWindow() if frame else None
@@ -4608,10 +5570,14 @@ EDITED VERSION:
                     dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
                     dialog.setModel(dialog_model)
                     dialog.setVisible(False)
-                    dialog.setTitle("")
-                    dialog.setPosSize(0, 0, 320, 110, SIZE)
+                    dialog.setTitle("MIrAI")
+                    dialog.setPosSize(0, 0, 340, 110, SIZE)
                     try:
                         dialog_model.AlwaysOnTop = True
+                    except Exception:
+                        pass
+                    try:
+                        dialog_model.BackgroundColor = _UI["bg"]
                     except Exception:
                         pass
 
@@ -4619,14 +5585,23 @@ EDITED VERSION:
                     dialog_model.insertByName("reload_label", label_model)
                     label_model.Label = "Connexion à Mirai..."
                     label_model.NoLabel = True
+                    try:
+                        label_model.FontHeight = _UI["font_label"]
+                        label_model.TextColor = _UI["text"]
+                    except Exception:
+                        pass
                     label = dialog.getControl("reload_label")
-                    label.setPosSize(10, 20, 300, 20, POSSIZE)
+                    label.setPosSize(20, 24, 300, 24, POSSIZE)
 
                     btn_model = dialog_model.createInstance("com.sun.star.awt.UnoControlButtonModel")
                     dialog_model.insertByName("reload_cancel", btn_model)
                     btn_model.Label = "Annuler"
+                    try:
+                        btn_model.FontHeight = _UI["font_small"]
+                    except Exception:
+                        pass
                     btn = dialog.getControl("reload_cancel")
-                    btn.setPosSize(110, 60, 100, 26, POSSIZE)
+                    btn.setPosSize(120, 62, 100, 28, POSSIZE)
 
                     frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
                     window = frame.getContainerWindow() if frame else None
