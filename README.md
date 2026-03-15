@@ -2,7 +2,7 @@
 
 Extension LibreOffice intégrant un assistant IA directement dans Writer et Calc. Elle se connecte à un backend compatible OpenAI (OpenWebUI, Ollama, Scaleway, etc.) et inclut un mécanisme d'enrôlement via Device Management pour préconfigurer les URLs, tokens et modèles.
 
-**Origine :** cette application est une version bêta développée dans le cadre du programme MIrAI du ministère de l'Intérieur. Elle s'appuie sur le travail de **John Balis**, auteur de l'extension [mirai](https://github.com/balisujohn/mirai), et sur des portions de code LibreOffice (MPL 2.0 — [gerrit.libreoffice.org](https://gerrit.libreoffice.org/c/core/+/159938)). Voir `registration/license.txt` pour les attributions complètes.
+**Origine :** cette application est une version bêta développée dans le cadre du programme MIrAI du ministère de l'Intérieur. Elle s'appuie sur le travail de **John Balis**, auteur de l'extension [localwriter](https://github.com/balisujohn/localwriter), et sur des portions de code LibreOffice (MPL 2.0 — [gerrit.libreoffice.org](https://gerrit.libreoffice.org/c/core/+/159938)). Voir `registration/license.txt` pour les attributions complètes.
 
 ---
 
@@ -354,6 +354,6 @@ Wizard en 5 étapes qui reste ouvert pendant le login Keycloak. Affiche un écra
 - Adaptations ministère de l'Intérieur : voir `registration/license.txt`
 
 Dépôts de référence :
-- [balisujohn/mirai](https://github.com/balisujohn/mirai) — projet original
+- [balisujohn/localwriter](https://github.com/balisujohn/localwriter) — projet original
 - [IA-Generative/AssistantmiraiLibreOffice](https://github.com/IA-Generative/AssistantmiraiLibreOffice) — ce dépôt
 - [gerrit.libreoffice.org/c/core/+/159938](https://gerrit.libreoffice.org/c/core/+/159938) — portions MPL 2.0
