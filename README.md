@@ -62,6 +62,7 @@ The repository is organized to separate extension resources, Python code, and lo
 - `config/config.default.example.json`: committable example defaults
 - `config/profiles/`: predefined profile configs (`docker`, `kubernetes`, `dgx`, `local-llm`)
 - `config/config.default.json`: local real defaults (ignored by git)
+- `scripts/00-clean-install.sh`: **reset to clean-install state** (purge config, logs, extension temp cache)
 - `scripts/02-build-oxt.sh`: build script producing `dist/mirai.oxt`
 - `scripts/04-repack-oxt.sh`: utility to inject `config.default.json` in an existing `.oxt`
 - `scripts/01-init-default-config.sh`: initialize/update default Keycloak/proxy/bootstrap keys in `config/config.default.json`
@@ -71,6 +72,10 @@ The repository is organized to separate extension resources, Python code, and lo
 ### Script quickstart
 
 ```bash
+# 0) Clean install — reset config, logs, and extension cache (use before a fresh enrollment test)
+./scripts/00-clean-install.sh             # keep extension installed
+./scripts/00-clean-install.sh --uninstall # also remove the extension
+
 # 1) Initialize default config keys (interactive)
 ./scripts/01-init-default-config.sh --interactive
 
@@ -92,6 +97,16 @@ The repository is organized to separate extension resources, Python code, and lo
 
 # 7) Build a profile-specific release package
 ./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt
+```
+
+#### Workflow clean install + réenrôlement
+
+```bash
+# 1. Purger et désinstaller
+./scripts/00-clean-install.sh --uninstall
+
+# 2. Rebuilder + réinstaller + relancer LibreOffice
+./scripts/dev-launch.sh
 ```
 
 ### Config profiles and release workflow
