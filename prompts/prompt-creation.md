@@ -92,28 +92,19 @@ AssistantMiraiLibreOffice/
 
 ### 3.1 Chaîne de configuration (deux niveaux)
 
-```
-┌─────────────────────────────────────────────────────┐
-│  NIVEAU 1 — Local (bootstrapping)                   │
-│                                                     │
-│  config.default.json  (dans l'OXT, bundlé)          │
-│       ↓ copié si config.json absent                 │
-│  config.json  (~/.config/libreoffice/.../config.json)│
-│                                                     │
-│  Contient: bootstrap_url, config_path,              │
-│  keycloakIssuerUrl, keycloakRealm, keycloakClientId │
-└───────────────────────┬─────────────────────────────┘
-                        │ GET {bootstrap_url}/{config_path}
-                        ▼
-┌─────────────────────────────────────────────────────┐
-│  NIVEAU 2 — Distant (dynamique, TTL 300s)           │
-│                                                     │
-│  Réponse JSON du serveur bootstrap                  │
-│  Peut contenir: endpoints Keycloak, URLs LLM,       │
-│  relay credentials, telemetry config                │
-│                                                     │
-│  Écrase les valeurs locales pour les clés fournies  │
-└─────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph N1["NIVEAU 1 — Local (bootstrapping)"]
+        A["📦 config.default.json\n(dans l'OXT, bundlé)"]
+        B["📄 config.json\n(~/.config/libreoffice/.../config.json)\n\nbootstrap_url · config_path\nkeycloakIssuerUrl · keycloakRealm · keycloakClientId"]
+        A -->|"copié si config.json absent"| B
+    end
+
+    subgraph N2["NIVEAU 2 — Distant (dynamique, TTL 300s)"]
+        C["🌐 Réponse JSON du serveur bootstrap\n\nEndpoints Keycloak · URLs LLM\nRelay credentials · Telemetry config\n\n→ Écrase les valeurs locales pour les clés fournies"]
+    end
+
+    B -->|"GET {bootstrap_url}/{config_path}"| C
 ```
 
 **Méthodes clés :**
@@ -144,26 +135,22 @@ AssistantMiraiLibreOffice/
 
 ### 3.2 Flux d'authentification PKCE (RFC 7636)
 
-```
-Utilisateur                  Plugin                    Keycloak
-    │                           │                          │
-    │ Clic "Login"              │                          │
-    │──────────────────────────▶│                          │
-    │                           │ génère verifier (96 bytes random)
-    │                           │ challenge = SHA256(verifier) base64url
-    │                           │ state = UUID                │
-    │                           │──────── GET /auth?code_challenge=...──▶│
-    │ ◀──────── ouverture navigateur ──────────────────────────          │
-    │ saisie credentials ────────────────────────────────────────────────▶│
-    │                           │ ◀──── redirect callback?code=...+state │
-    │                           │                          │
-    │                           │ vérifie state           │
-    │                           │──── POST /token {code, verifier} ──────▶│
-    │                           │ ◀──────── {access_token, refresh_token} │
-    │                           │                          │
-    │                           │ stocke tokens via set_config()
-    │                           │ appelle _secure_bind_identity()
-    │                           │ appelle _ensure_device_management_state_async()
+```mermaid
+sequenceDiagram
+    actor U as Utilisateur
+    participant P as Plugin
+    participant K as Keycloak
+
+    U->>P: Clic "Login"
+    Note over P: génère verifier (96 bytes random)<br/>challenge = SHA256(verifier) base64url<br/>state = UUID
+    P->>K: GET /auth?response_type=code&code_challenge=...&code_challenge_method=S256&state=...
+    K-->>U: ouverture navigateur (page login)
+    U->>K: saisie credentials
+    K-->>P: redirect → callback?code=AUTH_CODE&state=...
+    Note over P: valide state UUID
+    P->>K: POST /token {grant_type=authorization_code, code, code_verifier}
+    K-->>P: {access_token, refresh_token, expires_in}
+    Note over P: stocke tokens via set_config()<br/>appelle _secure_bind_identity()<br/>appelle _ensure_device_management_state_async()
 ```
 
 **Paramètres PKCE :**
@@ -183,31 +170,26 @@ Utilisateur                  Plugin                    Keycloak
 
 ### 3.3 Device Management — Séquence d'enrôlement
 
-```
-Plugin                          Bootstrap Server
-  │                                    │
-  │ 1. GET /config (sans relay)        │
-  │ ──────────────────────────────────▶│
-  │ ◀─────── {keycloak, llm, ...}      │
-  │                                    │
-  │ 2. PKCE flow → access_token        │
-  │                                    │
-  │ 3. POST /enroll {plugin_uuid, device_name, email, public_key}
-  │    Authorization: Bearer {access_token}
-  │ ──────────────────────────────────▶│
-  │ ◀─────── {relayClientId, relayClientKey, relayKeyExpiresAt}
-  │                                    │
-  │ stocke relay credentials           │
-  │                                    │
-  │ 4. GET /config (avec relay headers)│
-  │    X-Relay-Client: {relayClientId} │
-  │    X-Relay-Key: {relayClientKey}   │
-  │ ──────────────────────────────────▶│
-  │ ◀─────── config enrichie (secrets LLM déchiffrés)
-  │                                    │
-  │ 5. POST /chat/completions          │
-  │    Authorization: Bearer {llm_token}
-  │ ──────────────────────────────────▶│ LLM
+```mermaid
+sequenceDiagram
+    participant P as Plugin
+    participant B as Bootstrap Server
+    participant L as LLM
+
+    P->>B: 1. GET /config (sans relay headers)
+    B-->>P: {keycloak, llm_base_urls, ...} (config publique)
+
+    Note over P: 2. PKCE flow → access_token<br/>(voir §3.2)
+
+    P->>B: 3. POST /enroll<br/>Authorization: Bearer {access_token}<br/>{plugin_uuid, device_name, email, public_key}
+    B-->>P: {relayClientId, relayClientKey, relayKeyExpiresAt}
+    Note over P: stocke relay credentials dans config.json
+
+    P->>B: 4. GET /config<br/>X-Relay-Client: {relayClientId}<br/>X-Relay-Key: {relayClientKey}
+    B-->>P: config enrichie (llm_api_tokens, secrets déchiffrés)
+
+    P->>L: 5. POST /chat/completions<br/>Authorization: Bearer {llm_token}
+    L-->>P: réponse LLM (streaming SSE)
 ```
 
 **Headers relay :**
@@ -235,29 +217,26 @@ Ajoutés à TOUS les appels `_fetch_config()` dès qu'ils sont configurés.
 
 Couche de sécurité au-dessus du bootstrap standard :
 
-```
-Plugin                     Bootstrap Server
-  │                               │
-  │ ensure_identity()             │
-  │ → génère keypair Ed25519      │
-  │ → stocke private key (vault)  │
-  │                               │
-  │ enroll_anonymous()            │
-  │ POST /enroll {plugin_uuid, public_key, device_name}
-  │ ─────────────────────────────▶│
-  │ ◀──── {enroll_id, challenge}  │
-  │                               │
-  │ sign(challenge) = signature   │
-  │ POST /enroll/confirm {signature}
-  │ ─────────────────────────────▶│
-  │ ◀──── {telemetry_token, expires_in}
-  │                               │
-  │ bind_identity(access_token)   │
-  │ POST /identity/bind           │
-  │    Authorization: Bearer {access_token}
-  │    Body: device_proof (Ed25519 signé)
-  │ ─────────────────────────────▶│
-  │ ◀──── {token (kind=user), expires_in}
+```mermaid
+sequenceDiagram
+    participant V as Vault (OS)
+    participant P as Plugin
+    participant B as Bootstrap Server
+
+    P->>V: ensure_identity()<br/>génère keypair Ed25519
+    V-->>P: stocke private key<br/>clé: "mirai-libreoffice:{uuid}:ed25519"
+
+    P->>B: POST /enroll<br/>{plugin_uuid, public_key, device_name}
+    B-->>P: {enroll_id, challenge}
+
+    P->>P: sign(challenge) → signature (Ed25519)
+    P->>B: POST /enroll/confirm<br/>{signature}
+    B-->>P: {telemetry_token, expires_in}
+
+    Note over P,B: Après authentification PKCE (access_token obtenu)
+
+    P->>B: POST /identity/bind<br/>Authorization: Bearer {access_token}<br/>Body: device_proof (Ed25519 signé)
+    B-->>P: {token (kind=user), expires_in}
 ```
 
 **Vault multi-plateforme :**
@@ -366,18 +345,28 @@ body["stream"] = False
 
 ### 3.7 Threading & Locks
 
-```
-MainJob
-  ├── _config_write_lock   (threading.Lock)    → set_config() atomique
-  ├── _config_refresh_lock (threading.RLock)   → _schedule_config_refresh()
-  ├── _auth_prompt_lock    (threading.Lock)    → évite dialogs auth simultanés
-  └── _secure_flow_lock    (threading.RLock)   → lazy-init SecureBootstrapFlow
+```mermaid
+flowchart TD
+    MJ[MainJob]
 
-Threads daemon :
-  ├── _schedule_config_refresh() → _fetch_config()  [throttle 20s]
-  ├── _warmup_secure_flow_async() → ensure_identity()
-  ├── _ensure_device_management_state_async()
-  └── edit selection refresh loop (3s)
+    MJ --> CWL["_config_write_lock\n(threading.Lock)\nset_config() atomique"]
+    MJ --> CRL["_config_refresh_lock\n(threading.RLock)\n_schedule_config_refresh()"]
+    MJ --> APL["_auth_prompt_lock\n(threading.Lock)\névite dialogs auth simultanés"]
+    MJ --> SFL["_secure_flow_lock\n(threading.RLock)\nlazy-init SecureBootstrapFlow"]
+
+    MJ --> T1["Thread daemon: _schedule_config_refresh()\n→ _fetch_config()  [throttle 20s]"]
+    MJ --> T2["Thread daemon: _warmup_secure_flow_async()\n→ ensure_identity()"]
+    MJ --> T3["Thread daemon: _ensure_device_management_state_async()"]
+    MJ --> T4["Thread daemon: edit selection refresh loop\n[toutes les 3s]"]
+
+    style CWL fill:#ddf,stroke:#99b
+    style CRL fill:#ddf,stroke:#99b
+    style APL fill:#ddf,stroke:#99b
+    style SFL fill:#ddf,stroke:#99b
+    style T1 fill:#ffd,stroke:#bb9
+    style T2 fill:#ffd,stroke:#bb9
+    style T3 fill:#ffd,stroke:#bb9
+    style T4 fill:#ffd,stroke:#bb9
 ```
 
 **Guards importants :**
