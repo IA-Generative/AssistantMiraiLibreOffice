@@ -106,6 +106,56 @@
               <value>private:separator</value>
             </prop>
           </node>
+          <node oor:name="MC0" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MC1" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🔄 Transformer → colonne résultat</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?TransformToColumn</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MC2" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🧮 Générer une formule</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?GenerateFormula</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MC3" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">📊 Analyser la plage</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?AnalyzeRange</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
         </node>
       </node>
     </node>
