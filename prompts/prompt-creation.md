@@ -72,13 +72,15 @@ AssistantMiraiLibreOffice/
 │       ├── config.default.integration.json  # ⛔ gitignored — URLs réelles intégration
 │       └── config.default.production.json   # ⛔ gitignored — URLs réelles prod
 ├── scripts/
+│   ├── 00-clean-install.sh          # ★ Purge config + logs + extension cache (--uninstall)
 │   ├── 02-build-oxt.sh              # Build → dist/mirai.oxt
 │   ├── 05-update-plugin.sh          # Build + install + restart LO
 │   ├── 06-use-config-profile.sh     # Switcher de profil config
 │   └── dev-launch.sh                # Build + install + open document test
 ├── tests/
 │   ├── stubs/uno_stubs.py           # Stubs UNO pour tests hors LibreOffice
-│   ├── unit/                        # Tests unitaires (pytest)
+│   ├── unit/
+│   │   └── test_documentation_url.py  # ★ Tests fallback doc_url / portal_url
 │   └── integration/
 │       ├── mock_http.py             # MockHttpRouter (intercepte _urlopen)
 │       └── test_full_enrollment_flow.py  # Flow complet PKCE → DM → LLM
@@ -335,7 +337,7 @@ body["stream"] = False
 }
 ```
 
-**Events instrumentés :** ExtensionLoaded, ExtendSelection, EditSelection, SummarizeSelection, SimplifySelection, OpenmiraiWebsite, OpenSettings
+**Events instrumentés :** ExtensionLoaded, ExtendSelection, EditSelection, SummarizeSelection, SimplifySelection, OpenmiraiWebsite, OpenSettings, OpenDocumentation
 
 **Garanties de privacy :** Aucun texte utilisateur, aucun prompt, aucune PII dans les spans.
 
@@ -353,26 +355,37 @@ flowchart TD
     MJ --> CRL["_config_refresh_lock\n(threading.RLock)\n_schedule_config_refresh()"]
     MJ --> APL["_auth_prompt_lock\n(threading.Lock)\névite dialogs auth simultanés"]
     MJ --> SFL["_secure_flow_lock\n(threading.RLock)\nlazy-init SecureBootstrapFlow"]
+    MJ --> EWL["_enrollment_wizard_lock\n(threading.Lock)\névite wizards simultanés (timer + menu)"]
 
     MJ --> T1["Thread daemon: _schedule_config_refresh()\n→ _fetch_config()  [throttle 20s]"]
     MJ --> T2["Thread daemon: _warmup_secure_flow_async()\n→ ensure_identity()"]
     MJ --> T3["Thread daemon: _ensure_device_management_state_async()"]
     MJ --> T4["Thread daemon: edit selection refresh loop\n[toutes les 3s]"]
+    MJ --> T5["Thread daemon: _deferred_enrollment()\n→ _show_enrollment_wizard()  [délai 3s après init]"]
 
     style CWL fill:#ddf,stroke:#99b
     style CRL fill:#ddf,stroke:#99b
     style APL fill:#ddf,stroke:#99b
     style SFL fill:#ddf,stroke:#99b
+    style EWL fill:#ddf,stroke:#99b
     style T1 fill:#ffd,stroke:#bb9
     style T2 fill:#ffd,stroke:#bb9
     style T3 fill:#ffd,stroke:#bb9
     style T4 fill:#ffd,stroke:#bb9
+    style T5 fill:#ffd,stroke:#bb9
 ```
 
 **Guards importants :**
 - `_fetching_config` (bool) → récursion guard dans `_fetch_config()`
 - `_auth_prompt_in_progress` + cooldown 30s → empêche multi-dialogs auth
 - `_auth_prompted_at` → timestamp dernière demande auth
+- `_enrollment_wizard_active` (bool) + `_enrollment_wizard_lock` → empêche deux wizards simultanés (timer 3s + clic menu)
+
+**Bypass d'enrôlement dans `trigger()` :**
+```python
+_enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings"}
+# Ces actions n'interceptent pas l'enrôlement — elles sont toujours autorisées
+```
 
 ---
 
@@ -388,6 +401,114 @@ ctx.load_verify_locations(cafile="src/mirai/CAbundle/scaleway-bootstrap-ca-chain
 
 **Règle absolue : ne jamais utiliser `ssl.CERT_NONE` en production.**
 Le CA bundle Scaleway est nécessaire car LibreOffice Python n'utilise pas le keystore système.
+
+---
+
+### 3.9 Wizard d'enrôlement — UX 5 étapes
+
+Le wizard guide l'utilisateur à travers l'enrôlement complet et **reste ouvert** jusqu'à l'action explicite de l'utilisateur.
+
+```mermaid
+flowchart TD
+    S1["Étape 1 — Bienvenue\n(bouton: Commencer)"]
+    S2["Étape 2 — Ouvrir le navigateur\n(bouton: Ouvrir le navigateur → endExecute)"]
+    S3["Attente Keycloak\n(dialog setVisible(True) après execute())"]
+    S4["Keycloak en cours...\n(polling _keycloak_login)"]
+    S5_OK["Étape 5 — Succès\n(🚀 Commencer à utiliser)"]
+    S5_ERR["Étape 5 — Échec\n(Fermer + message raison)"]
+
+    S1 --> S2
+    S2 -->|"clic → endExecute() → browser"| S3
+    S3 --> S4
+    S4 -->|"enrolled=True"| S5_OK
+    S4 -->|"timeout/erreur"| S5_ERR
+    S5_OK -->|"clic utilisateur"| END["Fermeture wizard"]
+    S5_ERR -->|"clic utilisateur"| END
+```
+
+**Point technique critique — `execute()` vs `setVisible()` :**
+- `execute()` démarre une boucle modale UNO et bloque jusqu'à ce que `endExecute()` soit appelé
+- Quand `endExecute()` est appelé (clic "Ouvrir le navigateur"), LibreOffice **cache automatiquement** le dialog
+- Pour garder le dialog visible pendant les étapes automatiques suivantes, appeler **obligatoirement** `dialog.setVisible(True)` immédiatement après que `execute()` retourne
+- `processEventsToIdle()` doit être appelé dans les boucles de polling pour mettre à jour l'UI depuis le thread principal UNO
+
+```python
+# Pattern correct : re-show après execute()
+ok, dialog, toolkit, _update_custom, result = _show_enrollment_wizard(...)
+try:
+    dialog.setVisible(True)   # ← OBLIGATOIRE sinon dialog disparaît
+except Exception:
+    pass
+# ... polling Keycloak ...
+_update_custom(step=4, text="Connexion en cours...", btn_next=None, btn_cancel=None)
+toolkit.processEventsToIdle()
+```
+
+**Boutons sans chevauchement (`_update_custom`) :**
+```python
+if btn_cancel:
+    dialog.getControl("wiz_btn_cancel").setPosSize(btn_cancel_x, btn_y, BTN_W, BTN_H, POSSIZE)
+    dialog.getControl("wiz_btn_next").setPosSize(btn_next_x, btn_y, BTN_W, BTN_H, POSSIZE)
+else:
+    # Pousser cancel hors écran (pas de setVisible ni setEnable — bouton reste actif)
+    dialog.getControl("wiz_btn_cancel").setPosSize(-BTN_W - 10, btn_y, BTN_W, BTN_H, POSSIZE)
+    dialog.getControl("wiz_btn_next").setPosSize((WIDTH - BTN_W) // 2, btn_y, BTN_W, BTN_H, POSSIZE)
+```
+
+**Constantes :** `BTN_W = 175` (suffisant pour "🚀 Commencer à utiliser"), `BTN_H = 26`, `WIDTH = 420`
+
+---
+
+### 3.10 Menu Documentation & propagation `doc_url` / `portal_url`
+
+**Structure menu `oxt/Addons.xcu` (Writer) :**
+```
+MA1  Générer la suite          (Ctrl+Q)
+MA2  Modifier la sélection     (Ctrl+E)
+MA3  Résumer la sélection      (Ctrl+R)
+MA4  Reformuler la sélection   (Ctrl+L)
+MA5  ─────────────────────
+MA6  Accéder au service MIrAI
+MA7  ─────────────────────
+MA8  📚 Documentation          ← NOUVEAU (service:...do?Documentation)
+MA9  ⚙️ Paramètres
+```
+
+**Implémentation `_open_documentation(job)` dans `menu_actions/writer.py` :**
+```python
+def _open_documentation(job):
+    doc_url = str(job.get_config("doc_url", "") or "").strip()
+    if not doc_url:
+        doc_url = str(job.get_config("portal_url", "") or "").strip()
+    if not doc_url:
+        return   # silence — pas d'URL configurée
+    import webbrowser
+    webbrowser.open(doc_url)
+```
+
+**Propagation depuis bootstrap — `_persist_bootstrap_config` :**
+
+La méthode `_persist_bootstrap_config` possède une liste d'autorisation explicite `keys_to_sync`. Toute clé absente de cette liste est **ignorée**, même si elle est présente dans la réponse bootstrap.
+
+```python
+keys_to_sync = [
+    "llm_base_urls", "llm_api_tokens", "llm_default_models",
+    "systemPrompt", "model", "api_type", "is_openwebui", "openai_compatibility",
+    "telemetryEndpoint", "telemetryKey", "telemetryAuthorizationType", "telemetrySel",
+    "relayAssistantBaseUrl",
+    "doc_url", "portal_url",    # ← ajoutés pour propagation URLs documentaire/portail
+]
+```
+
+**Config bootstrap (`device-management/config/libreoffice/config.json`) :**
+```json
+{
+  "config": {
+    "portal_url": "https://mirai.interieur.gouv.fr",
+    "doc_url": "https://github.com/IA-Generative/AssistantmiraiLibreOffice"
+  }
+}
+```
 
 ---
 
@@ -576,11 +697,12 @@ class TestFullEnrollmentFlow(unittest.TestCase):
 | security_flow | 18+ | 85% |
 | calc_prompt_function | 28 | 90% |
 | enrollment flow | 6 | Flow complet |
+| documentation_url | 5 | doc_url/portal_url fallback chain |
 
 **Commande de lancement :**
 ```bash
 .venv/bin/pytest tests/ -v
-# Résultat attendu : 73+ passed
+# Résultat attendu : 78+ passed
 ```
 
 ---
@@ -762,6 +884,11 @@ open -a LibreOffice tests/fixtures/sample.odt
 | Config `keycloak_redirect_uri` | Lue depuis fichier local, pas depuis DM config | Doit être dans `config.json` utilisateur |
 | Thundering herd | Backoff sans jitter → tous les clients retry en même temps | `random.uniform(0.9, 1.1) * backoff` |
 | `logging.basicConfig()` par appel | Non thread-safe si appelé dans `log_to_file()` | Appel unique au niveau module |
+| Dialog invisible après `endExecute()` | LO cache automatiquement le dialog quand `endExecute()` est appelé | Appeler `dialog.setVisible(True)` immédiatement après que `execute()` retourne |
+| Boutons chevauchés (wizard) | Un bouton désactivé/caché occupe toujours sa position XY → chevauchement | `setPosSize(-BTN_W-10, ...)` pour pousser le bouton hors écran |
+| Multi-wizard (timer + menu) | Deux threads peuvent lancer `_show_enrollment_wizard()` quasi-simultanément | `_enrollment_wizard_lock` + `_enrollment_wizard_active` flag |
+| Menu Documentation relance wizard | `trigger()` interceptait tous les args non-connus → lançait le flow d'enrôlement | `_enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings"}` |
+| `doc_url` absent de config locale | `_persist_bootstrap_config` a une liste `keys_to_sync` explicite — les clés absentes sont ignorées | Ajouter la clé à `keys_to_sync` dans `_persist_bootstrap_config` |
 
 ---
 

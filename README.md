@@ -245,9 +245,15 @@ This feature rewrites the selected text in a clearer, more accessible form while
 
 ---
 
+### 📚 Documentation
+
+Access the extension documentation directly from the MIrAI menu. The URL is configurable via the bootstrap server (`doc_url` key) with a fallback to `portal_url`. If neither is set, the menu item does nothing silently.
+
+---
+
 ### 🌐 Access the mirai website
 
-Access the official mirai website (https://mirai.interieur.gouv.fr) from the extension menu for more information about the program and available tools.
+Access the official mirai website (https://mirai.interieur.gouv.fr) from the extension menu for more information about the program and available tools. The URL is configurable via the bootstrap server (`portal_url` key); if absent it falls back to the hardcoded URL above.
 
 ---
 
@@ -437,6 +443,10 @@ This project has gone through many iterations. Here is a summary of the most rec
 - **Proxy support**: configurable proxy (URL, optional auth), TLS `-k` toggle, startup consistency check with LibreOffice settings, and a Proxy dialog with connection test.
 - **Editing**: new “Edit selection” dialog always on top, resizable, with send button and system close handling.
 - **Logs & diagnostics**: better network logs, HTTP error handling, user notification when token expired.
+- **Enrollment wizard UX** (2026-03): 5-step wizard that stays open through Keycloak login; shows a result screen (success → “🚀 Commencer à utiliser” / failure → “Fermer” + reason). Wizard is protected by a threading lock to prevent multiple simultaneous instances.
+- **Documentation menu** (📚): new menu entry above Paramètres in the MIrAI menu, opening `doc_url` (from bootstrap) → `portal_url` fallback → silent no-op. Configurable centrally from Device Management.
+- **Bootstrap propagation for `doc_url` / `portal_url`**: both keys are now synced from the bootstrap config to the local `config.json` via `_persist_bootstrap_config`.
+- **Clean-install script** (`scripts/00-clean-install.sh`): purges local `config.json`, logs, and LibreOffice extension temp cache. Supports `--uninstall` to also remove the extension.
 
 ## Device Management (Status & TODO)
 
