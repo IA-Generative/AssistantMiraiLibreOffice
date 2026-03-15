@@ -12,7 +12,7 @@ Benchmark texts are sourced from Wikipedia (fr) — article
 fetched live via the Wikipedia API at startup (--no-wikipedia to skip).
 
 Credentials are read from the local LibreOffice config file.
-Writes results to tests/results/scaleway_model_comparison.md.
+Writes results to bench/scaleway_model_comparison.md.
 
 Usage:
     python tests/sim_scaleway_models.py
@@ -39,7 +39,7 @@ _CONFIG_PATH = os.path.expanduser(
     "~/Library/Application Support/LibreOffice/4/user/config/config.json"
 )
 _FALLBACK_BASE_URL = "https://api.scaleway.ai/v1"
-_OUTPUT_FILE = Path(__file__).parent / "results" / "scaleway_model_comparison.md"
+_OUTPUT_FILE = Path(__file__).parent.parent / "bench" / "scaleway_model_comparison.md"
 
 # Wikipedia article used as benchmark source
 _WIKIPEDIA_ARTICLE = "Administration_électronique_en_France"
