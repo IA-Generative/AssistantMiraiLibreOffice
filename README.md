@@ -72,14 +72,6 @@ Ouvre l'URL de documentation configurée via le bootstrap (`doc_url`) avec repli
 
 Les fonctions Calc sont accessibles depuis le menu **MIrAI** dans LibreOffice Calc.
 
-### ✨ Générer la suite — `Ctrl+Q`
-
-Continue le contenu de chaque cellule sélectionnée en s'appuyant sur le texte existant. Utile pour compléter des libellés, des descriptions ou des séries de texte.
-
-### 🖊️ Modifier la sélection — `Ctrl+E`
-
-Ouvre une boîte de dialogue pour saisir des instructions d'édition. Le contenu de chaque cellule sélectionnée est transformé selon l'instruction (traduction, reformulation, correction…). La cellule est mise à jour en place.
-
 ### 🔄 Transformer → colonne résultat — `Ctrl+T`
 
 Applique une instruction sur une plage de cellules et écrit les résultats dans une **colonne adjacente** (non destructif). Si la colonne suivante est déjà occupée, l'extension cherche la première colonne libre à droite et lui donne un en-tête automatique « Résultat IA » avec le style de la ligne d'en-tête existante.
