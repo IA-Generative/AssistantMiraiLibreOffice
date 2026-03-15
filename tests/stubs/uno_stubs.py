@@ -23,6 +23,7 @@ class _XMouseListener:   pass
 class _XWindowListener:  pass
 class _XTopWindowListener: pass
 class _XNamed:           pass
+class _XSelectionChangeListener: pass
 
 
 def install():
@@ -34,6 +35,7 @@ def install():
     uno = MagicMock()
     uno._STUB = True
     uno.fileUrlToSystemPath = lambda url: url.replace("file://", "")
+    uno.systemPathToFileUrl = lambda path: "file://" + path
     uno.createUnoStruct = MagicMock(return_value=MagicMock())
 
     # --- unohelper ---
@@ -51,6 +53,7 @@ def install():
     # --- com.sun.star.awt ---
     com_sun_star_awt = MagicMock()
     com_sun_star_awt.MessageBoxButtons = MagicMock()
+    com_sun_star_awt.MessageBoxType = MagicMock()
     com_sun_star_awt.XActionListener  = _XActionListener
     com_sun_star_awt.XItemListener    = _XItemListener
     com_sun_star_awt.XMouseListener   = _XMouseListener
@@ -67,6 +70,10 @@ def install():
     com_sun_star_container = MagicMock()
     com_sun_star_container.XNamed = _XNamed
 
+    # --- com.sun.star.view ---
+    com_sun_star_view = MagicMock()
+    com_sun_star_view.XSelectionChangeListener = _XSelectionChangeListener
+
     # --- register all modules ---
     sys.modules.update({
         "uno": uno,
@@ -80,8 +87,10 @@ def install():
         "com.sun.star.awt.MessageBoxType": com_sun_star_awt_msgtype,
         "com.sun.star.beans": com_sun_star_beans,
         "com.sun.star.container": com_sun_star_container,
+        "com.sun.star.view": com_sun_star_view,
         "com.sun.star.frame": MagicMock(),
         "com.sun.star.lang": MagicMock(),
+        "com.sun.star.deployment": MagicMock(),
     })
 
 
