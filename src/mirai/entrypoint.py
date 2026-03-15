@@ -6,11 +6,35 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
-from com.sun.star.task import XJobExecutor, XJob
-from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
-from com.sun.star.awt import XActionListener, XItemListener, XMouseListener, XWindowListener, XTopWindowListener
+try:
+    from com.sun.star.task import XJobExecutor, XJob
+    from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
+    from com.sun.star.awt import XActionListener, XItemListener, XMouseListener, XWindowListener, XTopWindowListener
+    from com.sun.star.beans import PropertyValue
+    from com.sun.star.container import XNamed
+except ImportError:
+    # Running outside LibreOffice (e.g. unopkg install) — provide safe stubs
+    class _S1: pass
+    class _S2: pass
+    class _S3: pass
+    class _S4: pass
+    class _S5: pass
+    class _S6: pass
+    class _S7: pass
+    class _S8: pass
+    class _S9: pass
+    XJobExecutor = _S1
+    XJob = _S2
+    MSG_BUTTONS = None
+    XActionListener = _S3
+    XItemListener = _S4
+    XMouseListener = _S5
+    XWindowListener = _S6
+    XTopWindowListener = _S7
+    PropertyValue = _S8
+    XNamed = _S9
 import uno
-import os 
+import os
 import logging
 import re
 import uuid
@@ -19,9 +43,6 @@ import base64
 import hashlib
 import threading
 import socket
-
-from com.sun.star.beans import PropertyValue
-from com.sun.star.container import XNamed
 from .menu_actions.writer import handle_writer_action
 from .menu_actions.calc import handle_calc_action
 from .security_flow import (
@@ -326,6 +347,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._auth_prompted_at = 0
         self._config_write_lock = threading.Lock()
         self._edit_dialog = None
+        self._formula_dialog = None
+        self._formula_dialog_state = None
         self._secure_flow = None
         self._secure_flow_lock = threading.RLock()
         self._secure_flow_init_error = None
@@ -334,6 +357,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._last_loaded_ca_bundle = None
         self._last_ca_bundle_error = None
         self._last_logged_ca_bundle_error = None
+        # Update & feature toggling (schema_version 2)
+        self._features_cache = {}
+        self._update_in_progress = False
+        self._update_lock = threading.Lock()
         # handling different situations (inside LibreOffice or other process)
         try:
             self.sm = ctx.getServiceManager()
@@ -756,12 +783,35 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     log_to_file(f"DM config fetch attempt: mode={mode} url={url}")
                     headers = {"Accept": "application/json"}
                     headers.update(self._relay_headers())
+                    # Enrich headers for schema_version=2 support
+                    plugin_version = self._get_extension_version()
+                    if plugin_version:
+                        headers["X-Plugin-Version"] = plugin_version
+                    headers["X-Platform-Type"] = "libreoffice"
+                    lo_version = self._get_lo_version()
+                    if lo_version:
+                        headers["X-Platform-Version"] = lo_version
+                    client_uuid = str(self._ensure_plugin_uuid() or "")
+                    if client_uuid:
+                        headers["X-Client-UUID"] = client_uuid
                     request = urllib.request.Request(url, headers=_with_user_agent(headers))
                     with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=use_proxy) as response:
                         payload = response.read().decode("utf-8")
                     log_to_file(f"DM bootstrap raw response ({mode}): {payload[:2000]}")
                     config_data = json.loads(payload)
                     if isinstance(config_data, dict):
+                        # Handle EnrichedConfigResponse (schema_version=2)
+                        meta = config_data.get("meta") if isinstance(config_data.get("meta"), dict) else {}
+                        if meta.get("schema_version") == 2:
+                            features = config_data.get("features")
+                            if isinstance(features, dict):
+                                self._features_cache = features
+                                log_to_file(f"Feature flags updated: {list(features.keys())}")
+                            update_directive = config_data.get("update")
+                            if isinstance(update_directive, dict) and update_directive.get("action") in ("update", "rollback"):
+                                self._schedule_update(update_directive)
+                            else:
+                                log_to_file("No update directive in EnrichedConfigResponse")
                         self.config_cache = config_data
                         self.config_loaded_at = now
                         self._config_last_failure_at = 0
@@ -818,6 +868,140 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("Bootstrap config persisted to local file")
         except Exception as e:
             log_to_file(f"Failed to persist bootstrap config: {str(e)}")
+
+    # ── Update & Feature Toggling (schema_version 2) ─────────────────
+
+    def _get_extension_version(self):
+        """Return the installed version of this extension via PackageInformationProvider."""
+        try:
+            pip = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.deployment.PackageInformationProvider", self.ctx
+            )
+            ext_id = "mirai.libreoffice.assistant"
+            version = pip.getExtensionVersion(ext_id)
+            return str(version).strip() if version else ""
+        except Exception as e:
+            log_to_file(f"_get_extension_version error: {e}")
+            return ""
+
+    def _get_lo_version(self):
+        """Return LibreOffice host version string (e.g. '24.8.0')."""
+        try:
+            cfg_provider = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.configuration.ConfigurationProvider", self.ctx
+            )
+            prop = PropertyValue()
+            prop.Name = "nodepath"
+            prop.Value = "/org.openoffice.Setup/Product"
+            access = cfg_provider.createInstanceWithArguments(
+                "com.sun.star.configuration.ConfigurationUpdateAccess", (prop,)
+            )
+            raw = access.getByName("ooSetupVersionAboutBox")
+            return str(raw).strip() if raw else ""
+        except Exception as e:
+            log_to_file(f"_get_lo_version error: {e}")
+            return ""
+
+    def _is_feature_enabled(self, name, default=True):
+        """Check whether a feature flag is enabled, using the cached features dict."""
+        if name in self._features_cache:
+            return bool(self._features_cache[name])
+        return default
+
+    def _schedule_update(self, directive):
+        """Start a background daemon thread to perform the plugin update if not already running."""
+        with self._update_lock:
+            if self._update_in_progress:
+                log_to_file("Update already in progress, skipping duplicate schedule")
+                return
+            self._update_in_progress = True
+
+        def _worker():
+            try:
+                self._perform_update(directive)
+            finally:
+                with self._update_lock:
+                    self._update_in_progress = False
+
+        t = threading.Thread(target=_worker, daemon=True)
+        t.start()
+        log_to_file(f"Update thread scheduled: action={directive.get('action')} target={directive.get('target_version')}")
+
+    def _perform_update(self, directive):
+        """Download, verify checksum and install the artifact via ExtensionManager."""
+        action = directive.get("action", "")
+        target_version = directive.get("target_version", "")
+        artifact_url = directive.get("artifact_url", "")
+        expected_checksum = directive.get("checksum", "")
+        urgency = directive.get("urgency", "normal")
+        campaign_id = directive.get("campaign_id")
+
+        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip().rstrip("/")
+        if not base_url or not artifact_url:
+            log_to_file("_perform_update: missing base_url or artifact_url")
+            return
+
+        full_url = base_url + artifact_url if artifact_url.startswith("/") else artifact_url
+        log_to_file(f"_perform_update: downloading {full_url} (action={action} target={target_version})")
+
+        try:
+            request = urllib.request.Request(full_url, headers=_with_user_agent({}))
+            with self._urlopen(request, context=self.get_ssl_context(), timeout=60) as response:
+                binary = response.read()
+
+            # Verify checksum
+            if expected_checksum and expected_checksum.startswith("sha256:"):
+                expected_hex = expected_checksum[len("sha256:"):]
+                actual_hex = hashlib.sha256(binary).hexdigest()
+                if actual_hex != expected_hex:
+                    log_to_file(f"_perform_update: checksum mismatch expected={expected_hex} actual={actual_hex}")
+                    return
+                log_to_file("_perform_update: checksum OK")
+
+            # Write to temp file and install via ExtensionManager
+            import tempfile
+            suffix = ".oxt" if "libreoffice" in full_url.lower() or full_url.endswith(".oxt") else ".oxt"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+                tmp.write(binary)
+                tmp_path = tmp.name
+
+            tmp_url = uno.systemPathToFileUrl(tmp_path)
+            ext_manager = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.deployment.ExtensionManager", self.ctx
+            )
+            ext_manager.addExtension(tmp_url, None, "user", None, None)
+            log_to_file(f"_perform_update: extension installed version={target_version}")
+
+            # Notify user
+            try:
+                desktop = self.ctx.getServiceManager().createInstanceWithContext(
+                    "com.sun.star.frame.Desktop", self.ctx
+                )
+                active_frame = desktop.getCurrentFrame() if desktop else None
+                if active_frame:
+                    toolkit = self.ctx.getServiceManager().createInstance("com.sun.star.awt.Toolkit")
+                    parent = active_frame.getContainerWindow()
+                    msgbox = toolkit.createMessageBox(
+                        parent,
+                        1,  # MessageBoxType.INFOBOX
+                        MSG_BUTTONS.BUTTONS_OK,
+                        "Mirai — Mise à jour",
+                        f"Mirai {target_version} installé. Redémarrez LibreOffice pour finaliser."
+                    )
+                    msgbox.execute()
+            except Exception as notify_err:
+                log_to_file(f"_perform_update: notification error (non-fatal): {notify_err}")
+
+            # Send telemetry
+            send_telemetry_trace_async(self, "ExtensionUpdated", {
+                "action": action,
+                "version_after": target_version,
+                "campaign_id": str(campaign_id) if campaign_id is not None else "",
+                "urgency": urgency,
+            })
+
+        except Exception as e:
+            log_to_file(f"_perform_update: error: {e}")
 
     def _get_setting(self, key):
         now = time.time()
@@ -3393,6 +3577,45 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         request.get_method = lambda: 'POST'
         return request
 
+    def make_chat_request(self, messages, max_tokens=2000, api_type=None):
+        """Build a streaming chat request from a full messages[] array.
+
+        Unlike make_api_request, the messages list is forwarded as-is
+        (no default system-prompt prepended).  Useful for multi-turn
+        conversations where the caller manages the history.
+        """
+        try:
+            max_tokens = int(max_tokens)
+        except (TypeError, ValueError):
+            max_tokens = 2000
+
+        endpoint = str(self.get_config("llm_base_urls", "http://127.0.0.1:5000")).rstrip("/")
+        api_key = self._effective_api_token(self.get_config("llm_api_tokens", ""))
+        if api_type is None:
+            api_type = str(self.get_config("api_type", "completions")).lower()
+        model = str(self.get_config("llm_default_models", ""))
+
+        headers = {"Content-Type": "application/json"}
+        endpoint, api_path = self._split_endpoint_api_path(endpoint, True)
+        header_name, header_prefix = self._auth_header()
+        if api_key:
+            headers[header_name] = f"{header_prefix}{api_key}"
+
+        url = endpoint + api_path + "/chat/completions"
+        data = {
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": 0.2,
+            "stream": True,
+        }
+        if model:
+            data["model"] = model
+
+        json_data = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(url, data=json_data, headers=_with_user_agent(headers))
+        request.get_method = lambda: "POST"
+        return request
+
     def extract_content_from_response(self, chunk, api_type="completions"):
         """
         Extract text content from API response chunk based on API type.
@@ -5459,6 +5682,399 @@ EDITED VERSION:
         except Exception:
             pass
         return result["text"]
+
+    # ── Calc formula prompts persistence ─────────────────────────────────────
+    def _prompts_calc_path(self):
+        """Path to the Calc prompts history file."""
+        try:
+            return os.path.join(os.path.dirname(self._profile_config_path), "prompts_calc.txt")
+        except Exception:
+            return os.path.join(os.path.expanduser("~"), "prompts_calc.txt")
+
+    def _load_prompts_calc(self):
+        """Load saved prompts (most-recent-first, max 100)."""
+        try:
+            with open(self._prompts_calc_path(), "r", encoding="utf-8") as f:
+                lines = [l.rstrip("\n") for l in f if l.strip()]
+            return lines[:100]
+        except Exception:
+            return []
+
+    def _save_prompt_calc(self, prompt: str):
+        """Prepend prompt to the history file (deduplicated, max 100 lines)."""
+        try:
+            existing = self._load_prompts_calc()
+            deduped = [p for p in existing if p != prompt]
+            lines = [prompt] + deduped
+            with open(self._prompts_calc_path(), "w", encoding="utf-8") as f:
+                f.write("\n".join(lines[:100]) + "\n")
+        except Exception:
+            pass
+
+    def _show_formula_assistant_dialog(
+        self,
+        schema_context: str = "",
+        history_lines: list = None,
+        on_generate=None,
+        schema_builder=None,
+        title: str = "MIrAI — Assistant Formule",
+    ) -> None:
+        """Non-modal multi-turn formula assistant dialog.
+
+        Layout (top→bottom):
+          Input zone (label + textarea + Générer button)
+          Context strip
+          History zone (label + small utils + clickable listbox)
+
+        on_generate(user_input) — called on Générer, returns new history lines.
+        schema_builder(raw_selection) — called on selection change, returns
+          (on_generate_fn, schema_ctx_str). When provided, a
+          XSelectionChangeListener keeps the context strip live.
+        Closing the window (X) disposes the dialog.
+        """
+        if history_lines is None:
+            history_lines = []
+
+        WIDTH = 700
+        HORI_MARGIN = 14
+        VERT_MARGIN = 12
+        VERT_SEP = 8
+        LABEL_HEIGHT = 20
+        CONTEXT_HEIGHT = 36       # 2 lines of schema info
+        HISTORY_HEIGHT = 220      # clickable conversation history (listbox)
+        INPUT_HEIGHT = 70         # user input area
+        BUTTON_HEIGHT = 30
+        BUTTON_WIDTH = 130
+
+        HEIGHT = (
+            VERT_MARGIN
+            + LABEL_HEIGHT + VERT_SEP          # section header
+            + LABEL_HEIGHT + VERT_SEP          # "Votre demande" label
+            + INPUT_HEIGHT + VERT_SEP          # input textarea
+            + BUTTON_HEIGHT + VERT_SEP         # Générer button row
+            + CONTEXT_HEIGHT + VERT_SEP        # schema context strip
+            + LABEL_HEIGHT + VERT_SEP          # "Conversation" label row (with utils)
+            + HISTORY_HEIGHT + VERT_MARGIN     # clickable conversation history
+        )
+
+        # PosSize constants: X=1 Y=2 WIDTH=4 HEIGHT=8 SIZE=12 POSSIZE=15
+        _POSSIZE = 15
+        _SIZE = 12
+        from com.sun.star.awt import XActionListener, XItemListener
+
+        self._log("[formula_dlg] creating dialog")
+        ctx = uno.getComponentContext()
+        sm = ctx.getServiceManager()
+
+        def _cr(n):
+            return sm.createInstanceWithContext(n, ctx)
+
+        dlg = _cr("com.sun.star.awt.UnoControlDialog")
+        dlg_m = _cr("com.sun.star.awt.UnoControlDialogModel")
+        dlg.setModel(dlg_m)
+        dlg.setVisible(False)
+        dlg.setTitle(title)
+        dlg.setPosSize(0, 0, WIDTH, HEIGHT, _SIZE)
+
+        try:
+            dlg_m.BackgroundColor = _UI["bg"]
+        except Exception:
+            pass
+
+        def _add(name, ctrl_type, x, y, w, h, props):
+            m = dlg_m.createInstance("com.sun.star.awt.UnoControl" + ctrl_type + "Model")
+            dlg_m.insertByName(name, m)
+            c = dlg.getControl(name)
+            c.setPosSize(x, y, w, h, _POSSIZE)
+            for k, v in props.items():
+                try:
+                    setattr(m, k, v)
+                except Exception:
+                    pass
+            return c
+
+        try:
+            from com.sun.star.awt.FontWeight import BOLD
+        except Exception:
+            BOLD = 150
+
+        y = VERT_MARGIN
+
+        # ── Section header ─────────────────────────────────────────────
+        _add("lbl_header", "FixedText", HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": "🤖 MIrAI — Assistant Formule",
+            "FontHeight": _UI["font_section"],
+            "FontWeight": BOLD,
+            "TextColor": _UI["text_on_dark"],
+            "BackgroundColor": _UI["bg_header"],
+        })
+        y += LABEL_HEIGHT + VERT_SEP
+
+        # ── Input label ────────────────────────────────────────────────
+        _add("lbl_input", "FixedText", HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
+            "Label": "Votre demande :",
+            "FontHeight": _UI["font_label"],
+            "FontWeight": BOLD,
+            "TextColor": _UI["text"],
+        })
+        y += LABEL_HEIGHT + VERT_SEP
+
+        # ── Input text area ────────────────────────────────────────────
+        _add("txt_input", "Edit", HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, INPUT_HEIGHT, {
+            "Text": "",
+            "MultiLine": True,
+            "VScroll": False,
+            "FontHeight": _UI["font_body"],
+            "BackgroundColor": _UI["bg_input"],
+            "Border": 1,
+        })
+        y += INPUT_HEIGHT + VERT_SEP
+
+        # ── Générer button (right-aligned) ─────────────────────────────
+        btn_x_send = WIDTH - HORI_MARGIN - BUTTON_WIDTH
+
+        _add("btn_send", "Button", btn_x_send, y, BUTTON_WIDTH, BUTTON_HEIGHT, {
+            "Label": "⚡ Générer",
+            "PushButtonType": 0,
+            "DefaultButton": True,
+            "FontHeight": _UI["font_label"],
+            "BackgroundColor": _UI["btn_primary_bg"],
+            "TextColor": _UI["btn_primary_fg"],
+        })
+        y += BUTTON_HEIGHT + VERT_SEP
+
+        # ── Schema context strip ────────────────────────────────────────
+        _add("lbl_ctx", "FixedText", HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, CONTEXT_HEIGHT, {
+            "Label": schema_context or "Aucun contexte disponible",
+            "FontHeight": _UI["font_small"],
+            "TextColor": _UI["text_secondary"],
+            "BackgroundColor": _UI["bg_section"],
+            "MultiLine": True,
+        })
+        y += CONTEXT_HEIGHT + VERT_SEP
+
+        # ── History label row  (label + "Vider…" + "Ouvrir prompts…") ──
+        lbl_hist_w = WIDTH - HORI_MARGIN * 2 - 90 - 8 - 120 - 8
+        _add("lbl_hist", "FixedText", HORI_MARGIN, y, lbl_hist_w, LABEL_HEIGHT, {
+            "Label": "Conversation :",
+            "FontHeight": _UI["font_label"],
+            "FontWeight": BOLD,
+            "TextColor": _UI["text"],
+        })
+        btn_clear_x = HORI_MARGIN + lbl_hist_w + 8
+        _add("btn_clear", "Button", btn_clear_x, y, 90, LABEL_HEIGHT, {
+            "Label": "Vider…",
+            "PushButtonType": 0,
+            "FontHeight": _UI["font_small"],
+        })
+        btn_open_x = btn_clear_x + 90 + 8
+        _add("btn_open_prompts", "Button", btn_open_x, y, 120, LABEL_HEIGHT, {
+            "Label": "Ouvrir prompts…",
+            "PushButtonType": 0,
+            "FontHeight": _UI["font_small"],
+        })
+        y += LABEL_HEIGHT + VERT_SEP
+
+        # ── History listbox (clickable — ▶ lines refill input) ────────
+        _add("lst_history", "ListBox", HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, HISTORY_HEIGHT, {
+            "StringItemList": tuple(history_lines),
+            "FontHeight": _UI["font_body"],
+            "BackgroundColor": _UI["bg_section"],
+            "Border": 1,
+            "MultiSelection": False,
+            "Dropdown": False,
+        })
+
+        _job = self  # capture outer instance for inner class closures
+        # Mutable state — on_generate replaced in-place on selection change
+        _job._formula_dialog_state = {
+            "on_generate": on_generate,
+            "history_lines": history_lines,
+            "schema_builder": schema_builder,
+            "sel_listener": None,   # (listener, controller) set after createPeer
+        }
+
+        class GenerateListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, _ev):
+                try:
+                    user_input = dlg.getControl("txt_input").getText().strip()
+                except Exception:
+                    return
+                if not user_input:
+                    return
+                state = _job._formula_dialog_state
+                if state is None or state.get("on_generate") is None:
+                    return
+                try:
+                    new_lines = state["on_generate"](user_input)
+                    state["history_lines"].extend(new_lines or [])
+                    _job._save_prompt_calc(user_input)
+                    dlg.getControl("lst_history").getModel().StringItemList = tuple(state["history_lines"])
+                    dlg.getControl("lst_history").selectItemPos(len(state["history_lines"]) - 1, True)
+                    dlg.getControl("txt_input").getModel().Text = ""
+                except Exception as e:
+                    _job._log(f"[formula_dlg] generate error: {e}")
+
+        class ClearListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, _ev):
+                try:
+                    mb = _cr("com.sun.star.awt.Toolkit")
+                    frame2 = _cr("com.sun.star.frame.Desktop").getCurrentFrame()
+                    win2 = frame2.getContainerWindow() if frame2 else None
+                    mbox = mb.createMessageBox(win2, 3, 3, "Confirmer", "Vider l'historique des demandes ?")
+                    if mbox.execute() == 2:  # YES = 2
+                        import os as _os
+                        try:
+                            _os.remove(_job._prompts_calc_path())
+                        except Exception:
+                            pass
+                        _job._formula_dialog_state["history_lines"].clear()
+                        try:
+                            dlg.getControl("lst_history").getModel().StringItemList = ()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+        class OpenPromptsListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, _ev):
+                import subprocess as _sub
+                import os as _os
+                try:
+                    path = _job._prompts_calc_path()
+                    if not _os.path.exists(path):
+                        open(path, "w").close()
+                    _sub.Popen(["open", path])
+                except Exception:
+                    pass
+
+        class HistorySelectListener(unohelper.Base, XItemListener):
+            def itemStateChanged(self, ev):
+                try:
+                    idx = ev.Selected
+                    if idx >= 0:
+                        items = dlg.getControl("lst_history").getModel().StringItemList
+                        if idx < len(items) and items[idx].startswith("▶ "):
+                            dlg.getControl("txt_input").getModel().Text = items[idx][2:]
+                except Exception:
+                    pass
+
+        class FormulaDialogTopWindowListener(unohelper.Base, XTopWindowListener):
+            def windowClosing(self, _ev):
+                try:
+                    ps = dlg.getPosSize()
+                    _job.set_config("formula_dialog_x", int(ps.X))
+                    _job.set_config("formula_dialog_y", int(ps.Y))
+                except Exception:
+                    pass
+                try:
+                    dlg.setVisible(False)
+                    dlg.dispose()
+                except Exception:
+                    pass
+                # Detach selection listener before disposing
+                try:
+                    lc = _job._formula_dialog_state.get("sel_listener") if _job._formula_dialog_state else None
+                    if lc:
+                        lc[1].removeSelectionChangeListener(lc[0])
+                except Exception:
+                    pass
+                _job._formula_dialog = None
+                _job._formula_dialog_state = None
+            def windowOpened(self, _ev): return
+            def windowClosed(self, _ev): return
+            def windowMinimized(self, _ev): return
+            def windowNormalized(self, _ev): return
+            def windowActivated(self, _ev): return
+            def windowDeactivated(self, _ev): return
+            def disposing(self, _ev): return
+
+        try:
+            from com.sun.star.view import XSelectionChangeListener as _XSCListener
+        except Exception:
+            _XSCListener = None
+
+        class FormulaSelectionListener(unohelper.Base, *([_XSCListener] if _XSCListener else [])):
+            """Listens to cell selection changes and refreshes the dialog context."""
+            def selectionChanged(self, ev):
+                state = _job._formula_dialog_state
+                if state is None or state.get("schema_builder") is None:
+                    return
+                try:
+                    new_sel = ev.Source.getSelection()
+                    new_on_gen, new_sc = state["schema_builder"](new_sel)
+                    if new_on_gen is None:
+                        return
+                    state["on_generate"] = new_on_gen
+                    # Add separator to history so the user sees the context switch
+                    hl = state["history_lines"]
+                    if hl:
+                        hl.append(f"── {new_sc.splitlines()[0]} ──")
+                    try:
+                        dlg.getControl("lbl_ctx").getModel().Label = new_sc
+                        dlg.getControl("lst_history").getModel().StringItemList = tuple(hl)
+                        if hl:
+                            dlg.getControl("lst_history").selectItemPos(len(hl) - 1, True)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    _job._log(f"[formula_dlg] selectionChanged error: {e}")
+            def disposing(self, _ev): return
+
+        dlg.getControl("btn_send").addActionListener(GenerateListener())
+        dlg.getControl("btn_clear").addActionListener(ClearListener())
+        dlg.getControl("btn_open_prompts").addActionListener(OpenPromptsListener())
+        try:
+            dlg.getControl("lst_history").addItemListener(HistorySelectListener())
+        except Exception:
+            pass
+
+        # Position dialog — remember last position
+        _saved_x = self.get_config("formula_dialog_x", None)
+        _saved_y = self.get_config("formula_dialog_y", None)
+        toolkit = _cr("com.sun.star.awt.Toolkit")
+        frame = _cr("com.sun.star.frame.Desktop").getCurrentFrame()
+        window = frame.getContainerWindow() if frame else None
+        dlg.createPeer(toolkit, window)
+
+        try:
+            peer = dlg.getPeer()
+            if peer:
+                peer.addTopWindowListener(FormulaDialogTopWindowListener())
+        except Exception:
+            pass
+
+        # Register selection change listener on the Calc controller
+        try:
+            ctrl = frame.getController() if frame else None
+            if ctrl and schema_builder is not None:
+                sl = FormulaSelectionListener()
+                ctrl.addSelectionChangeListener(sl)
+                _job._formula_dialog_state["sel_listener"] = (sl, ctrl)
+        except Exception as e:
+            _job._log(f"[formula_dlg] sel_listener register error: {e}")
+
+        if _saved_x is not None and _saved_y is not None:
+            try:
+                dlg.setPosSize(int(_saved_x), int(_saved_y), WIDTH, HEIGHT, _POSSIZE)
+            except Exception:
+                pass
+        else:
+            if window:
+                ps = window.getPosSize()
+                cx = ps.X + (ps.Width - WIDTH) // 2
+                cy = ps.Y + (ps.Height - HEIGHT) // 4
+                dlg.setPosSize(cx, cy, WIDTH, HEIGHT, _POSSIZE)
+
+        # Select last item in history listbox
+        try:
+            if history_lines:
+                dlg.getControl("lst_history").selectItemPos(len(history_lines) - 1, True)
+        except Exception:
+            pass
+
+        dlg.setVisible(True)
+        self._formula_dialog = dlg
 
     def credentials_box(self, title="Device Management", login_label="Login", password_label="Mot de passe"):
         """Dialog with login + password and a show/hide toggle."""
