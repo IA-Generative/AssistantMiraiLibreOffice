@@ -1,6 +1,15 @@
 """Writer menu actions extracted from MainJob.trigger."""
 
+import re
+
 from .shared import apply_settings_result
+
+_RE_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_think_blocks(text):
+    """Remove <think>...</think> chain-of-thought blocks (e.g. deepseek-r1)."""
+    return _RE_THINK.sub("", text).lstrip("\n")
 
 
 def _check_stop_phrase(accumulated, chunk, stop_phrases):
@@ -162,8 +171,6 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
                     _make_extend_callback(text, cursor, controller, extend_done, _on_question_retry),
                 )
 
-                job.stream_request(retry_request, api_type, append_retry)
-
             text.insertString(cursor, "\n---fin-du-texte-généré---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
@@ -318,10 +325,11 @@ VERSION REFORMULÉE :
             "[END]",
             "---END---",
         ]
+        # Only true conversational questions — NOT response format prefixes like
+        # "Voici le texte reformulé" which are normal model output patterns.
         question_patterns = [
             "would you like", "do you want", "should i", "can i help",
             "voulez-vous", "souhaitez-vous", "dois-je", "puis-je",
-            "here is", "voici", "voilà",
         ]
 
         with _undo_context(model, "Reformuler"):
