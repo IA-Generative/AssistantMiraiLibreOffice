@@ -353,6 +353,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._secure_flow_lock = threading.RLock()
         self._secure_flow_init_error = None
         self._enrollment_dismissed = False
+        self._enrollment_wizard_active = False
+        self._enrollment_wizard_lock = threading.Lock()
         self._secure_legacy_fallback_logged = False
         self._last_loaded_ca_bundle = None
         self._last_ca_bundle_error = None
@@ -852,18 +854,26 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             if not isinstance(inner, dict):
                 return
             keys_to_sync = [
-                "llm_base_urls", "llm_default_models", "llm_api_tokens",
+                "llm_base_urls", "llm_api_tokens",
+                "llm_default_models",
                 "systemPrompt", "model", "api_type", "is_openwebui",
                 "openai_compatibility",
                 "telemetryEndpoint", "telemetryKey",
                 "telemetryAuthorizationType", "telemetrySel",
                 "relayAssistantBaseUrl",
+                "doc_url", "portal_url",
             ]
+            # Keys that are only written locally if the user has no local value yet
+            user_preference_keys = {"llm_default_models"}
             for key in keys_to_sync:
                 if key in inner:
                     val = inner[key]
                     current = self._get_config_from_file(key, None)
-                    if val != current and val != "":
+                    if key in user_preference_keys:
+                        # Only set from DM if user has no local preference
+                        if not current and val:
+                            self.set_config(key, val)
+                    elif val != current and val != "":
                         self.set_config(key, val)
             log_to_file("Bootstrap config persisted to local file")
         except Exception as e:
@@ -1326,7 +1336,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         return False
 
     def _show_enrollment_wizard(self):
-        """Multi-step first-time enrollment wizard with mascot and progress."""
+        """Multi-step enrollment wizard (steps 1-3 clickable, 4-5 automatic).
+
+        Returns (proceed, dialog, toolkit, update_fn, state) so the caller can
+        keep the dialog alive for the auth-wait and enrollment phases.
+        On cancellation or error falls back to (False, None, None, None, None).
+        """
         try:
             from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
             ctx = uno.getComponentContext()
@@ -1336,8 +1351,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             HEIGHT = 500
             MARGIN = 24
             IMG_SIZE = 130
-            BTN_W = 140
+            BTN_W = 175
             BTN_H = 32
+            TOTAL_STEPS = 5  # 3 clickable + 2 automatic
 
             wizard_steps = [
                 {
@@ -1352,42 +1368,25 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     ),
                     "btn_next": "Commencer",
                     "btn_cancel": "Plus tard",
-                    "step_label": "Étape 1/3 — Présentation",
+                    "step_label": "Étape 1/5 — Présentation",
                 },
                 {
                     "title": "Connexion sécurisée",
                     "text": (
-                        "Votre navigateur va s'ouvrir sur la page de connexion sécurisée MIrAI.\n\n"
-                        "Pourquoi ?\n"
-                        "  • Vérifier votre identité et obtenir un jeton de session chiffré\n"
-                        "  • Activer l'accès sécurisé à l'IA\n\n"
-                        "Vos données restent protégées : \n"
-                        "aucun mot de passe n'est stocké par le plugin.\n"
-                        "Après connexion, fermez la fenêtre et revenez dans LibreOffice."
+                        "Cliquez sur « Ouvrir le navigateur » pour vous connecter.\n\n"
+                        "  • Votre navigateur s'ouvrira sur la page de connexion MIrAI\n"
+                        "  • Après connexion, revenez dans LibreOffice\n"
+                        "  • L'enrôlement se fera automatiquement\n\n"
+                        "Vos données restent protégées :\n"
+                        "aucun mot de passe n'est stocké par le plugin."
                     ),
                     "btn_next": "Ouvrir le navigateur",
                     "btn_cancel": "Annuler",
-                    "step_label": "Étape 2/3 — Authentification",
-                },
-                {
-                    "title": "Enrôlement de votre poste",
-                    "text": (
-                        "Dernière étape : votre poste sera enregistré\n"
-                        "auprès du service MIrAI.\n\n"
-                        "Cela permet :\n"
-                        "  • La configuration automatique du plugin\n"
-                        "  • Les mises à jour de sécurité\n"
-                        "  • L'accès aux modèles IA autorisés\n\n"
-                        "L'enrôlement est automatique après la connexion.\n"
-                        "Vous n'avez rien d'autre à faire !"
-                    ),
-                    "btn_next": "C'est parti !",
-                    "btn_cancel": "Annuler",
-                    "step_label": "Étape 3/3 — Finalisation",
+                    "step_label": "Étape 2/5 — Authentification",
                 },
             ]
 
-            result = {"proceed": False, "step": 0}
+            result = {"proceed": False, "step": 0, "cancelled": False}
 
             dialog = create("com.sun.star.awt.UnoControlDialog", ctx)
             dialog_model = create("com.sun.star.awt.UnoControlDialogModel", ctx)
@@ -1460,12 +1459,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             "FontHeight": 9,
                         })
 
-            # Progress bar (simple colored bar)
+            # Progress bar
             bar_y = step_y + 18
             bar_w = WIDTH - MARGIN * 2
             add_control("wiz_bar_bg", "FixedText", MARGIN, bar_y,
                         bar_w, 4, {"Label": "", "BackgroundColor": 0xE0E0E0, "NoLabel": True})
-            progress_w = bar_w // 3
+            progress_w = bar_w // TOTAL_STEPS
             add_control("wiz_bar_fill", "FixedText", MARGIN, bar_y,
                         progress_w, 4, {"Label": "", "BackgroundColor": 0x2255AA, "NoLabel": True})
 
@@ -1502,28 +1501,71 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 step = wizard_steps[step_idx]
                 try:
                     dialog.getControl("wiz_title").getModel().Label = step["title"]
+                    dialog.getControl("wiz_title").getModel().TextColor = _UI["text"]
                     dialog.getControl("wiz_text").getModel().Label = step["text"]
                     dialog.getControl("wiz_step").getModel().Label = step["step_label"]
                     dialog.getControl("wiz_btn_next").getModel().Label = step["btn_next"]
+                    dialog.getControl("wiz_btn_next").getModel().Enabled = True
                     dialog.getControl("wiz_btn_cancel").getModel().Label = step["btn_cancel"]
-                    fill_w = (WIDTH - MARGIN * 2) * (step_idx + 1) // len(wizard_steps)
+                    dialog.getControl("wiz_btn_cancel").getModel().Enabled = True
+                    fill_w = (WIDTH - MARGIN * 2) * (step_idx + 1) // TOTAL_STEPS
                     dialog.getControl("wiz_bar_fill").setPosSize(
                         MARGIN, 0, fill_w, 4, SIZE)
                     toolkit.processEventsToIdle()
                 except Exception as e:
                     log_to_file(f"Wizard update step error: {str(e)}")
 
+            def _update_custom(title, text, step_label, step_num,
+                               btn_next=None, btn_cancel=None, title_color=None):
+                """Update wizard to an automatic step (steps 4-5).
+
+                setVisible() is unreliable after execute() has returned in UNO,
+                so visibility is controlled via Enabled only.
+                """
+                try:
+                    dialog.getControl("wiz_title").getModel().Label = title
+                    dialog.getControl("wiz_title").getModel().TextColor = (
+                        title_color if title_color is not None else _UI["text"]
+                    )
+                    dialog.getControl("wiz_text").getModel().Label = text
+                    dialog.getControl("wiz_step").getModel().Label = step_label
+                    fill_w = (WIDTH - MARGIN * 2) * step_num // TOTAL_STEPS
+                    dialog.getControl("wiz_bar_fill").setPosSize(MARGIN, 0, fill_w, 4, SIZE)
+                    dialog.getControl("wiz_btn_next").getModel().Label = btn_next if btn_next else ""
+                    dialog.getControl("wiz_btn_next").getModel().Enabled = bool(btn_next)
+                    dialog.getControl("wiz_btn_cancel").getModel().Label = btn_cancel if btn_cancel else ""
+                    dialog.getControl("wiz_btn_cancel").getModel().Enabled = bool(btn_cancel)
+                    # Center next button when cancel is hidden; push cancel off-screen
+                    try:
+                        if btn_cancel:
+                            dialog.getControl("wiz_btn_cancel").setPosSize(
+                                btn_cancel_x, btn_y, BTN_W, BTN_H, POSSIZE)
+                            dialog.getControl("wiz_btn_next").setPosSize(
+                                btn_next_x, btn_y, BTN_W, BTN_H, POSSIZE)
+                        else:
+                            # Move cancel off-screen so it doesn't overlap
+                            dialog.getControl("wiz_btn_cancel").setPosSize(
+                                -BTN_W - 10, btn_y, BTN_W, BTN_H, POSSIZE)
+                            dialog.getControl("wiz_btn_next").setPosSize(
+                                (WIDTH - BTN_W) // 2, btn_y, BTN_W, BTN_H, POSSIZE)
+                    except Exception:
+                        pass
+                    toolkit.processEventsToIdle()
+                except Exception as e:
+                    log_to_file(f"Wizard custom step error: {str(e)}")
+
             class WizardNextListener(unohelper.Base, XActionListener):
                 def actionPerformed(self, event):
                     result["step"] += 1
-                    if result["step"] >= len(wizard_steps):
+                    if result["step"] < len(wizard_steps):
+                        _update_step(result["step"])
+                    else:
+                        # All clickable steps done — end modal loop, keep dialog alive
                         result["proceed"] = True
                         try:
                             dialog.endExecute()
                         except Exception:
                             pass
-                    else:
-                        _update_step(result["step"])
 
                 def disposing(self, event):
                     pass
@@ -1531,6 +1573,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             class WizardCancelListener(unohelper.Base, XActionListener):
                 def actionPerformed(self, event):
                     result["proceed"] = False
+                    result["cancelled"] = True
                     try:
                         dialog.endExecute()
                     except Exception:
@@ -1548,19 +1591,33 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
             dialog.setVisible(True)
             dialog.execute()
+            # dialog.execute() returned — dialog is still alive, just the modal loop exited
+
+            if result.get("cancelled") or not result["proceed"]:
+                try:
+                    dialog.setVisible(False)
+                    dialog.dispose()
+                except Exception:
+                    pass
+                log_to_file("Enrollment wizard cancelled by user")
+                return False, None, None, None, None
+
+            log_to_file("Enrollment wizard steps 1-3 completed, keeping dialog for automatic steps")
+            # After execute() returns, UNO hides the dialog — re-show it for steps 4-5
             try:
-                dialog.dispose()
+                dialog.setVisible(True)
             except Exception:
                 pass
-            log_to_file(f"Enrollment wizard completed: proceed={result['proceed']}")
-            return result["proceed"]
+            return True, dialog, toolkit, _update_custom, result
+
         except Exception as e:
             log_to_file(f"Enrollment wizard failed, falling back to confirm: {str(e)}")
-            return self._confirm_message(
+            proceed = self._confirm_message(
                 "Connexion MIrAI requise",
                 "Vous allez être redirigé vers la page de connexion MIrAI.\n\n"
                 "Voulez-vous continuer ?"
             )
+            return proceed, None, None, None, None
 
     def _show_message_and_open_settings(self, title, message):
         try:
@@ -2018,8 +2075,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return None
 
         is_first_enrollment = not self._as_bool(self._get_config_from_file("enrolled", False))
+        wiz_dialog = wiz_toolkit = wiz_update = wiz_state = None
         if is_first_enrollment:
-            proceed = self._show_enrollment_wizard()
+            proceed, wiz_dialog, wiz_toolkit, wiz_update, wiz_state = self._show_enrollment_wizard()
         else:
             proceed = self._confirm_message(
                 "Connexion MIrAI requise",
@@ -2065,71 +2123,111 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         auth_cancel_event = threading.Event()
 
-        def _show_auth_wait_dialog():
+        # ── Étape 4/5 : attente du callback Keycloak ─────────────────────────
+        # Si le wizard est actif, on l'utilise comme dialog d'attente.
+        # Sinon on crée un dialog séparé (fallback re-login).
+        wait_dialog = None
+
+        if wiz_dialog and wiz_update and wiz_toolkit:
+            wiz_update(
+                "Connexion en cours...",
+                "Votre navigateur est ouvert sur la page de connexion.\n\n"
+                "Connectez-vous puis revenez dans LibreOffice.",
+                "Étape 4/5 — Connexion",
+                4,
+                btn_cancel="Annuler",
+            )
+
+            class _WizAuthCancelListener(unohelper.Base, XActionListener):
+                def actionPerformed(self, event):
+                    auth_cancel_event.set()
+                def disposing(self, event):
+                    return
+
             try:
-                from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
-                ctx = uno.getComponentContext()
-                create = ctx.getServiceManager().createInstanceWithContext
-                dialog = create("com.sun.star.awt.UnoControlDialog")
-                dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
-                dialog.setModel(dialog_model)
-                dialog.setVisible(False)
-                dialog.setTitle("")
-                dialog.setPosSize(0, 0, 300, 120, SIZE)
-
-                label_model = dialog_model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
-                dialog_model.insertByName("auth_wait_label", label_model)
-                label_model.Label = "Authentification Keycloak..."
-                label_model.NoLabel = True
-                label = dialog.getControl("auth_wait_label")
-                label.setPosSize(10, 24, 280, 20, POSSIZE)
-
-                btn_model = dialog_model.createInstance("com.sun.star.awt.UnoControlButtonModel")
-                dialog_model.insertByName("auth_wait_cancel", btn_model)
-                btn_model.Label = "Annuler"
-                btn = dialog.getControl("auth_wait_cancel")
-                btn.setPosSize(100, 72, 100, 26, POSSIZE)
-
-                frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
-                window = frame.getContainerWindow() if frame else None
-                toolkit = create("com.sun.star.awt.Toolkit")
-                dialog.createPeer(toolkit, window)
-                if window:
-                    ps = window.getPosSize()
-                    _x = ps.Width / 2 - 150
-                    _y = ps.Height / 2 - 60
-                    dialog.setPosSize(_x, _y, 0, 0, POS)
-                dialog.setVisible(True)
-                return dialog, label, btn, toolkit
-            except Exception:
-                return None, None, None, None
-
-        class CancelAuthListener(unohelper.Base, XActionListener):
-            def actionPerformed(self, event):
-                auth_cancel_event.set()
-            def disposing(self, event):
-                return
-
-        wait_dialog, wait_label, wait_cancel_btn, wait_toolkit = _show_auth_wait_dialog()
-        if wait_cancel_btn:
-            try:
-                wait_cancel_btn.addActionListener(CancelAuthListener())
+                wiz_dialog.getControl("wiz_btn_cancel").addActionListener(
+                    _WizAuthCancelListener()
+                )
             except Exception:
                 pass
-        tick_state = {"i": 0}
-        def _tick():
-            if not wait_label or not wait_toolkit:
-                return
-            tick_state["i"] += 1
-            dots = "." * ((tick_state["i"] % 3) + 1)
-            try:
-                if auth_cancel_event.is_set():
-                    wait_label.getModel().Label = "Annulation..."
-                else:
-                    wait_label.getModel().Label = f"Authentification Keycloak{dots}"
-                wait_toolkit.processEventsToIdle()
-            except Exception:
-                pass
+
+            tick_state = {"i": 0}
+
+            def _tick():
+                tick_state["i"] += 1
+                dots = "." * ((tick_state["i"] % 3) + 1)
+                try:
+                    wiz_dialog.getControl("wiz_text").getModel().Label = (
+                        f"En attente de la connexion{dots}\n\n"
+                        "Connectez-vous dans le navigateur puis revenez."
+                    )
+                    wiz_toolkit.processEventsToIdle()
+                except Exception:
+                    pass
+
+        else:
+            # Fallback : dialog séparé (re-login sans wizard)
+            def _show_auth_wait_dialog():
+                try:
+                    from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+                    ctx = uno.getComponentContext()
+                    create = ctx.getServiceManager().createInstanceWithContext
+                    dlg = create("com.sun.star.awt.UnoControlDialog")
+                    dlg_model = create("com.sun.star.awt.UnoControlDialogModel")
+                    dlg.setModel(dlg_model)
+                    dlg.setVisible(False)
+                    dlg.setTitle("")
+                    dlg.setPosSize(0, 0, 300, 120, SIZE)
+                    lbl_m = dlg_model.createInstance("com.sun.star.awt.UnoControlFixedTextModel")
+                    dlg_model.insertByName("auth_wait_label", lbl_m)
+                    lbl_m.Label = "Authentification Keycloak..."
+                    lbl_m.NoLabel = True
+                    lbl = dlg.getControl("auth_wait_label")
+                    lbl.setPosSize(10, 24, 280, 20, POSSIZE)
+                    btn_m = dlg_model.createInstance("com.sun.star.awt.UnoControlButtonModel")
+                    dlg_model.insertByName("auth_wait_cancel", btn_m)
+                    btn_m.Label = "Annuler"
+                    btn = dlg.getControl("auth_wait_cancel")
+                    btn.setPosSize(100, 72, 100, 26, POSSIZE)
+                    frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
+                    window = frame.getContainerWindow() if frame else None
+                    tk = create("com.sun.star.awt.Toolkit")
+                    dlg.createPeer(tk, window)
+                    if window:
+                        ps = window.getPosSize()
+                        dlg.setPosSize(ps.Width / 2 - 150, ps.Height / 2 - 60, 0, 0, POS)
+                    dlg.setVisible(True)
+                    return dlg, lbl, btn, tk
+                except Exception:
+                    return None, None, None, None
+
+            class CancelAuthListener(unohelper.Base, XActionListener):
+                def actionPerformed(self, event):
+                    auth_cancel_event.set()
+                def disposing(self, event):
+                    return
+
+            wait_dialog, wait_label, wait_cancel_btn, wait_toolkit = _show_auth_wait_dialog()
+            if wait_cancel_btn:
+                try:
+                    wait_cancel_btn.addActionListener(CancelAuthListener())
+                except Exception:
+                    pass
+            tick_state = {"i": 0}
+
+            def _tick():
+                if not wait_label or not wait_toolkit:
+                    return
+                tick_state["i"] += 1
+                dots = "." * ((tick_state["i"] % 3) + 1)
+                try:
+                    if auth_cancel_event.is_set():
+                        wait_label.getModel().Label = "Annulation..."
+                    else:
+                        wait_label.getModel().Label = f"Authentification Keycloak{dots}"
+                    wait_toolkit.processEventsToIdle()
+                except Exception:
+                    pass
 
         auth_timeout_seconds = 180
         try:
@@ -2145,18 +2243,53 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             tick=_tick,
             cancel_event=auth_cancel_event
         )
+
         if wait_dialog:
             try:
                 wait_dialog.setVisible(False)
                 wait_dialog.dispose()
             except Exception:
                 pass
+
+        def _wiz_dispose():
+            try:
+                wiz_dialog.setVisible(False)
+                wiz_dialog.dispose()
+            except Exception:
+                pass
+
+        def _wiz_show_error_and_wait(title, text, step_label="Étape 4/5 — Connexion"):
+            """Affiche une erreur dans le wizard, attend Fermer, ferme le dialog."""
+            if not wiz_dialog or not wiz_update or not wiz_toolkit:
+                return
+            wiz_update(title, text, step_label, 4, btn_next="Fermer")
+            wiz_state["cancelled"] = False
+            step_snap = wiz_state["step"]
+            while wiz_state["step"] == step_snap:
+                try:
+                    wiz_toolkit.processEventsToIdle()
+                except Exception:
+                    pass
+                time.sleep(0.1)
+            _wiz_dispose()
+
         if error == "cancelled_by_user":
             log_to_file("Authorization code flow cancelled by user")
+            _wiz_show_error_and_wait(
+                "Connexion annulée",
+                "L'authentification a été annulée.\n\nVous pouvez réessayer via le menu MIrAI.",
+            )
             return None
         if not code:
             log_to_file(f"Authorization code flow failed: {error}")
-            if error == "timeout":
+            if wiz_dialog:
+                err_txt = (
+                    "Délai dépassé. Vérifiez la redirection et réessayez."
+                    if error == "timeout"
+                    else f"Erreur : {error or 'inconnue'}. Vérifiez la configuration."
+                )
+                _wiz_show_error_and_wait("Connexion échouée", err_txt)
+            elif error == "timeout":
                 self._show_message(
                     "Connexion expirée",
                     "Le login Keycloak a expiré avant le retour navigateur.\n\n"
@@ -2182,7 +2315,85 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             except Exception as exc:
                 log_to_file(f"Post-SSO identity bind failed: {str(exc)}")
             try:
-                self._ensure_device_management_state_async()
+                if wiz_dialog and wiz_update and wiz_toolkit and wiz_state:
+                    # ── Étape 5/5 : enrôlement dans le wizard ────────────────
+                    wiz_update(
+                        "Enrôlement en cours...",
+                        "Enregistrement de votre poste auprès du service MIrAI...",
+                        "Étape 5/5 — Enrôlement",
+                        5,
+                    )
+                    enroll_result = {"done": False, "success": False, "error": ""}
+
+                    def _enroll_worker():
+                        try:
+                            self._ensure_device_management_state()
+                            enroll_result["success"] = self._as_bool(
+                                self._get_config_from_file("enrolled", False)
+                            )
+                            if not enroll_result["success"]:
+                                enroll_result["error"] = "Non confirmé par le serveur"
+                        except Exception as exc:
+                            enroll_result["success"] = False
+                            enroll_result["error"] = str(exc)
+                        finally:
+                            enroll_result["done"] = True
+
+                    threading.Thread(target=_enroll_worker, daemon=True).start()
+
+                    tick_i = [0]
+                    while not enroll_result["done"]:
+                        tick_i[0] += 1
+                        dots = "." * ((tick_i[0] % 3) + 1)
+                        try:
+                            wiz_dialog.getControl("wiz_text").getModel().Label = (
+                                f"Enregistrement en cours{dots}"
+                            )
+                            wiz_toolkit.processEventsToIdle()
+                        except Exception:
+                            pass
+                        time.sleep(0.4)
+
+                    # ── Résultat ──────────────────────────────────────────────
+                    wiz_state["cancelled"] = False
+                    step_snap = wiz_state["step"]
+                    if enroll_result["success"]:
+                        wiz_update(
+                            "Enrôlement terminé !",
+                            "Votre poste est enrôlé avec succès.\n\n"
+                            "IA'ssistant est prêt à l'emploi.\n\n"
+                            "Pour en savoir plus, rendez-vous dans\n"
+                            "le menu MIrAI → 📚 Documentation.",
+                            "Étape 5/5 — Terminé",
+                            5,
+                            btn_next="🚀 Commencer à utiliser",
+                            title_color=_UI["success"],
+                        )
+                    else:
+                        error_msg = enroll_result["error"] or "Erreur inconnue"
+                        wiz_update(
+                            "Enrôlement échoué",
+                            f"L'enrôlement a échoué.\n"
+                            f"Raison : {error_msg}\n\n"
+                            "Consultez le menu MIrAI → 📚 Documentation\n"
+                            "pour obtenir de l'aide.",
+                            "Étape 5/5 — Erreur",
+                            5,
+                            btn_next="Fermer",
+                            title_color=_UI["error"],
+                        )
+
+                    while wiz_state["step"] == step_snap:
+                        try:
+                            wiz_toolkit.processEventsToIdle()
+                        except Exception:
+                            pass
+                        time.sleep(0.1)
+
+                    _wiz_dispose()
+
+                else:
+                    self._ensure_device_management_state_async()
             except Exception as exc:
                 log_to_file(f"Post-SSO enroll scheduling failed: {str(exc)}")
             return access_token
@@ -2253,6 +2464,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file(f"Failed to initialize device management (async): {str(exc)}")
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _ensure_device_management_state_with_dialog(self):
+        """Enrollment feedback is now handled inside the wizard — delegates to async."""
+        self._ensure_device_management_state_async()
 
     def _ensure_device_management_state(self):
         if not self._device_management_enabled():
@@ -2666,12 +2881,20 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 if not self._needs_first_enrollment():
                     log_to_file("[ENROLL] Auto-check: already enrolled, skipping wizard")
                     return
-                log_to_file("[ENROLL] Auto-check: first enrollment needed, launching wizard")
-                if not self._run_first_enrollment():
-                    self._enrollment_dismissed = True
-                    log_to_file("[ENROLL] Auto-check: wizard cancelled by user")
-                else:
-                    log_to_file("[ENROLL] Auto-check: enrollment succeeded")
+                with self._enrollment_wizard_lock:
+                    if self._enrollment_wizard_active:
+                        log_to_file("[ENROLL] Auto-check: wizard already running, skipping")
+                        return
+                    self._enrollment_wizard_active = True
+                try:
+                    log_to_file("[ENROLL] Auto-check: first enrollment needed, launching wizard")
+                    if not self._run_first_enrollment():
+                        self._enrollment_dismissed = True
+                        log_to_file("[ENROLL] Auto-check: wizard cancelled by user")
+                    else:
+                        log_to_file("[ENROLL] Auto-check: enrollment succeeded")
+                finally:
+                    self._enrollment_wizard_active = False
             except Exception as e:
                 log_to_file(f"[ENROLL] Auto-check failed: {str(e)}")
 
@@ -5539,36 +5762,40 @@ EDITED VERSION:
             except Exception:
                 return list(self._FALLBACK_CALC_TRANSFORM_PROMPTS)
 
-        def _load_calc_suggestions(use_ai=False):
-            if suggestions_list:
+        def _set_suggestions_ui(suggestions):
+            if not suggestions_list:
+                return
+            try:
+                suggestions_list.removeItems(0, suggestions_list.getItemCount())
+            except Exception:
+                pass
+            if suggestions:
                 try:
-                    suggestions_list.removeItems(0, suggestions_list.getItemCount())
+                    suggestions_list.addItems(tuple(suggestions), 0)
                 except Exception:
                     pass
-            if use_ai:
-                if suggestions_list:
-                    try:
-                        suggestions_list.addItems(("Génération en cours...",), 0)
-                    except Exception:
-                        pass
-                suggestions = _generate_calc_suggestions(cell_content)
-            else:
-                suggestions = list(self._FALLBACK_CALC_TRANSFORM_PROMPTS)
-            if suggestions_list:
-                try:
-                    suggestions_list.removeItems(0, suggestions_list.getItemCount())
-                except Exception:
-                    pass
-                if suggestions:
-                    try:
-                        suggestions_list.addItems(tuple(suggestions), 0)
-                    except Exception:
-                        pass
 
-        _load_calc_suggestions(use_ai=False)
+        def _load_cached_suggestions():
+            try:
+                cached = self._get_config_from_file("calc_transform_suggestions_cache", None)
+                if isinstance(cached, list) and len(cached) >= 3:
+                    return cached
+            except Exception:
+                pass
+            return None
+
+        cached = _load_cached_suggestions()
+        _set_suggestions_ui(cached if cached else list(self._FALLBACK_CALC_TRANSFORM_PROMPTS))
+
         def _bg_ai_suggestions():
             try:
-                _load_calc_suggestions(use_ai=True)
+                suggestions = _generate_calc_suggestions(cell_content)
+                if suggestions and suggestions != list(self._FALLBACK_CALC_TRANSFORM_PROMPTS):
+                    try:
+                        self.set_config("calc_transform_suggestions_cache", suggestions)
+                    except Exception:
+                        pass
+                _set_suggestions_ui(suggestions)
             except Exception:
                 pass
         threading.Thread(target=_bg_ai_suggestions, daemon=True).start()
@@ -5635,7 +5862,7 @@ EDITED VERSION:
             def actionPerformed(self, event):
                 try:
                     threading.Thread(
-                        target=lambda: _load_calc_suggestions(use_ai=True),
+                        target=_bg_ai_suggestions,
                         daemon=True,
                     ).start()
                 except Exception:
@@ -6369,7 +6596,7 @@ EDITED VERSION:
             endpoint_value = str(self.get_config("llm_base_urls","http://127.0.0.1:5000/api"))
             api_key_value = str(self.get_config("llm_api_tokens",""))
             log_to_file(f"Settings open: llm_api_tokens length={len(api_key_value)}")
-            current_model = str(self.get_config("llm_default_models","")).strip()
+            current_model = str(self._get_config_from_file("llm_default_models","")).strip()
             is_openwebui = True
             models, model_descriptions = self._fetch_models_info(endpoint_value, api_key_value, is_openwebui)
             if current_model and current_model not in models:
@@ -7267,10 +7494,20 @@ EDITED VERSION:
             pass
 
         # First-time enrollment: intercept before any action
-        if not self._enrollment_dismissed and self._needs_first_enrollment():
-            if not self._run_first_enrollment():
-                self._enrollment_dismissed = True
-                return
+        # Informational/navigation actions bypass enrollment check
+        _enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings"}
+        if args not in _enrollment_bypass and not self._enrollment_dismissed and self._needs_first_enrollment():
+            with self._enrollment_wizard_lock:
+                if self._enrollment_wizard_active:
+                    log_to_file("[ENROLL] Trigger: wizard already running, skipping")
+                    return
+                self._enrollment_wizard_active = True
+            try:
+                if not self._run_first_enrollment():
+                    self._enrollment_dismissed = True
+                    return
+            finally:
+                self._enrollment_wizard_active = False
 
         desktop = self.ctx.ServiceManager.createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.ctx)

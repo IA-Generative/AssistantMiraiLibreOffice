@@ -123,6 +123,20 @@
           </node>
           <node oor:name="MA8" oor:op="replace">
             <prop oor:name="Title">
+              <value xml:lang="en-US">📚 Documentation</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?Documentation</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MA9" oor:op="replace">
+            <prop oor:name="Title">
               <value xml:lang="en-US">⚙️ Paramètres</value>
             </prop>
             <prop oor:name="URL">
@@ -210,6 +224,20 @@
             </prop>
           </node>
           <node oor:name="MB7" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">📚 Documentation</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?Documentation</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MB8" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">⚙️ Paramètres</value>
             </prop>

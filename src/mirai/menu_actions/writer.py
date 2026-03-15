@@ -3,7 +3,40 @@
 from .shared import apply_settings_result
 
 
-def _extend_selection(job, text, selection, text_range):
+def _scroll_to_cursor(controller, cursor):
+    """Move the view cursor to the text cursor so the document auto-scrolls."""
+    try:
+        view_cursor = controller.getViewCursor()
+        view_cursor.gotoRange(cursor.getEnd(), False)
+    except Exception:
+        pass
+
+
+def _undo_context(model, label):
+    """Context manager that groups all Writer insertions into one undo step."""
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        mgr = None
+        try:
+            mgr = model.getUndoManager()
+            mgr.enterUndoContext(label)
+        except Exception:
+            mgr = None
+        try:
+            yield
+        finally:
+            if mgr is not None:
+                try:
+                    mgr.leaveUndoContext()
+                except Exception:
+                    pass
+
+    return _ctx()
+
+
+def _extend_selection(job, text, selection, text_range, controller=None, model=None):
     job._send_telemetry(
         "ExtendSelection",
         {
@@ -26,13 +59,15 @@ def _extend_selection(job, text, selection, text_range):
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        text.insertString(cursor, "\n\n---début-du-texte-généré---\n", False)
+        with _undo_context(model, "Générer la suite"):
+            text.insertString(cursor, "\n\n---début-du-texte-généré---\n", False)
 
-        def append_text(chunk_text):
-            text.insertString(cursor, chunk_text, False)
+            def append_text(chunk_text):
+                text.insertString(cursor, chunk_text, False)
+                _scroll_to_cursor(controller, cursor)
 
-        job.stream_request(request, api_type, append_text)
-        text.insertString(cursor, "\n---fin-du-texte-généré---\n", False)
+            job.stream_request(request, api_type, append_text)
+            text.insertString(cursor, "\n---fin-du-texte-généré---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
         text_range.setString(text_range.getString() + ": " + str(e))
@@ -54,7 +89,7 @@ def _edit_selection(job, text, selection, text_range):
         text_range.setString(text_range.getString() + ": " + str(e))
 
 
-def _summarize_selection(job, text, selection, text_range):
+def _summarize_selection(job, text, selection, text_range, controller=None, model=None):
     job._send_telemetry(
         "SummarizeSelection",
         {
@@ -98,8 +133,6 @@ RÉSUMÉ :
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        text.insertString(cursor, "\n\n---début-du-résumé---\n", False)
-
         summary_text = ""
         stop_phrases = [
             "end of document",
@@ -108,26 +141,30 @@ RÉSUMÉ :
             "---END---",
         ]
 
-        def append_summary(chunk_text):
-            nonlocal summary_text
-            summary_text += chunk_text
+        with _undo_context(model, "Résumer"):
+            text.insertString(cursor, "\n\n---début-du-résumé---\n", False)
 
-            for stop_phrase in stop_phrases:
-                if stop_phrase.lower() in summary_text.lower():
-                    pos = summary_text.lower().find(stop_phrase.lower())
-                    summary_text = summary_text[:pos].rstrip()
-                    return
+            def append_summary(chunk_text):
+                nonlocal summary_text
+                summary_text += chunk_text
 
-            text.insertString(cursor, chunk_text, False)
+                for stop_phrase in stop_phrases:
+                    if stop_phrase.lower() in summary_text.lower():
+                        pos = summary_text.lower().find(stop_phrase.lower())
+                        summary_text = summary_text[:pos].rstrip()
+                        return
 
-        job.stream_request(request, api_type, append_summary)
-        text.insertString(cursor, "\n---fin-du-résumé---\n", False)
+                text.insertString(cursor, chunk_text, False)
+                _scroll_to_cursor(controller, cursor)
+
+            job.stream_request(request, api_type, append_summary)
+            text.insertString(cursor, "\n---fin-du-résumé---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
         text_range.setString(text_range.getString() + ": " + str(e))
 
 
-def _simplify_selection(job, text, selection, text_range):
+def _simplify_selection(job, text, selection, text_range, controller=None, model=None):
     job._send_telemetry(
         "SimplifySelection",
         {
@@ -179,8 +216,6 @@ VERSION REFORMULÉE :
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        text.insertString(cursor, "\n\n---reformulation-du-texte---\n", False)
-
         simplified_text = ""
         stop_phrases = [
             "end of document",
@@ -202,29 +237,33 @@ VERSION REFORMULÉE :
             "voilà",
         ]
 
-        def append_simplified(chunk_text):
-            nonlocal simplified_text
-            simplified_text += chunk_text
+        with _undo_context(model, "Reformuler"):
+            text.insertString(cursor, "\n\n---reformulation-du-texte---\n", False)
 
-            lower_text = simplified_text.lower()
-            for pattern in question_patterns:
-                if pattern in lower_text:
-                    cursor.gotoStart(False)
-                    cursor.gotoEnd(True)
-                    text.insertString(cursor, "[Le modèle a posé une question. Veuillez réessayer.]", False)
-                    simplified_text = ""
-                    return
+            def append_simplified(chunk_text):
+                nonlocal simplified_text
+                simplified_text += chunk_text
 
-            for stop_phrase in stop_phrases:
-                if stop_phrase.lower() in simplified_text.lower():
-                    pos = simplified_text.lower().find(stop_phrase.lower())
-                    simplified_text = simplified_text[:pos].rstrip()
-                    return
+                lower_text = simplified_text.lower()
+                for pattern in question_patterns:
+                    if pattern in lower_text:
+                        cursor.gotoStart(False)
+                        cursor.gotoEnd(True)
+                        text.insertString(cursor, "[Le modèle a posé une question. Veuillez réessayer.]", False)
+                        simplified_text = ""
+                        return
 
-            text.insertString(cursor, chunk_text, False)
+                for stop_phrase in stop_phrases:
+                    if stop_phrase.lower() in simplified_text.lower():
+                        pos = simplified_text.lower().find(stop_phrase.lower())
+                        simplified_text = simplified_text[:pos].rstrip()
+                        return
 
-        job.stream_request(request, api_type, append_simplified)
-        text.insertString(cursor, "\n---fin-de-reformulation---\n", False)
+                text.insertString(cursor, chunk_text, False)
+                _scroll_to_cursor(controller, cursor)
+
+            job.stream_request(request, api_type, append_simplified)
+            text.insertString(cursor, "\n---fin-de-reformulation---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
         text_range.setString(text_range.getString() + ": " + str(e))
@@ -235,9 +274,29 @@ def _open_mirai_website(job):
     try:
         import webbrowser
 
-        webbrowser.open("https://mirai.interieur.gouv.fr")
+        portal_url = job.get_config("portal_url", "")
+        if portal_url:
+            webbrowser.open(portal_url)
+        else:
+            webbrowser.open("https://mirai.interieur.gouv.fr")
     except Exception as e:
         job._log(f"Error opening website: {str(e)}")
+
+
+def _open_documentation(job):
+    job._send_telemetry("OpenDocumentation", {"action": "open_documentation"})
+    try:
+        import webbrowser
+
+        doc_url = job.get_config("doc_url", "")
+        if doc_url:
+            webbrowser.open(doc_url)
+            return
+        portal_url = job.get_config("portal_url", "")
+        if portal_url:
+            webbrowser.open(portal_url)
+    except Exception as e:
+        job._log(f"Error opening documentation: {str(e)}")
 
 
 def _open_settings(job, selection):
@@ -256,19 +315,22 @@ def handle_writer_action(job, args, model):
 
     job._log("Processing Writer document")
     text = model.Text
-    selection = model.CurrentController.getSelection()
+    ctrl = model.CurrentController
+    selection = ctrl.getSelection()
     text_range = selection.getByIndex(0)
 
     if args == "ExtendSelection":
-        _extend_selection(job, text, selection, text_range)
+        _extend_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "EditSelection":
         _edit_selection(job, text, selection, text_range)
     elif args == "SummarizeSelection":
-        _summarize_selection(job, text, selection, text_range)
+        _summarize_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "SimplifySelection":
-        _simplify_selection(job, text, selection, text_range)
+        _simplify_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "OpenmiraiWebsite":
         _open_mirai_website(job)
+    elif args == "Documentation":
+        _open_documentation(job)
     elif args == "MenuSeparator":
         return True
     elif args == "settings":
