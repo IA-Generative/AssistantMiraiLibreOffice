@@ -69,23 +69,26 @@ def _summarize_selection(job, text, selection, text_range):
             return
 
         prompt = (
-            """TEXT TO SUMMARIZE:
+            """TEXTE À RÉSUMER :
 """
             + original_text
             + """
 
-Create the shortest possible summary that captures the essential information.
-Be extremely concise - use the minimum words necessary.
-Do NOT ask any questions.
-Output ONLY the summary text without any introduction or explanation.
+Crée le résumé le plus court possible qui capture les informations essentielles.
+Sois extrêmement concis — utilise le minimum de mots nécessaire.
+Ne pose AUCUNE question.
+Produis UNIQUEMENT le texte du résumé, sans introduction ni explication.
+IMPORTANT : Réponds dans la MÊME LANGUE que le texte original.
 
-SUMMARY:
+RÉSUMÉ :
 """
         )
 
         system_prompt = (
-            "You are a professional summarizer. Create ultra-concise summaries "
-            "using the minimum words necessary while preserving key information."
+            "Tu es un résumeur professionnel. Tu crées des résumés ultra-concis "
+            "en utilisant le minimum de mots nécessaire tout en préservant "
+            "les informations clés. Tu réponds TOUJOURS dans la même langue "
+            "que le texte fourni."
         )
         max_tokens = max(100, len(original_text) // 4)
 
@@ -139,34 +142,34 @@ def _simplify_selection(job, text, selection, text_range):
             return
 
         prompt = (
-            """TEXT TO REFORMULATE:
+            """TEXTE À REFORMULER :
 """
             + original_text
             + """
 
-IMPORTANT: Rewrite this text in the SAME LANGUAGE as the original text.
-Rewrite in clear, simple language that everyone can understand.
-Use:
-- Short sentences
-- Common words (avoid jargon and technical terms)
-- Active voice
-- Concrete examples when possible
+Réécris ce texte dans un langage clair et simple compréhensible par tous.
+Utilise :
+- Des phrases courtes
+- Des mots courants (évite le jargon et les termes techniques)
+- La voix active
+- Des exemples concrets quand c'est possible
 
-CRITICAL:
-- Keep the SAME LANGUAGE as the original text
-- Do NOT translate to another language
-- Do NOT ask questions
-- Do NOT add explanations
-- Output ONLY the reformulated text
+RÈGLES :
+- Garde la MÊME LANGUE que le texte original
+- Ne traduis PAS dans une autre langue
+- Ne pose AUCUNE question
+- N'ajoute AUCUNE explication
+- Produis UNIQUEMENT le texte reformulé
 
-REFORMULATED VERSION:
+VERSION REFORMULÉE :
 """
         )
 
         system_prompt = (
-            "You are a plain language expert. Rewrite complex text in clear, "
-            "simple language accessible to all readers. ALWAYS use the same "
-            "language as the input text. Use short sentences and common words."
+            "Tu es un expert en langage simplifié. Tu réécris les textes complexes "
+            "dans un langage clair et simple accessible à tous. Tu utilises TOUJOURS "
+            "la même langue que le texte fourni. Tu utilises des phrases courtes "
+            "et des mots courants."
         )
         max_tokens = len(original_text) + job.get_config("edit_selection_max_new_tokens", 15000)
 
