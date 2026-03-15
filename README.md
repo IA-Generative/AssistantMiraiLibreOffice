@@ -1,271 +1,156 @@
-# mirai: A LibreOffice Writer extension for generative AI
+# MIrAI — Assistant LibreOffice
 
-## About
+Extension LibreOffice intégrant un assistant IA directement dans Writer et Calc. Elle se connecte à un backend compatible OpenAI (OpenWebUI, Ollama, Scaleway, etc.) et inclut un mécanisme d'enrôlement via Device Management pour préconfigurer les URLs, tokens et modèles.
 
-This LibreOffice extension integrates a writing assistant directly into Writer: it can **continue a text**, **edit a selection**, **summarize**, and **rephrase** without leaving the document. It connects to an OpenAI‑compatible backend (OpenWebUI, Ollama, etc.) and preserves formatting as much as possible. It also includes a **simplified enrollment mechanism** via Device Management to preconfigure key parameters (base URLs, API tokens, default models, etc.).
-
-This is a LibreOffice Writer extension that enables inline generative editing with AI language models. It's compatible with OpenAI API, OpenWebUI, Ollama, and other OpenAI-compatible endpoints.
-
-**Origin and Attribution:**
-
-This application is a beta version developed as part of the French Ministry of Interior's mirai program. It is based on the work of **John Balis**, author of the **mirai extension**, which served as the technical foundation for this adaptation.
-
-For complete information about sources and attributions, please refer to `registration/license.txt`.
-
-Key repositories:
-- Original mirai project by John Balis: [https://github.com/balisujohn/mirai](https://github.com/balisujohn/mirai)
-- LibreOffice code portions (MPL 2.0): [https://gerrit.libreoffice.org/c/core/+/159938](https://gerrit.libreoffice.org/c/core/+/159938)
-- mirai experimental version source code: [https://github.com/IA-Generative/AssistantmiraiLibreOffice](https://github.com/IA-Generative/AssistantmiraiLibreOffice)
+**Origine :** cette application est une version bêta développée dans le cadre du programme MIrAI du ministère de l'Intérieur. Elle s'appuie sur le travail de **John Balis**, auteur de l'extension [mirai](https://github.com/balisujohn/mirai), et sur des portions de code LibreOffice (MPL 2.0 — [gerrit.libreoffice.org](https://gerrit.libreoffice.org/c/core/+/159938)). Voir `registration/license.txt` pour les attributions complètes.
 
 ---
 
-## Résumé en français
+## Table des matières
 
-Cette extension LibreOffice intègre un assistant d’écriture : génération de suite, modification, résumé et reformulation directement dans Writer. Elle se connecte à un backend compatible OpenAI/OpenWebUI et inclut un enrôlement simplifié via Device Management. Les prochaines étapes sont l’enrôlement silencieux, la récupération automatique du token OpenWebUI, l’externalisation de tous les prompts et la mise à jour automatique de l’extension.
-
-
-## Table of Contents
-
-*   [About](#about)
-*   [Table of Contents](#table-of-contents)
-*   [Features](#features)
-    *   [Continue the selection](#-continue-the-selection)
-    *   [Edit the selection](#-edit-the-selection)
-    *   [Summarize the selection](#-summarize-the-selection)
-    *   [Rephrase the selection](#-rephrase-the-selection)
-*   [Setup](#setup)
-    *   [LibreOffice Extension Installation](#libreoffice-extension-installation)
-    *   [Backend Setup](#backend-setup)
-        *   [text-generation-webui](#text-generation-webui)
-        *   [Ollama](#ollama)
-        *   [OpenWebUI](#openwebui)
-*   [Settings](#settings)
-*   [Contributing](#contributing)
-    *   [Local Development Setup](#local-development-setup)
-    *   [Building the Extension Package](#building-the-extension-package)
-*   [License](#license)
-*   [Grafana Monitoring Pack (Device Management)](#grafana-monitoring-pack-device-management)
-*   [Update History (Summary)](#update-history-summary)
-*   [Device Management (Status & TODO)](#device-management-status--todo)
-*   [Secure Bootstrap / Relay Flow](#secure-bootstrap--relay-flow)
-*   [Résumé en français](#résumé-en-français)
-
-
-## Repository Structure (for contributors)
-
-The repository is organized to separate extension resources, Python code, and local configuration:
-
-- `src/mirai/entrypoint.py`: main extension implementation (`MainJob`, UNO registration)
-- `src/mirai/menu_actions/`: menu action handlers split by context (`writer.py`, `calc.py`, `shared.py`)
-- `main.py`: thin compatibility shim required by LibreOffice Python loader
-- `oxt/`: static files packaged at the root of the `.oxt` (Addons, icons, manifest, assets)
-- `config/config.default.example.json`: committable example defaults
-- `config/profiles/`: predefined profile configs (`docker`, `kubernetes`, `dgx`, `local-llm`)
-- `config/config.default.json`: local real defaults (ignored by git)
-- `scripts/00-clean-install.sh`: **reset to clean-install state** (purge config, logs, extension temp cache)
-- `scripts/02-build-oxt.sh`: build script producing `dist/mirai.oxt`
-- `scripts/04-repack-oxt.sh`: utility to inject `config.default.json` in an existing `.oxt`
-- `scripts/01-init-default-config.sh`: initialize/update default Keycloak/proxy/bootstrap keys in `config/config.default.json`
-- `scripts/05-update-plugin.sh`: one-command build + install + restart
-- `scripts/06-use-config-profile.sh`: switch local config to a target profile
-- `scripts/07-package-release.sh`: package OXT with a specific profile (production-friendly)
-### Script quickstart
-
-```bash
-# 0) Clean install — reset config, logs, and extension cache (use before a fresh enrollment test)
-./scripts/00-clean-install.sh             # keep extension installed
-./scripts/00-clean-install.sh --uninstall # also remove the extension
-
-# 1) Initialize default config keys (interactive)
-./scripts/01-init-default-config.sh --interactive
-
-# 2) Build OXT from source tree
-./scripts/02-build-oxt.sh
-
-# 3) Run local checks
-./scripts/03-test-local.sh
-
-# 4) Repack an existing OXT with current config defaults
-./scripts/04-repack-oxt.sh --src ./dist/mirai.oxt --out ./dist/mirai.oxt
-
-# 5) Build + install + restart LibreOffice
-./scripts/05-update-plugin.sh
-
-# 6) Switch local config profile quickly
-./scripts/06-use-config-profile.sh --list
-./scripts/06-use-config-profile.sh --profile docker --print
-
-# 7) Build a profile-specific release package
-./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt
-```
-
-#### Workflow clean install + réenrôlement
-
-```bash
-# 1. Purger et désinstaller
-./scripts/00-clean-install.sh --uninstall
-
-# 2. Rebuilder + réinstaller + relancer LibreOffice
-./scripts/dev-launch.sh
-```
-
-### Config profiles and release workflow
-
-Predefined profiles:
-- `docker`: local bootstrap (`http://localhost:3001`, `profile=dev`)
-- `kubernetes`: generic k8s endpoint template (`https://bootstrap.fake-domain.name`, `profile=prod`)
-- `dgx`: DGX route (`https://onyxia.gpu.minint.fr/bootstrap`, `profile=prod`)
-- `local-llm`: 100% local fallback (bootstrap disabled, fixed local endpoint/model)
-
-Simple developer mode switch:
-```bash
-./scripts/06-use-config-profile.sh --profile docker
-./scripts/02-build-oxt.sh --install --restart
-```
-
-Production packaging (recommended):
-```bash
-# 1) Build with DGX profile without mutating local config
-./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt
-
-# 2) Optional: install locally to smoke-test
-./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt --install --restart
-```
-
-100% local fallback (no bootstrap):
-```bash
-./scripts/06-use-config-profile.sh --profile local-llm --print
-./scripts/02-build-oxt.sh --install --restart
-```
-
-Notes:
-- `dist/mirai.oxt` is ignored by git.
-- Keep secrets out of profile files; secrets should come from bootstrap after login/enroll.
-
-
-## Features
-
-This extension provides four powerful features for LibreOffice Writer, allowing you to integrate generative AI directly into your writing workflow:
-
-### ✨ Continue the selection
-
-**Keyboard shortcut:** `CTRL + Q`
-
-This feature uses a language model to predict and generate what follows the selected text. Common use cases include:
-
-*   **Creative writing**: Continue a story, narrative, or develop an idea
-*   **Writing assistance**: Complete an email, letter, or professional document
-*   **List generation**: Add items to a list of tasks, ideas, or actions
-*   **Brainstorming**: Explore different ways to continue a text
-
-**Result:** The generated text is appended immediately after your selection, preserving formatting.
+- [Fonctionnalités Writer](#fonctionnalités-writer)
+- [Fonctionnalités Calc](#fonctionnalités-calc)
+- [Comportement général](#comportement-général)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Structure du dépôt](#structure-du-dépôt)
+- [Scripts de développement](#scripts-de-développement)
+- [Télémétrie et monitoring](#télémétrie-et-monitoring)
+- [Device Management et bootstrap](#device-management-et-bootstrap)
+- [Historique des mises à jour](#historique-des-mises-à-jour)
+- [License](#license)
 
 ---
 
-### ✏️ Edit the selection
+## Fonctionnalités Writer
 
-**Keyboard shortcut:** `CTRL + E`
+### ✨ Continuer la sélection — `Ctrl+Q`
 
-This command opens a dialog where you can specify how to modify the selected text. The AI then transforms your text according to your instructions.
+Génère la suite naturelle du texte sélectionné. Le texte produit est inséré directement après la sélection, sans délimiteurs. Cas d'usage : écriture créative, complétion d'emails, listes d'idées.
 
-**Common use cases:**
+### ✏️ Modifier la sélection — `Ctrl+E`
 
-*   **Tone adjustment**: Make an email more formal or more casual
-*   **Translation**: Translate text into another language
-*   **Style correction**: Improve grammar, spelling, or style
-*   **Adaptation**: Change the level of language (technical, simplified, academic)
-*   **Creative revision**: Rewrite a scene in a different style or point of view
+Ouvre une boîte de dialogue permettant de saisir des instructions (traduction, reformulation formelle, correction stylistique…). Le résultat est inséré après la sélection avec des délimiteurs visibles :
 
-**How to use:**
-1. Select the text to modify
-2. Press `CTRL + E`
-3. Enter your instructions (e.g., "Translate to English", "Make it more professional", "Fix typos")
-4. The modified text is added after your selection with clear delimiters
-
-**Result:** The original text is preserved, and the modification is appended below with visible delimiters:
 ```
 ---modification-de-la-sélection---
-[Your edited text appears here]
+[texte modifié]
 ---fin-de-la-modification---
 ```
 
----
+### 📝 Résumer la sélection — `Ctrl+R`
 
-### 📝 Summarize the selection
+Génère un résumé concis du texte sélectionné. Utile pour synthétiser des rapports, extraire les points clés ou préparer un support de présentation. Résultat inséré avec délimiteurs :
 
-**Keyboard shortcut:** `CTRL + R`
-
-This feature generates a concise summary of the selected text. Ideal for extracting key points from long documents, preparing a synthesis, or getting a quick overview.
-
-**Use cases:**
-
-*   **Document synthesis**: Summarize a report, article, or meeting note
-*   **Information extraction**: Get essential points from long text
-*   **Presentation prep**: Create slide bullet points from detailed content
-*   **Quick review**: Check the main content of a text quickly
-
-**How to use:**
-1. Select the text to summarize
-2. Press `CTRL + R`
-3. The summary is automatically generated and added after your selection
-
-**Result:** The summary is inserted with distinct delimiters:
 ```
 ---début-du-résumé---
-[The concise summary appears here]
+[résumé]
 ---fin-du-résumé---
 ```
 
----
+### 💬 Simplifier la sélection — `Ctrl+L`
 
-### 💬 Rephrase the selection
+Reformule le texte sélectionné en langage clair et accessible, en conservant le sens. Idéal pour vulgariser un contenu technique ou réglementaire. Résultat inséré avec délimiteurs :
 
-**Keyboard shortcut:** `CTRL + L`
-
-This feature rewrites the selected text in a clearer, more accessible form while preserving the original meaning. Perfect for improving readability and comprehension.
-
-**Use cases:**
-
-*   **Simplification**: Make technical text accessible to a general audience
-*   **Clarification**: Improve comprehension of complex text
-*   **Popularization**: Adapt specialized content for non‑experts
-*   **Communication improvement**: Make writing more direct and clear
-
-**How to use:**
-1. Select the text to rephrase
-2. Press `CTRL + L`
-3. The rephrased text is generated in the same language as your text
-
-**Result:** The rephrasing is added with delimiters:
 ```
 ---début-de-la-reformulation---
-[Your clearer rephrased text appears here]
+[texte simplifié]
 ---fin-de-la-reformulation---
 ```
 
----
+### 📄 Modifier tout le document — menu MIrAI
 
-### 📚 Documentation
+Applique une instruction à l'ensemble du document par chunks successifs via un protocole `<<<FIND>>>…<<<REPLACE>>>…<<<END>>>`. Utile pour une traduction complète, une harmonisation de style, etc.
 
-Access the extension documentation directly from the MIrAI menu. The URL is configurable via the bootstrap server (`doc_url` key) with a fallback to `portal_url`. If neither is set, the menu item does nothing silently.
+### 📚 Documentation — menu MIrAI
 
----
-
-### 🌐 Access the mirai website
-
-Access the official mirai website (https://mirai.interieur.gouv.fr) from the extension menu for more information about the program and available tools. The URL is configurable via the bootstrap server (`portal_url` key); if absent it falls back to the hardcoded URL above.
+Ouvre l'URL de documentation configurée via le bootstrap (`doc_url`) avec repli sur `portal_url`. Sans-op silencieux si aucune URL n'est définie.
 
 ---
 
-### ⚙️ Settings
+## Fonctionnalités Calc
 
-Configure the extension to your needs: LLM base URL(s), default model(s), API token(s), and advanced options.
+### 🧮 Générer une formule — `Ctrl+Shift+F`
 
-**Proxy support**
+Génère une formule LibreOffice Calc à partir d'une description en langage naturel. L'extension injecte automatiquement le contexte de la feuille (en-têtes de colonnes, plage de données, valeurs de la ligne courante) dans le prompt pour que le modèle produise une formule précise et directement applicable.
 
-The extension can route all HTTP requests through a proxy (including Device Management, model discovery, and API calls). Proxy settings are available in the Preferences dialog via the **Proxy...** button.
+**Fonctionnement :**
+1. Sélectionner la cellule cible
+2. Appuyer sur `Ctrl+Shift+F`
+3. Décrire la formule souhaitée (ex. : « somme des ventes si région = Nord »)
+4. La formule générée est insérée dans la cellule
 
-Config keys (in `config.json` / `config.default.json`):
+**Boucle de correction automatique :** si la formule insérée retourne une erreur (`#VALEUR!`, `#REF!`…), l'extension détecte l'erreur, la renvoie au modèle et redemande une correction (jusqu'à 3 tentatives).
+
+**Nettoyage markdown :** les artefacts de formatage LLM (`**`, `_`, `` ` ``, `#`) sont supprimés avant insertion.
+
+---
+
+## Comportement général
+
+### Préservation du texte original
+
+Les fonctions **Modifier**, **Résumer** et **Simplifier** n'effacent jamais le texte original : le résultat est ajouté après la sélection avec des délimiteurs. Seul **Continuer** insère directement (c'est son rôle).
+
+### Gestion des modèles
+
+- **Modèles deepseek-r1** : les balises `<think>…</think>` (chaîne de raisonnement) sont automatiquement filtrées avant insertion dans le document.
+- **Détection de question** : si le modèle répond par une question au lieu d'exécuter la tâche, l'extension le détecte et propose de reformuler l'instruction.
+- **Retry automatique** : sur `extend_selection`, si le modèle pose une question, un second appel est effectué avec un prompt plus directif.
+
+### Limitations connues
+
+- Certains modèles modifient les sauts de ligne ou la ponctuation
+- Les modèles très verbeux (`holo2-30b-a3b`) peuvent épuiser le budget de tokens en préambule — voir `tests/results/scaleway_model_comparison.md`
+- Performances optimales en français et en anglais
+
+---
+
+## Installation
+
+### Prérequis
+
+- LibreOffice 7.x ou supérieur
+- Python 3.9+ (inclus avec LibreOffice)
+- Accès à un backend compatible OpenAI
+
+### Installation de l'extension
+
+```bash
+# 1. Construire le paquet OXT
+./scripts/02-build-oxt.sh
+
+# 2. Installer + relancer LibreOffice
+./scripts/05-update-plugin.sh
+```
+
+Ou via l'interface : **Outils → Gestionnaire d'extensions → Ajouter** → sélectionner `dist/mirai.oxt`.
+
+### Installation rapide (développement)
+
+```bash
+./scripts/dev-launch.sh   # build + install + restart LibreOffice
+```
+
+---
+
+## Configuration
+
+### Via l'interface
+
+**Menu MIrAI → Paramètres** : URL du backend, modèle par défaut, token API, proxy.
+
+### Fichiers de configuration
+
+| Fichier | Rôle |
+| --- | --- |
+| `config/config.default.json` | Valeurs par défaut packagées dans l'OXT |
+| `config/config.default.example.json` | Exemple committable (sans secrets) |
+| `config/profiles/` | Profils prédéfinis (`docker`, `kubernetes`, `dgx`, `local-llm`) |
+
+Au premier lancement, `config.json` est initialisé depuis `config.default.json` puis mis à jour par le bootstrap Device Management.
+
+### Proxy
 
 ```json
 {
@@ -277,190 +162,134 @@ Config keys (in `config.json` / `config.default.json`):
 }
 ```
 
-Notes:
-* If `proxy_username` or `proxy_password` is empty, proxy authentication is **not** enabled.
-* `proxy_allow_insecure_ssl` mirrors the `-k` behavior (HTTPS without certificate validation).
-* On startup, the extension checks LibreOffice proxy settings and warns if they differ from MIrAI preferences.
-* The Proxy dialog lets you test the connection and copy LibreOffice proxy values.
+Si `proxy_username` / `proxy_password` sont vides, l'authentification proxy est désactivée. Au démarrage, l'extension vérifie la cohérence avec les paramètres proxy de LibreOffice.
+
+### Profils de déploiement
+
+| Profil | Usage |
+| --- | --- |
+| `docker` | Bootstrap local (`http://localhost:3001`, `profile=dev`) |
+| `kubernetes` | Template k8s générique |
+| `dgx` | Route DGX (`https://onyxia.gpu.minint.fr/bootstrap`) |
+| `local-llm` | 100 % local, bootstrap désactivé |
+
+```bash
+./scripts/06-use-config-profile.sh --profile docker
+./scripts/02-build-oxt.sh --install --restart
+```
+
+Packaging production (sans muter la config locale) :
+```bash
+./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt
+```
 
 ---
 
-## Feature behavior
+## Structure du dépôt
 
-### Preservation of original text
+```
+src/mirai/
+├── entrypoint.py              # MainJob, enregistrement UNO, chunking whole-doc
+├── calc_prompt_function.py    # Fonction Calc add-in (XPromptFunction)
+└── menu_actions/
+    ├── writer.py              # Extend, Edit, Summarize, Simplify, WholeDoc
+    ├── calc.py                # GenerateFormula, contexte schéma, retry erreur
+    └── shared.py              # Utilitaires partagés
 
-**Important:** The “Edit”, “Summarize”, and “Rephrase” features **never delete** your original text. They append the generated result right after your selection with clear delimiters. This lets you:
+oxt/                           # Fichiers statiques packagés dans l'OXT
+├── Addons.xcu                 # Menus et raccourcis
+├── CalcAddIn.xcu              # Déclaration fonction Calc
+├── Jobs.xcu
+└── META-INF/manifest.xml
 
-- Compare the original and generated versions
-- Choose the version that suits you
-- Keep a trace of changes
-- Manually remove what you don’t want
+config/
+├── config.default.example.json
+└── profiles/                  # docker | kubernetes | dgx | local-llm
 
-Only “Continue the selection” inserts text without delimiters because it is designed to flow naturally.
+scripts/
+├── 00-clean-install.sh        # Purge config, logs, cache extension
+├── 01-init-default-config.sh  # Init clés Keycloak/proxy/bootstrap
+├── 02-build-oxt.sh            # Produit dist/mirai.oxt
+├── 03-test-local.sh           # Tests unitaires
+├── 04-repack-oxt.sh           # Injecte config dans un OXT existant
+├── 05-update-plugin.sh        # Build + install + restart
+├── 06-use-config-profile.sh   # Switche le profil local
+└── 07-package-release.sh      # Package release avec profil cible
 
-### Formatting preservation
-
-The extension **preserves formatting as much as possible** (bold, italics, colors, etc.). However, depending on the model used (OpenAI, Mistral, Ollama, OpenWebUI, etc.), formatting may vary slightly.
-
-### ⚠️ Known limitations
-
-- **Formatting**: Some models may change line breaks or punctuation
-- **Model behavior**: The AI may sometimes ask questions instead of following instructions; the extension detects this and asks you to reformulate your request
-- **Language**: Models generally perform best in English and French
+tests/
+├── unit/                      # Tests unitaires (pytest, sans LibreOffice)
+├── fixtures/                  # Fichiers ODS de test
+├── sim_scaleway_models.py     # Benchmark headless des modèles Scaleway
+└── results/                   # Rapports de benchmark
+    ├── scaleway_model_comparison.md
+    └── gpt_oss_production_tokens.md
+```
 
 ---
 
-## Telemetry and monitoring
+## Scripts de développement
+
+```bash
+# Reset complet (avant un test d'enrôlement)
+./scripts/00-clean-install.sh             # garde l'extension installée
+./scripts/00-clean-install.sh --uninstall # retire aussi l'extension
+
+# Workflow réenrôlement
+./scripts/00-clean-install.sh --uninstall
+./scripts/dev-launch.sh
+
+# Tests unitaires
+./scripts/03-test-local.sh
+# ou directement :
+python -m pytest tests/unit/ -v
+
+# Benchmark modèles Scaleway (sans LibreOffice)
+python tests/sim_scaleway_models.py
+python tests/sim_scaleway_models.py --no-wikipedia   # textes de repli
+python tests/sim_scaleway_models.py --max-tokens 2000 --models gpt-oss-120b
+```
+
+---
+
+## Télémétrie et monitoring
 
 ### OpenTelemetry
 
-The extension now integrates **OpenTelemetry** for usage tracking and monitoring. This feature collects anonymized traces about feature usage.
-
-**⚡ Asynchronous telemetry (non‑blocking):**
-
-Telemetry calls are **fully asynchronous** and run in separate daemon threads. This ensures:
-
-- ✅ The plugin **never blocks** while waiting for telemetry
-- ✅ Features remain **responsive** even if the backend is down
-- ✅ The user experiences **no slowdown** (5s timeout in a separate thread)
-- ✅ Telemetry errors do not affect normal operation
-- ✅ Threads terminate automatically when LibreOffice closes
-
-**Telemetry configuration:**
-
-In your `mirai.json` (or config file), you can configure:
+Les appels de télémétrie sont **entièrement asynchrones** (threads daemon) : l'extension ne bloque jamais en attente de la télémétrie, même si le backend est indisponible.
 
 ```json
 {
   "telemetryEnabled": true,
   "telemetryEndpoint": "https://traces.cpin.numerique-interieur.com/v1/traces",
   "telemetryAuthorizationType": "Basic",
-  "telemetryKey": "your-base64-encoded-key",
+  "telemetryKey": "votre-clé-base64",
   "telemetrylogJson": false
 }
 ```
 
-**Available parameters:**
+| Paramètre | Description | Défaut |
+| --- | --- | --- |
+| `telemetryEnabled` | Activer/désactiver | `true` |
+| `telemetryEndpoint` | URL OpenTelemetry/Tempo | *(voir ci-dessus)* |
+| `telemetryAuthorizationType` | `Basic` ou `Bearer` | `Basic` |
+| `telemetryKey` | Clé base64 | `""` |
+| `telemetrylogJson` | Logs détaillés (debug) | `false` |
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `telemetryEnabled` | Enable/disable telemetry | `true` |
-| `telemetryEndpoint` | OpenTelemetry/Tempo endpoint URL | `https://traces.cpin.numerique-interieur.com/v1/traces` |
-| `telemetryAuthorizationType` | Authentication type | `Basic` or `Bearer` |
-| `telemetryKey` | Base64 auth key | `""` (uses obfuscated key) |
-| `telemetrylogJson` | Detailed logs with full HTTP headers | `false` (enable for debug) |
-| `telemetrySel` | Telemetry salt | `mirai_salt` |
-| `telemetryHost` | Custom host | `""` (optional) |
-| `telemetryFormatProtobuf` | Protobuf format | `false` (not implemented) |
+### Grafana (Device Management)
 
----
+Utiliser l'endpoint `/metrics` de Device Management comme source Prometheus. Dashboards recommandés : `API/Ingress`, `Queue/Workers`, `Capacity/HPA`.
 
-## Grafana Monitoring Pack (Device Management)
+Métriques clés :
+- `dm_queue_pending_jobs`, `dm_queue_dead_jobs`, `dm_queue_oldest_pending_age_seconds`
+- `nginx_ingress_controller_requests`, `kube_horizontalpodautoscaler_status_current_replicas`
 
-For production monitoring, use the Device Management `/metrics` endpoint as a Prometheus source and build a minimal Grafana pack with 3 dashboards:
-
-1. `API/Ingress`
-2. `Queue/Workers`
-3. `Capacity/HPA`
-
-Recommended dashboard variables:
-- `$cluster`
-- `$namespace` (default: `bootstrap`)
-- `$host` (example: `bootstrap.fake-domain.name`)
-
-### Core metrics to include
-
-From Device Management `/metrics`:
-- `dm_metrics_scrape_success`
-- `dm_queue_available`
-- `dm_queue_pending_jobs`
-- `dm_queue_processing_jobs`
-- `dm_queue_dead_jobs`
-- `dm_queue_oldest_pending_age_seconds`
-- `dm_queue_stale_processing_jobs`
-- `dm_queue_done_jobs`
-
-From ingress / k8s metrics (if available in your Prometheus stack):
-- `nginx_ingress_controller_requests`
-- `nginx_ingress_controller_request_duration_seconds_bucket`
-- `kube_horizontalpodautoscaler_status_current_replicas`
-- `kube_horizontalpodautoscaler_status_desired_replicas`
-
-### PromQL examples (ready to copy)
-
-Queue health:
-```promql
-dm_queue_pending_jobs
-dm_queue_processing_jobs
-dm_queue_dead_jobs
-dm_queue_oldest_pending_age_seconds
-dm_queue_stale_processing_jobs
-```
-
-Ingress enroll error rate:
-```promql
-sum(rate(nginx_ingress_controller_requests{host="$host",path="/enroll",status=~"5.."}[5m]))
-/
-sum(rate(nginx_ingress_controller_requests{host="$host",path="/enroll"}[5m]))
-```
-
-Ingress enroll p95 latency:
-```promql
-histogram_quantile(
-  0.95,
-  sum(rate(nginx_ingress_controller_request_duration_seconds_bucket{host="$host",path="/enroll"}[5m])) by (le)
-)
-```
-
-HPA scaling view:
-```promql
-kube_horizontalpodautoscaler_status_current_replicas{namespace="$namespace",horizontalpodautoscaler=~"device-management|queue-worker"}
-kube_horizontalpodautoscaler_status_desired_replicas{namespace="$namespace",horizontalpodautoscaler=~"device-management|queue-worker"}
-```
-
-### Alert set (minimum)
-
-- `QueueBacklogHigh`: `dm_queue_pending_jobs > 1000` for 10m
-- `QueueOldestPendingTooHigh`: `dm_queue_oldest_pending_age_seconds > 60` for 10m
-- `QueueStaleProcessing`: `dm_queue_stale_processing_jobs > 0` for 5m
-- `QueueDeadLetters`: `dm_queue_dead_jobs > 0` for 5m
-- `MetricsScrapeFailed`: `dm_metrics_scrape_success == 0` for 2m
-- `Enroll5xxRateHigh`: enroll 5xx ratio > 1% for 10m
-
-Tip: version your Grafana JSON dashboards and alert rules in the same repo as Device Management infra manifests.
+Alertes minimales : `QueueBacklogHigh` (> 1000 pendant 10 min), `QueueDeadLetters` (> 0 pendant 5 min), `Enroll5xxRateHigh` (ratio > 1 % pendant 10 min).
 
 ---
 
-## Update History (Summary)
+## Device Management et bootstrap
 
-This project has gone through many iterations. Here is a summary of the most recent changes:
-
-- **Configuration**: `config.default.json` is now packaged with the extension, with auto‑init of the user `config.json` if missing or empty, and merge/upgrade based on `configVersion`.
-- **Device Management**: bootstrap `/config/...` integration with local sync; empty values no longer overwrite local config.
-- **OpenWebUI**: full support for LLM settings (base URLs, API tokens, headers). Added diagnostics (logs/curl) for model and chat calls.
-- **Keycloak/SSO**: Authorization Code + PKCE flow with local redirect; multi‑URI handling; improved re‑login UX.
-- **Preferences UI**: simplified dialog, model dropdown, dynamic description, API status indicator, reload button, splash image, masked token with reveal toggle.
-- **Proxy support**: configurable proxy (URL, optional auth), TLS `-k` toggle, startup consistency check with LibreOffice settings, and a Proxy dialog with connection test.
-- **Editing**: new “Edit selection” dialog always on top, resizable, with send button and system close handling.
-- **Logs & diagnostics**: better network logs, HTTP error handling, user notification when token expired.
-- **Enrollment wizard UX** (2026-03): 5-step wizard that stays open through Keycloak login; shows a result screen (success → “🚀 Commencer à utiliser” / failure → “Fermer” + reason). Wizard is protected by a threading lock to prevent multiple simultaneous instances.
-- **Documentation menu** (📚): new menu entry above Paramètres in the MIrAI menu, opening `doc_url` (from bootstrap) → `portal_url` fallback → silent no-op. Configurable centrally from Device Management.
-- **Bootstrap propagation for `doc_url` / `portal_url`**: both keys are now synced from the bootstrap config to the local `config.json` via `_persist_bootstrap_config`.
-- **Clean-install script** (`scripts/00-clean-install.sh`): purges local `config.json`, logs, and LibreOffice extension temp cache. Supports `--uninstall` to also remove the extension.
-
-## Device Management (Status & TODO)
-
-Device Management integration is in place, but several items remain:
-
-Déploiement progressif (synthèse): le plugin appelle Device Management avec son `plugin_uuid`, sa version et, après login PKCE, un token Keycloak; DM valide le token (signature/JWKS, `iss`, `aud`, `exp`), extrait l’identité utilisateur (`sub`) et les `groups`, applique la priorité des groupes de déploiement (d’abord les 5 groupes câblés dans l’outil de management, puis les groupes Keycloak mappés), puis renvoie une policy de campagne (`none/update/rollback`, version cible, artefact, hash/signature, pourcentage de rollout). Le plugin n’installe que si la policy l’autorise et si la vérification cryptographique est valide, puis remonte les indicateurs (`success/failure`) pour piloter des campagnes démarrables/arrêtables (canary, promotion, rollback) avec suivi par groupe.
-
-**TODO:**
-- Finalize **silent enrollment**.
-- Implement **automatic OpenWebUI token retrieval**.
-- **Externalize all prompts** via Device Management (all prompts must become configurable).
-- Implement the **automatic update mechanism** for the extension.
-
-## Secure Bootstrap / Relay Flow
+### Flux de bootstrap sécurisé
 
 ```mermaid
 sequenceDiagram
@@ -471,7 +300,7 @@ sequenceDiagram
   participant R as relay-assistant
 
   P->>DM: GET /config/libreoffice/config.json
-  DM-->>P: public config (no secrets)
+  DM-->>P: config publique (sans secrets)
 
   P->>KC: PKCE login (auth + token)
   KC-->>P: access_token / refresh_token
@@ -487,8 +316,43 @@ sequenceDiagram
   DM-->>R: 200/403
 ```
 
-### Local validation
+### Assistant d'enrôlement
 
-```bash
-./scripts/03-test-local.sh
-```
+Wizard en 5 étapes qui reste ouvert pendant le login Keycloak. Affiche un écran de résultat : succès → « Commencer à utiliser » / échec → « Fermer » + raison. Protégé par un verrou threading pour éviter les instances multiples.
+
+### TODO Device Management
+
+- Enrôlement silencieux (sans interaction utilisateur)
+- Récupération automatique du token OpenWebUI
+- Externalisation de tous les prompts via Device Management
+- Mécanisme de mise à jour automatique de l'extension
+
+---
+
+## Historique des mises à jour
+
+| Version / Date | Changements principaux |
+| --- | --- |
+| 2026-03 | **GenerateFormula Calc** : contexte schéma, boucle retry erreur, nettoyage markdown |
+| 2026-03 | **Benchmark Scaleway** : 10/13 modèles ✅ sur textes Wikipedia ; rapport dans `tests/results/` |
+| 2026-03 | **writer.py** : suppression appel `stream_request` en double, suppression faux positifs « voici/voilà » dans simplify, ajout `_strip_think_blocks()` pour deepseek-r1 |
+| 2026-03 | **Wizard d'enrôlement** : UX 5 étapes, écran résultat, verrou threading |
+| 2026-03 | **Menu Documentation** : `doc_url` depuis bootstrap, repli `portal_url` |
+| 2026-03 | **Script 00-clean-install.sh** : purge config, logs et cache extension |
+| 2025 | Profils de config, packaging release, `_persist_bootstrap_config` |
+| 2025 | Support proxy complet (URL, auth, TLS `-k`, cohérence avec LO) |
+| 2025 | Intégration OpenTelemetry asynchrone |
+| 2025 | Modification tout le document par chunks (FIND/REPLACE) |
+
+---
+
+## License
+
+- Code original *mirai* : licence de John Balis (voir `registration/license.txt`)
+- Portions LibreOffice : MPL 2.0
+- Adaptations ministère de l'Intérieur : voir `registration/license.txt`
+
+Dépôts de référence :
+- [balisujohn/mirai](https://github.com/balisujohn/mirai) — projet original
+- [IA-Generative/AssistantmiraiLibreOffice](https://github.com/IA-Generative/AssistantmiraiLibreOffice) — ce dépôt
+- [gerrit.libreoffice.org/c/core/+/159938](https://gerrit.libreoffice.org/c/core/+/159938) — portions MPL 2.0
