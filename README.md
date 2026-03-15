@@ -4,6 +4,8 @@ Extension LibreOffice intégrant un assistant IA directement dans Writer et Calc
 
 **Origine :** cette application est une version bêta développée dans le cadre du programme MIrAI du ministère de l'Intérieur. Elle s'appuie sur le travail de **John Balis**, auteur de l'extension [localwriter](https://github.com/balisujohn/localwriter), et sur des portions de code LibreOffice (MPL 2.0 — [gerrit.libreoffice.org](https://gerrit.libreoffice.org/c/core/+/159938)). Voir `registration/license.txt` pour les attributions complètes.
 
+**Comparaison de modèles LLM :** une évaluation des modèles Scaleway sur les scénarios Writer (extension, résumé, reformulation) a été réalisée avec des textes issus de Wikipédia. Les résultats sont disponibles dans [bench/scaleway_model_comparison.md](bench/scaleway_model_comparison.md).
+
 ---
 
 ## Table des matières
