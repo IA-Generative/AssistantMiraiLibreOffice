@@ -70,19 +70,41 @@ Ouvre l'URL de documentation configurée via le bootstrap (`doc_url`) avec repli
 
 ## Fonctionnalités Calc
 
-### 🧮 Générer une formule — `Ctrl+Shift+F`
+Les fonctions Calc sont accessibles depuis le menu **MIrAI** dans LibreOffice Calc.
+
+### ✨ Générer la suite — `Ctrl+Q`
+
+Continue le contenu de chaque cellule sélectionnée en s'appuyant sur le texte existant. Utile pour compléter des libellés, des descriptions ou des séries de texte.
+
+### 🖊️ Modifier la sélection — `Ctrl+E`
+
+Ouvre une boîte de dialogue pour saisir des instructions d'édition. Le contenu de chaque cellule sélectionnée est transformé selon l'instruction (traduction, reformulation, correction…). La cellule est mise à jour en place.
+
+### 🔄 Transformer → colonne résultat — `Ctrl+T`
+
+Applique une instruction sur une plage de cellules et écrit les résultats dans une **colonne adjacente** (non destructif). Si la colonne suivante est déjà occupée, l'extension cherche la première colonne libre à droite et lui donne un en-tête automatique « Résultat IA » avec le style de la ligne d'en-tête existante.
+
+**Cas d'usage :** classifier, traduire, enrichir ou reformuler une colonne entière de données en une seule action.
+
+**Aperçu avant envoi :** le nom de la colonne de sortie est indiqué dans le titre de la boîte de dialogue.
+
+### 🧮 Générer une formule — `Ctrl+G`
 
 Génère une formule LibreOffice Calc à partir d'une description en langage naturel. L'extension injecte automatiquement le contexte de la feuille (en-têtes de colonnes, plage de données, valeurs de la ligne courante) dans le prompt pour que le modèle produise une formule précise et directement applicable.
 
 **Fonctionnement :**
-1. Sélectionner la cellule cible
-2. Appuyer sur `Ctrl+Shift+F`
+1. Sélectionner la cellule (ou la plage) cible
+2. Appuyer sur `Ctrl+G`
 3. Décrire la formule souhaitée (ex. : « somme des ventes si région = Nord »)
 4. La formule générée est insérée dans la cellule
 
-**Boucle de correction automatique :** si la formule insérée retourne une erreur (`#VALEUR!`, `#REF!`…), l'extension détecte l'erreur, la renvoie au modèle et redemande une correction (jusqu'à 3 tentatives).
+**Réplication automatique :** si une plage multi-lignes est sélectionnée, la formule est déclinée sur toutes les lignes en ajustant les références de ligne.
 
-**Nettoyage markdown :** les artefacts de formatage LLM (`**`, `_`, `` ` ``, `#`) sont supprimés avant insertion.
+**Boucle de correction :** si la formule retourne une erreur (`#VALEUR!`, `#REF!`…), l'extension la renvoie au modèle pour correction (conversation multi-tour).
+
+### 📊 Analyser la plage — `Ctrl+K`
+
+Analyse une plage de cellules sélectionnée et insère un **résumé des tendances, anomalies et points notables** dans la cellule deux lignes sous la sélection. La cellule de résultat est fusionnée sur la largeur de la sélection pour une meilleure lisibilité.
 
 ---
 
