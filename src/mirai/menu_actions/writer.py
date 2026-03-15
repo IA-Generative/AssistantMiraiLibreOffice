@@ -54,6 +54,39 @@ def _undo_context(model, label):
     return _ctx()
 
 
+_EXTEND_QUESTION_PATTERNS = [
+    "puis-je vous", "puis-je t'", "comment puis-je", "en quoi puis-je",
+    "que puis-je faire", "puis-je vous aider",
+    "pouvez-vous préciser", "pouvez-vous clarifier",
+    "could you clarify", "how can i help", "would you like me to",
+    "voulez-vous que je", "souhaitez-vous que",
+]
+
+
+def _make_extend_callback(text_obj, cursor, controller, done_flag, on_question):
+    """Return a streaming callback for extend_selection.
+
+    Inserts each chunk unless a conversational question pattern is detected,
+    in which case *on_question()* is called and further chunks are ignored.
+    """
+    accumulated = [""]
+
+    def _callback(chunk_text):
+        if done_flag[0]:
+            return
+        accumulated[0] += chunk_text
+        lower = accumulated[0].lower()
+        for pattern in _EXTEND_QUESTION_PATTERNS:
+            if pattern in lower:
+                done_flag[0] = True
+                on_question()
+                return
+        text_obj.insertString(cursor, chunk_text, False)
+        _scroll_to_cursor(controller, cursor)
+
+    return _callback
+
+
 def _extend_selection(job, text, selection, text_range, controller=None, model=None):
     job._send_telemetry(
         "ExtendSelection",
@@ -67,52 +100,70 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
         return
 
     try:
-        system_prompt = job.get_config("extend_selection_system_prompt", "")
-        prompt = text_range.getString()
-        max_tokens = job.get_config("extend_selection_max_tokens", 15000)
+        base_text = text_range.getString()
 
+        # Directive system prompt — prevents conversational responses up-front.
+        configured_sp = str(job.get_config("extend_selection_system_prompt", "") or "").strip()
+        directive = (
+            "Continue DIRECTEMENT le texte fourni par l'utilisateur. "
+            "Écris uniquement la suite naturelle, sans question, sans reformulation, "
+            "sans introduction."
+        )
+        system_prompt = (directive + " " + configured_sp) if configured_sp else directive
+
+        max_tokens = job.get_config("extend_selection_max_tokens", 15000)
         api_type = str(job.get_config("api_type", "completions")).lower()
-        request = job.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
+        request = job.make_api_request(base_text, system_prompt, max_tokens, api_type=api_type)
 
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        # Patterns that indicate the model answered conversationally instead of
-        # continuing the text (e.g. "En quoi puis-je vous aider ?").
-        _extend_question_patterns = [
-            "puis-je vous", "puis-je t'", "comment puis-je", "en quoi puis-je",
-            "que puis-je faire", "puis-je vous aider",
-            "pouvez-vous préciser", "pouvez-vous clarifier",
-            "could you clarify", "how can i help", "would you like me to",
-            "voulez-vous que je", "souhaitez-vous que",
-        ]
-
-        extend_text = ""
         extend_done = [False]
+        retry_needed = [False]
+
+        def _on_question_attempt1():
+            retry_needed[0] = True
 
         with _undo_context(model, "Générer la suite"):
             text.insertString(cursor, "\n\n---début-du-texte-généré---\n", False)
 
-            def append_text(chunk_text):
-                nonlocal extend_text
-                if extend_done[0]:
-                    return
-                extend_text += chunk_text
-                lower = extend_text.lower()
-                for pattern in _extend_question_patterns:
-                    if pattern in lower:
-                        text.insertString(
-                            cursor,
-                            "\n[Le modèle a répondu par une question au lieu de continuer le texte."
-                            " Veuillez réessayer ou reformuler votre sélection.]",
-                            False,
-                        )
-                        extend_done[0] = True
-                        return
-                text.insertString(cursor, chunk_text, False)
-                _scroll_to_cursor(controller, cursor)
+            job.stream_request(
+                request, api_type,
+                _make_extend_callback(text, cursor, controller, extend_done, _on_question_attempt1),
+            )
 
-            job.stream_request(request, api_type, append_text)
+            # Auto-retry with a stronger directive when the model asked a question.
+            if retry_needed[0]:
+                extend_done[0] = False
+                retry_sp = (
+                    "Tu dois CONTINUER le texte de l'utilisateur mot après mot, "
+                    "comme si tu en étais l'auteur. Il est INTERDIT de poser une question "
+                    "ou de reformuler. Commence immédiatement par les mots qui suivent "
+                    "naturellement le texte fourni."
+                )
+                retry_prompt = (
+                    "Voici le texte à continuer :\n\n" + base_text
+                    + "\n\nÉcris UNIQUEMENT la suite directe, sans aucune introduction."
+                )
+                retry_request = job.make_api_request(
+                    retry_prompt, retry_sp, max_tokens, api_type=api_type
+                )
+
+                def _on_question_retry():
+                    text.insertString(
+                        cursor,
+                        "\n[Le modèle n'a pas pu continuer le texte."
+                        " Essayez de sélectionner plus de contexte.]",
+                        False,
+                    )
+
+                job.stream_request(
+                    retry_request, api_type,
+                    _make_extend_callback(text, cursor, controller, extend_done, _on_question_retry),
+                )
+
+                job.stream_request(retry_request, api_type, append_retry)
+
             text.insertString(cursor, "\n---fin-du-texte-généré---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
