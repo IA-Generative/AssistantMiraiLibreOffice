@@ -133,12 +133,39 @@ cat ~/Library/Application\ Support/LibreOffice/4/user/mirai.json
 - Redémarrez LibreOffice complètement
 - Réinstallez l'extension : Outils → Gestionnaire des extensions
 
-## 7. Réinstaller l'extension
+## 7. Clean install (purge complète)
+
+Le script `00-clean-install.sh` remet le plugin dans l'état d'une installation fraîche :
+
+- Ferme LibreOffice
+- Réinitialise `config.json` (ne conserve que `bootstrap_url` et `config_path`)
+- Supprime les fichiers de logs LibreOffice (`unopkg.log`, `GraphicsRenderTests.log`)
+- Purge le cache temp des extensions (`extensions/tmp/`)
 
 ```bash
-cd /Users/etiquet/Documents/GitHub/mirai
-unopkg remove org.extension.sample
-unopkg add mirai.oxt
+# Reset simple (extension conservée — pour tester un ré-enrôlement)
+./scripts/00-clean-install.sh
+
+# Reset complet + désinstalle l'extension
+./scripts/00-clean-install.sh --uninstall
+
+# Ensuite, réinstaller et relancer
+./scripts/dev-launch.sh
+```
+
+Options disponibles :
+
+| Option | Description |
+|---|---|
+| `--uninstall` | Désinstalle aussi l'extension Mirai |
+| `--bootstrap-url <url>` | Surcharge l'URL bootstrap dans le config.json réinitialisé (défaut : `http://localhost:3001`) |
+| `--config-path <path>` | Surcharge le config_path (défaut : `/config/libreoffice/config.json?profile=dev`) |
+
+### Réinstaller manuellement
+
+```bash
+/Applications/LibreOffice.app/Contents/MacOS/unopkg remove fr.gouv.interieur.mirai
+/Applications/LibreOffice.app/Contents/MacOS/unopkg add dist/mirai.oxt
 ```
 
 Puis redémarrez LibreOffice.

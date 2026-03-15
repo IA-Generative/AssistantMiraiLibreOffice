@@ -62,6 +62,7 @@ The repository is organized to separate extension resources, Python code, and lo
 - `config/config.default.example.json`: committable example defaults
 - `config/profiles/`: predefined profile configs (`docker`, `kubernetes`, `dgx`, `local-llm`)
 - `config/config.default.json`: local real defaults (ignored by git)
+- `scripts/00-clean-install.sh`: **reset to clean-install state** (purge config, logs, extension temp cache)
 - `scripts/02-build-oxt.sh`: build script producing `dist/mirai.oxt`
 - `scripts/04-repack-oxt.sh`: utility to inject `config.default.json` in an existing `.oxt`
 - `scripts/01-init-default-config.sh`: initialize/update default Keycloak/proxy/bootstrap keys in `config/config.default.json`
@@ -71,6 +72,10 @@ The repository is organized to separate extension resources, Python code, and lo
 ### Script quickstart
 
 ```bash
+# 0) Clean install — reset config, logs, and extension cache (use before a fresh enrollment test)
+./scripts/00-clean-install.sh             # keep extension installed
+./scripts/00-clean-install.sh --uninstall # also remove the extension
+
 # 1) Initialize default config keys (interactive)
 ./scripts/01-init-default-config.sh --interactive
 
@@ -92,6 +97,16 @@ The repository is organized to separate extension resources, Python code, and lo
 
 # 7) Build a profile-specific release package
 ./scripts/07-package-release.sh --profile dgx --output ./dist/mirai.oxt
+```
+
+#### Workflow clean install + réenrôlement
+
+```bash
+# 1. Purger et désinstaller
+./scripts/00-clean-install.sh --uninstall
+
+# 2. Rebuilder + réinstaller + relancer LibreOffice
+./scripts/dev-launch.sh
 ```
 
 ### Config profiles and release workflow
@@ -230,9 +245,15 @@ This feature rewrites the selected text in a clearer, more accessible form while
 
 ---
 
+### 📚 Documentation
+
+Access the extension documentation directly from the MIrAI menu. The URL is configurable via the bootstrap server (`doc_url` key) with a fallback to `portal_url`. If neither is set, the menu item does nothing silently.
+
+---
+
 ### 🌐 Access the mirai website
 
-Access the official mirai website (https://mirai.interieur.gouv.fr) from the extension menu for more information about the program and available tools.
+Access the official mirai website (https://mirai.interieur.gouv.fr) from the extension menu for more information about the program and available tools. The URL is configurable via the bootstrap server (`portal_url` key); if absent it falls back to the hardcoded URL above.
 
 ---
 
@@ -422,6 +443,10 @@ This project has gone through many iterations. Here is a summary of the most rec
 - **Proxy support**: configurable proxy (URL, optional auth), TLS `-k` toggle, startup consistency check with LibreOffice settings, and a Proxy dialog with connection test.
 - **Editing**: new “Edit selection” dialog always on top, resizable, with send button and system close handling.
 - **Logs & diagnostics**: better network logs, HTTP error handling, user notification when token expired.
+- **Enrollment wizard UX** (2026-03): 5-step wizard that stays open through Keycloak login; shows a result screen (success → “🚀 Commencer à utiliser” / failure → “Fermer” + reason). Wizard is protected by a threading lock to prevent multiple simultaneous instances.
+- **Documentation menu** (📚): new menu entry above Paramètres in the MIrAI menu, opening `doc_url` (from bootstrap) → `portal_url` fallback → silent no-op. Configurable centrally from Device Management.
+- **Bootstrap propagation for `doc_url` / `portal_url`**: both keys are now synced from the bootstrap config to the local `config.json` via `_persist_bootstrap_config`.
+- **Clean-install script** (`scripts/00-clean-install.sh`): purges local `config.json`, logs, and LibreOffice extension temp cache. Supports `--uninstall` to also remove the extension.
 
 ## Device Management (Status & TODO)
 
