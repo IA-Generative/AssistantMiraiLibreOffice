@@ -178,10 +178,8 @@ def load_config(ctx) -> dict:
 # HTTP helper
 # ---------------------------------------------------------------------------
 
-_USER_AGENT = (
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Firefox/120.0"
-)
+_PLUGIN_NAME = "MIrAI-LibreOffice"
+_USER_AGENT = _PLUGIN_NAME
 
 
 def _urlopen(request: urllib.request.Request, ssl_context: ssl.SSLContext, timeout: int = 60):
