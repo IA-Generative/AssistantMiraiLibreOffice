@@ -54,7 +54,30 @@ from .security_flow import (
 )
 
 
-USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/120.0"
+PLUGIN_NAME = "MIrAI-LibreOffice"
+_DEFAULT_USER_AGENT = PLUGIN_NAME
+_current_user_agent = _DEFAULT_USER_AGENT
+
+
+def build_user_agent(plugin_version="", lo_version=""):
+    """Build a User-Agent string: MIrAI-LibreOffice/<plugin_ver> LibreOffice/<lo_ver>."""
+    parts = [PLUGIN_NAME]
+    if plugin_version:
+        parts[0] = f"{PLUGIN_NAME}/{plugin_version}"
+    if lo_version:
+        parts.append(f"LibreOffice/{lo_version}")
+    return " ".join(parts)
+
+
+def set_user_agent(plugin_version="", lo_version=""):
+    """Set the module-level User-Agent used by all HTTP helpers."""
+    global _current_user_agent
+    _current_user_agent = build_user_agent(plugin_version, lo_version)
+
+
+def get_user_agent():
+    """Return the current User-Agent string."""
+    return _current_user_agent
 
 # ── UI colour palette (DSFR-inspired) ──────────────────────────────
 _UI = {
@@ -99,7 +122,7 @@ logging.basicConfig(filename=_log_file_path, level=logging.INFO, format='%(ascti
 def _with_user_agent(headers=None):
     result = dict(headers) if headers else {}
     if "User-Agent" not in result:
-        result["User-Agent"] = USER_AGENT
+        result["User-Agent"] = get_user_agent()
     return result
 
 def _redact_header_value(name, value):
@@ -265,7 +288,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
         json_data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(endpoint, data=json_data, method='POST')
         req.add_header('Content-Type', 'application/json')
-        req.add_header('User-Agent', USER_AGENT)
+        req.add_header('User-Agent', get_user_agent())
         
         # Add authentication header
         if auth_key:
@@ -385,6 +408,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         except Exception as e:
             log_to_file(f"Failed to resolve profile config path: {str(e)}")
         
+        # Initialise User-Agent with real plugin + LibreOffice versions
+        try:
+            set_user_agent(self._get_extension_version(), self._get_lo_version())
+            log_to_file(f"User-Agent set to: {get_user_agent()}")
+        except Exception as e:
+            log_to_file(f"Failed to set User-Agent: {str(e)}")
+
         # Send telemetry trace on extension load
         try:
             self._ensure_extension_uuid()
