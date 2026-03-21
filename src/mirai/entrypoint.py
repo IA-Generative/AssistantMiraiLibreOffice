@@ -1380,7 +1380,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             WIDTH = 560
             HEIGHT = 500
             MARGIN = 24
-            IMG_SIZE = 130
+            IMG_SIZE = 80
             BTN_W = 175
             BTN_H = 32
             TOTAL_STEPS = 5  # 3 clickable + 2 automatic
@@ -1442,22 +1442,22 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     log_to_file(f"Wizard control error: {name} {str(e)}")
                     return None
 
-            # Mascot image
+            # Mascot image (centred, top)
             logo_path = os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png")
             if not os.path.exists(logo_path):
                 logo_path = os.path.join(os.path.dirname(__file__), "icons", "iassistant.png")
             if os.path.exists(logo_path):
                 logo_url = uno.systemPathToFileUrl(os.path.abspath(logo_path))
                 img_x = (WIDTH - IMG_SIZE) // 2
-                add_control("wiz_logo", "ImageControl", img_x, MARGIN,
+                add_control("wiz_logo", "ImageControl", img_x, 8,
                             IMG_SIZE, IMG_SIZE, {
                                 "ImageURL": logo_url,
                                 "Border": 0,
                                 "ScaleImage": True
                             })
 
-            # Title
-            title_y = MARGIN + IMG_SIZE + 10
+            # Title (centred, just below image)
+            title_y = 8 + IMG_SIZE + 6
             add_control("wiz_title", "FixedText", MARGIN, title_y,
                         WIDTH - MARGIN * 2, 22, {
                             "Label": wizard_steps[0]["title"],
@@ -1467,10 +1467,14 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             "FontWeight": 150,
                         })
 
-            # Body text
-            text_y = title_y + 30
-            text_h = 180
-            add_control("wiz_text", "FixedText", MARGIN + 10, text_y,
+            # Bottom controls zone: step + bar + buttons = ~40px above dialog bottom
+            bottom_zone_h = 16 + 18 + 4 + 16 + BTN_H + 20  # step + gap + bar + gap + btn + margin
+            bottom_start_y = HEIGHT - bottom_zone_h
+
+            # Body text — centred vertically between title and bottom controls
+            text_top = title_y + 26
+            text_h = bottom_start_y - text_top - 6
+            add_control("wiz_text", "FixedText", MARGIN + 10, text_top,
                         WIDTH - MARGIN * 2 - 20, text_h, {
                             "Label": wizard_steps[0]["text"],
                             "MultiLine": True,
@@ -1479,7 +1483,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         })
 
             # Step indicator
-            step_y = text_y + text_h + 6
+            step_y = bottom_start_y
             add_control("wiz_step", "FixedText", MARGIN, step_y,
                         WIDTH - MARGIN * 2, 16, {
                             "Label": wizard_steps[0]["step_label"],
@@ -2390,10 +2394,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     if enroll_result["success"]:
                         wiz_update(
                             "Enrôlement terminé !",
-                            "Votre poste est enrôlé avec succès.\n\n"
-                            "IA'ssistant est prêt à l'emploi.\n\n"
-                            "Pour en savoir plus, rendez-vous dans\n"
-                            "le menu MIrAI → 📚 Documentation.",
+                            "L'IA est intégrée directement dans vos documents\n"
+                            "Writer et Calc, accessible depuis le menu MIrAI.\n\n"
+                            "Writer :\n"
+                            "  • Étendre — prolonger votre texte avec l'IA\n"
+                            "  • Modifier — reformuler ou corriger une sélection\n"
+                            "  • Résumer — condenser un passage\n"
+                            "  • Simplifier — rendre un texte plus accessible\n\n"
+                            "Calc :\n"
+                            "  • Transformer — appliquer une consigne à chaque cellule\n"
+                            "  • Formule IA — générer une formule par description\n"
+                            "  • Analyser — obtenir une synthèse de vos données\n"
+                            "  • =PROMPT() — interroger l'IA dans une cellule\n\n\n"
+                            "       Menu MIrAI → 📚 Documentation pour en savoir plus.",
                             "Étape 5/5 — Terminé",
                             5,
                             btn_next="🚀 Commencer à utiliser",
