@@ -65,6 +65,20 @@
           </node>
           <node oor:name="MA3" oor:op="replace">
             <prop oor:name="Title">
+              <value xml:lang="en-US">📏 Ajuster la longueur (⌘J)</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?ResizeSelection</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MA4" oor:op="replace">
+            <prop oor:name="Title">
               <value xml:lang="en-US">📝 Résumer la sélection (⌘R)</value>
             </prop>
             <prop oor:name="URL">
@@ -77,7 +91,7 @@
               <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
-          <node oor:name="MA4" oor:op="replace">
+          <node oor:name="MA5a" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">💬 Reformuler la sélection (⌘L)</value>
             </prop>
@@ -91,7 +105,7 @@
               <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
-          <node oor:name="MA5" oor:op="replace">
+          <node oor:name="MA5b" oor:op="replace">
             <prop oor:name="URL" oor:type="xs:string">
               <value>private:separator</value>
             </prop>

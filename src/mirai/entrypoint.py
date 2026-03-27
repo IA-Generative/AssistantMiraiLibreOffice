@@ -370,6 +370,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._auth_prompted_at = 0
         self._config_write_lock = threading.Lock()
         self._edit_dialog = None
+        self._resize_dialog = None
         self._formula_dialog = None
         self._formula_dialog_state = None
         self._secure_flow = None
@@ -4856,6 +4857,399 @@ EDITED VERSION:
         except Exception as e:
             log_to_file(f"EditSelection insert failed: {str(e)}")
 
+    def _show_resize_dialog(self, text, text_range, controller=None, model=None):
+        """Mini floating dialog with − / + buttons to shrink or expand selected text."""
+        # Singleton: reuse if already open
+        if self._resize_dialog:
+            try:
+                self._resize_dialog.setVisible(True)
+                return
+            except Exception:
+                self._resize_dialog = None
+
+        from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+
+        WIDTH = 320
+        HORI_MARGIN = 14
+        VERT_MARGIN = 12
+        BTN_SIZE = 50
+        BTN_GAP = 20
+        LABEL_HEIGHT = 20
+        PREVIEW_HEIGHT = 80
+        HEIGHT = VERT_MARGIN * 2 + LABEL_HEIGHT + 8 + BTN_SIZE + 8 + PREVIEW_HEIGHT
+
+        ctx = uno.getComponentContext()
+        def create(name):
+            return ctx.getServiceManager().createInstanceWithContext(name, ctx)
+
+        dialog = create("com.sun.star.awt.UnoControlDialog")
+        dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
+        dialog.setModel(dialog_model)
+        dialog.setVisible(False)
+        dialog.setTitle("MIrAI — Ajuster la longueur")
+        dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+        try:
+            dialog_model.BackgroundColor = _UI["bg"]
+        except Exception:
+            pass
+        try:
+            dialog_model.Sizeable = False
+        except Exception:
+            pass
+        try:
+            dialog_model.Closeable = True
+        except Exception:
+            pass
+
+        def add(name, type_, x_, y_, width_, height_, props):
+            try:
+                m = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type_ + "Model")
+                dialog_model.insertByName(name, m)
+                control = dialog.getControl(name)
+                control.setPosSize(x_, y_, width_, height_, POSSIZE)
+                for key, value in props.items():
+                    try:
+                        setattr(m, key, value)
+                    except Exception:
+                        pass
+                return control
+            except Exception:
+                return None
+
+        # Status label
+        status_label = add(
+            "resize_status", "FixedText",
+            HORI_MARGIN, VERT_MARGIN,
+            WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT,
+            {"Label": "Sélectionnez du texte puis cliquez − ou +",
+             "NoLabel": True,
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_secondary"],
+             "Align": 1,
+            }
+        )
+
+        # − button (reduce)
+        btn_y = VERT_MARGIN + LABEL_HEIGHT + 8
+        center_x = WIDTH // 2
+        btn_minus = add(
+            "btn_resize_minus", "Button",
+            center_x - BTN_SIZE - BTN_GAP // 2, btn_y,
+            BTN_SIZE, BTN_SIZE,
+            {"Label": "−",
+             "FontHeight": 22,
+             "FontWeight": 200,
+             "TextColor": _UI["btn_primary_fg"],
+             "BackgroundColor": _UI["btn_primary_bg"],
+            }
+        )
+        # + button (expand)
+        btn_plus = add(
+            "btn_resize_plus", "Button",
+            center_x + BTN_GAP // 2, btn_y,
+            BTN_SIZE, BTN_SIZE,
+            {"Label": "+",
+             "FontHeight": 22,
+             "FontWeight": 200,
+             "TextColor": _UI["btn_primary_fg"],
+             "BackgroundColor": _UI["btn_primary_bg"],
+            }
+        )
+
+        # Preview area — shows streaming LLM output (including reasoning)
+        preview_y = btn_y + BTN_SIZE + 8
+        preview_control = add(
+            "resize_preview", "Edit",
+            HORI_MARGIN, preview_y,
+            WIDTH - HORI_MARGIN * 2, PREVIEW_HEIGHT,
+            {"Text": "", "MultiLine": True, "ReadOnly": True, "VScroll": True,
+             "BackgroundColor": _UI["bg_section"],
+             "FontHeight": 7,
+             "TextColor": _UI["text_secondary"],
+             "Border": 1,
+             "BorderColor": _UI["border"],
+            }
+        )
+
+        resize_self = self
+
+        def _get_current_selection():
+            """Grab the live selection from the document."""
+            try:
+                desktop = resize_self.ctx.ServiceManager.createInstanceWithContext(
+                    "com.sun.star.frame.Desktop", resize_self.ctx)
+                doc = desktop.getCurrentComponent()
+                if doc and hasattr(doc, "Text"):
+                    sel = doc.CurrentController.getSelection()
+                    if sel and sel.getCount() > 0:
+                        return doc.Text, sel.getByIndex(0), doc.CurrentController, doc
+            except Exception:
+                pass
+            return text, text_range, controller, model
+
+        def _do_resize(direction):
+            """Run the resize LLM call. direction: 'reduce' or 'expand'."""
+            txt, rng, ctrl, mdl = _get_current_selection()
+            original = rng.getString()
+            if not original or len(original.strip()) < 5:
+                if status_label:
+                    try:
+                        status_label.getModel().Label = "Sélectionnez du texte à ajuster."
+                        status_label.getModel().TextColor = _UI["warning"]
+                    except Exception:
+                        pass
+                return
+
+            # Update status label
+            if status_label:
+                try:
+                    label = "Mirai réduit..." if direction == "reduce" else "Mirai développe..."
+                    status_label.getModel().Label = label
+                    status_label.getModel().TextColor = _UI["primary"]
+                except Exception:
+                    pass
+
+            word_count = len(original.split())
+
+            if direction == "reduce":
+                target_words = max(5, int(word_count * 0.65))
+                system = (
+                    "Tu DOIS répondre dans la MÊME LANGUE que le texte fourni. "
+                    "Si le texte est en français, réponds en français. "
+                    "Si le texte est en anglais, réponds en anglais.\n"
+                    "Tu es un rédacteur professionnel. Tu raccourcis le texte fourni "
+                    "en conservant le sens, le ton et les informations essentielles. "
+                    f"Le texte original fait {word_count} mots. "
+                    f"Tu DOIS produire un texte de {target_words} mots MAXIMUM. "
+                    "Produis UNIQUEMENT le texte raccourci, "
+                    "sans introduction, sans explication, sans commentaire, sans guillemets."
+                )
+                prompt = (
+                    f"Raccourcis ce texte à {target_words} mots maximum "
+                    f"(actuellement {word_count} mots) :\n\n"
+                    f"{original}\n\n"
+                    f"TEXTE RACCOURCI ({target_words} mots max) :"
+                )
+            else:
+                target_words = int(word_count * 1.4)
+                system = (
+                    "Tu DOIS répondre dans la MÊME LANGUE que le texte fourni. "
+                    "Si le texte est en français, réponds en français. "
+                    "Si le texte est en anglais, réponds en anglais.\n"
+                    "Tu es un rédacteur professionnel. Tu développes le texte fourni "
+                    "en ajoutant des détails, des précisions ou des formulations plus "
+                    "riches tout en conservant le sens et le ton. "
+                    f"Le texte original fait {word_count} mots. "
+                    f"Tu DOIS produire un texte d'environ {target_words} mots. "
+                    "Produis UNIQUEMENT le texte développé, "
+                    "sans introduction, sans explication, sans commentaire, sans guillemets."
+                )
+                prompt = (
+                    f"Développe ce texte à environ {target_words} mots "
+                    f"(actuellement {word_count} mots) :\n\n"
+                    f"{original}\n\n"
+                    f"TEXTE DÉVELOPPÉ (~{target_words} mots) :"
+                )
+
+            try:
+                api_type = str(resize_self.get_config("api_type", "completions")).lower()
+                max_tokens = int(resize_self.get_config("edit_selection_max_new_tokens", 15000))
+                request = resize_self.make_api_request(prompt, system, max_tokens, api_type=api_type)
+                accumulated = []
+                in_think = [False]  # track whether we're inside a <think> block
+                # Clear preview
+                if preview_control:
+                    try:
+                        preview_control.getModel().Text = ""
+                    except Exception:
+                        pass
+                def _collect(chunk):
+                    accumulated.append(chunk)
+                    full = "".join(accumulated)
+                    # Detect <think> opening
+                    if not in_think[0] and "<think>" in full.lower():
+                        in_think[0] = True
+                    # Detect </think> closing
+                    if in_think[0] and "</think>" in full.lower():
+                        in_think[0] = False
+                    # Show raw stream in preview (including think for transparency)
+                    if preview_control:
+                        try:
+                            preview_control.getModel().Text = full
+                            # Auto-scroll to bottom
+                            sel = uno.createUnoStruct("com.sun.star.awt.Selection")
+                            sel.Min = len(full)
+                            sel.Max = len(full)
+                            preview_control.setSelection(sel)
+                        except Exception:
+                            pass
+                resize_self.stream_request(request, api_type, _collect)
+                raw = "".join(accumulated).strip()
+                # Strip think/reasoning blocks before applying to document
+                import re as _re
+                # 1. Remove complete <think>…</think> blocks
+                raw = _re.sub(r"<think>.*?</think>", "", raw, flags=_re.DOTALL | _re.IGNORECASE)
+                # 2. Remove everything up to and including a dangling </think>
+                raw = _re.sub(r"^.*?</think>", "", raw, flags=_re.DOTALL | _re.IGNORECASE)
+                # 3. Remove a trailing unclosed <think>… block
+                raw = _re.sub(r"<think>.*$", "", raw, flags=_re.DOTALL | _re.IGNORECASE)
+                raw = raw.strip()
+                log_to_file(f"ResizeSelection cleaned result ({len(raw)} chars): {raw[:200]!r}")
+
+                # Show cleaned result in preview
+                if preview_control:
+                    try:
+                        preview_control.getModel().Text = raw
+                    except Exception:
+                        pass
+
+                if not raw:
+                    if status_label:
+                        try:
+                            status_label.getModel().Label = "Aucun résultat. Réessayez."
+                            status_label.getModel().TextColor = _UI["warning"]
+                        except Exception:
+                            pass
+                    return
+
+                # Replace the selection in-place with undo grouping
+                undo_label = "Réduire" if direction == "reduce" else "Développer"
+                mgr = None
+                try:
+                    mgr = mdl.getUndoManager()
+                    mgr.enterUndoContext(undo_label)
+                except Exception:
+                    mgr = None
+                try:
+                    rng.setString(raw)
+                    if ctrl:
+                        try:
+                            view_cursor = ctrl.getViewCursor()
+                            view_cursor.gotoRange(rng.getEnd(), False)
+                        except Exception:
+                            pass
+                finally:
+                    if mgr:
+                        try:
+                            mgr.leaveUndoContext()
+                        except Exception:
+                            pass
+
+                new_word_count = len(raw.split())
+                delta = new_word_count - word_count
+                sign = "+" if delta > 0 else ""
+                if status_label:
+                    try:
+                        status_label.getModel().Label = f"OK ({new_word_count} mots, {sign}{delta}). Ctrl+Z pour annuler."
+                        status_label.getModel().TextColor = _UI["success"]
+                    except Exception:
+                        pass
+            except Exception as e:
+                log_to_file(f"ResizeSelection failed: {str(e)}")
+                if status_label:
+                    try:
+                        status_label.getModel().Label = f"Erreur : {str(e)[:60]}"
+                        status_label.getModel().TextColor = _UI["error"]
+                    except Exception:
+                        pass
+
+        class ResizeActionListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, event):
+                source = getattr(event, "Source", None)
+                if source == btn_minus:
+                    _do_resize("reduce")
+                elif source == btn_plus:
+                    _do_resize("expand")
+            def disposing(self, event):
+                return
+
+        listener = ResizeActionListener()
+        if btn_minus:
+            try:
+                btn_minus.addActionListener(listener)
+            except Exception:
+                pass
+        if btn_plus:
+            try:
+                btn_plus.addActionListener(listener)
+            except Exception:
+                pass
+
+        # Rollover effects
+        def _add_btn_rollover(control):
+            if not control:
+                return
+            class _Rollover(unohelper.Base, XMouseListener):
+                def mousePressed(self, event):
+                    return
+                def mouseReleased(self, event):
+                    return
+                def mouseEntered(self, event):
+                    try:
+                        control.getModel().BackgroundColor = _UI["primary_hover"]
+                    except Exception:
+                        pass
+                def mouseExited(self, event):
+                    try:
+                        control.getModel().BackgroundColor = _UI["btn_primary_bg"]
+                    except Exception:
+                        pass
+                def disposing(self, event):
+                    return
+            try:
+                control.addMouseListener(_Rollover())
+            except Exception:
+                pass
+
+        _add_btn_rollover(btn_minus)
+        _add_btn_rollover(btn_plus)
+
+        # Window close handler
+        class ResizeWindowListener(unohelper.Base, XTopWindowListener):
+            def __init__(self, outer):
+                self.outer = outer
+            def windowClosing(self, event):
+                try:
+                    dialog.setVisible(False)
+                    dialog.dispose()
+                except Exception:
+                    pass
+                self.outer._resize_dialog = None
+            def windowOpened(self, event):
+                return
+            def windowClosed(self, event):
+                return
+            def windowMinimized(self, event):
+                return
+            def windowNormalized(self, event):
+                return
+            def windowActivated(self, event):
+                return
+            def windowDeactivated(self, event):
+                return
+            def disposing(self, event):
+                return
+
+        # Position and show
+        frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
+        window = frame.getContainerWindow() if frame else None
+        dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
+        if window:
+            ps = window.getPosSize()
+            _x = ps.Width - WIDTH - 40
+            _y = ps.Height // 2 - HEIGHT // 2
+            dialog.setPosSize(_x, _y, 0, 0, POS)
+
+        try:
+            peer = dialog.getPeer()
+            if peer:
+                peer.addTopWindowListener(ResizeWindowListener(self))
+        except Exception:
+            pass
+
+        dialog.setVisible(True)
+        self._resize_dialog = dialog
+
     def _show_edit_selection_dialog(self, text, text_range):
         if self._edit_dialog:
             try:
@@ -5261,21 +5655,25 @@ EDITED VERSION:
                 return list(_FALLBACK_PROMPTS)
             try:
                 system = (
+                    "LANGUE OBLIGATOIRE : français. Tu ne dois JAMAIS répondre en anglais "
+                    "ni dans aucune autre langue que le français.\n"
                     "Tu es un assistant qui propose des instructions d’édition de texte. "
-                    "Tu réponds TOUJOURS en français, quelle que soit la langue du texte fourni. "
                     "Réponds UNIQUEMENT avec une liste numérotée de 8 instructions courtes "
-                    "(une par ligne, format: ‘1. instruction’). "
+                    "en français (une par ligne, format: ‘1. instruction’). "
                     "Chaque instruction doit être une consigne d’édition concrète et directe "
-                    "(commence par un verbe à l’impératif en français). "
+                    "(verbe à l’impératif en français). "
                     "Adapte les suggestions au contenu, au style et au domaine du texte. "
-                    "Ne répète pas le texte. Pas de commentaire. Pas d’explication. "
-                    "IMPORTANT : Tes réponses doivent être exclusivement en français."
+                    "Ne répète pas le texte. Pas de commentaire. Pas d’explication."
                 )
                 prompt = (
                     f"Voici un extrait de texte sélectionné par l’utilisateur :\n\n"
                     f"«{snippet}»\n\n"
-                    f"Propose 8 instructions d’édition pertinentes et contextualisées "
-                    f"pour ce texte. Réponds en français."
+                    f"Propose 8 instructions d’édition pertinentes pour ce texte.\n\n"
+                    f"Exemple de format attendu :\n"
+                    f"1. Corrige les fautes d’orthographe et de grammaire.\n"
+                    f"2. Reformule en style plus concis.\n"
+                    f"3. Simplifie le vocabulaire technique.\n\n"
+                    f"Tes 8 instructions en français :"
                 )
                 api_type = str(self.get_config("api_type", "completions")).lower()
                 request = self.make_api_request(prompt, system, max_tokens=600, api_type=api_type)
@@ -5317,10 +5715,10 @@ EDITED VERSION:
             """Animate the suggestions label while LLM generates."""
             _loading_anim["active"] = True
             frames = [
-                "MIrAI réfléchit",
-                "MIrAI réfléchit .",
-                "MIrAI réfléchit . .",
-                "MIrAI réfléchit . . .",
+                "Mirai prépare des suggestions",
+                "Mirai prépare des suggestions .",
+                "Mirai prépare des suggestions . .",
+                "Mirai prépare des suggestions . . .",
             ]
             def _animate():
                 idx = 0

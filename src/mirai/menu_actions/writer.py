@@ -193,6 +193,22 @@ def _edit_selection(job, text, selection, text_range):
         text_range.setString(text_range.getString() + ": " + str(e))
 
 
+def _resize_selection(job, text, selection, text_range, controller=None, model=None):
+    job._send_telemetry(
+        "ResizeSelection",
+        {
+            "action": "resize_selection",
+            "text_length": str(len(text_range.getString())),
+        },
+    )
+
+    try:
+        job._show_resize_dialog(text, text_range, controller=controller, model=model)
+    except Exception as e:
+        text_range = selection.getByIndex(0)
+        text_range.setString(text_range.getString() + ": " + str(e))
+
+
 def _summarize_selection(job, text, selection, text_range, controller=None, model=None):
     job._send_telemetry(
         "SummarizeSelection",
@@ -421,6 +437,8 @@ def handle_writer_action(job, args, model):
         _summarize_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "SimplifySelection":
         _simplify_selection(job, text, selection, text_range, controller=ctrl, model=model)
+    elif args == "ResizeSelection":
+        _resize_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "OpenmiraiWebsite":
         _open_mirai_website(job)
     elif args == "Documentation":
