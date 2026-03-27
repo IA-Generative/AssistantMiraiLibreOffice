@@ -5125,7 +5125,7 @@ EDITED VERSION:
             6,
             {}
         )
-        add(
+        label_suggestions_control = add(
             "label_suggestions",
             "FixedText",
             HORI_MARGIN,
@@ -5262,17 +5262,20 @@ EDITED VERSION:
             try:
                 system = (
                     "Tu es un assistant qui propose des instructions d’édition de texte. "
+                    "Tu réponds TOUJOURS en français, quelle que soit la langue du texte fourni. "
                     "Réponds UNIQUEMENT avec une liste numérotée de 8 instructions courtes "
                     "(une par ligne, format: ‘1. instruction’). "
                     "Chaque instruction doit être une consigne d’édition concrète et directe "
-                    "(commence par un verbe à l’impératif). "
+                    "(commence par un verbe à l’impératif en français). "
                     "Adapte les suggestions au contenu, au style et au domaine du texte. "
-                    "Ne répète pas le texte. Pas de commentaire. Pas d’explication."
+                    "Ne répète pas le texte. Pas de commentaire. Pas d’explication. "
+                    "IMPORTANT : Tes réponses doivent être exclusivement en français."
                 )
                 prompt = (
                     f"Voici un extrait de texte sélectionné par l’utilisateur :\n\n"
                     f"«{snippet}»\n\n"
-                    f"Propose 8 instructions d’édition pertinentes et contextualisées pour ce texte."
+                    f"Propose 8 instructions d’édition pertinentes et contextualisées "
+                    f"pour ce texte. Réponds en français."
                 )
                 api_type = str(self.get_config("api_type", "completions")).lower()
                 request = self.make_api_request(prompt, system, max_tokens=600, api_type=api_type)
@@ -5283,11 +5286,16 @@ EDITED VERSION:
                 raw = "".join(accumulated).strip()
                 if not raw:
                     return list(_FALLBACK_PROMPTS)
-                # Parse numbered lines: "1. ...", "2. ...", etc.
+                # Strip chain-of-thought blocks (<think>…</think>)
+                raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE).lstrip("\n")
+                # Parse numbered lines only: "1. ...", "2. ...", etc.
+                # This filters out reasoning/thinking text the model may produce.
                 lines = []
                 for line in raw.split("\n"):
                     line = line.strip()
                     if not line:
+                        continue
+                    if not re.match(r"^\d+[\.\)\-]\s", line):
                         continue
                     # Remove leading number + dot/parenthesis
                     cleaned = re.sub(r"^\d+[\.\)\-]\s*", "", line).strip()
@@ -5302,6 +5310,43 @@ EDITED VERSION:
                 log_to_file(f"AI suggestion generation failed: {str(e)}")
                 return list(_FALLBACK_PROMPTS)
 
+        # Loading animation state
+        _loading_anim = {"active": False, "thread": None}
+
+        def _start_loading_animation():
+            """Animate the suggestions label while LLM generates."""
+            _loading_anim["active"] = True
+            frames = [
+                "MIrAI réfléchit",
+                "MIrAI réfléchit .",
+                "MIrAI réfléchit . .",
+                "MIrAI réfléchit . . .",
+            ]
+            def _animate():
+                idx = 0
+                while _loading_anim["active"]:
+                    try:
+                        if label_suggestions_control:
+                            label_suggestions_control.getModel().Label = frames[idx % len(frames)]
+                    except Exception:
+                        break
+                    idx += 1
+                    import time
+                    time.sleep(0.5)
+                # Restore default label when done
+                try:
+                    if label_suggestions_control:
+                        label_suggestions_control.getModel().Label = "Suggestions"
+                except Exception:
+                    pass
+            t = threading.Thread(target=_animate, daemon=True)
+            _loading_anim["thread"] = t
+            t.start()
+
+        def _stop_loading_animation():
+            """Stop the loading animation."""
+            _loading_anim["active"] = False
+
         def _load_suggestions(use_ai=False):
             """Load suggestions into the list. use_ai=True triggers LLM generation."""
             if suggestions_list:
@@ -5310,7 +5355,8 @@ EDITED VERSION:
                 except Exception:
                     pass
             if use_ai:
-                # Show loading state
+                # Show loading animation
+                _start_loading_animation()
                 if suggestions_list:
                     try:
                         suggestions_list.addItems(("Génération en cours...",), 0)
@@ -5339,6 +5385,7 @@ EDITED VERSION:
                     except Exception as e:
                         log_to_file(f"Suggestions: failed to read document body: {str(e)}")
                 suggestions = _generate_prompt_suggestions(text_value)
+                _stop_loading_animation()
             else:
                 suggestions = list(_FALLBACK_PROMPTS)
             if suggestions_list:
@@ -5358,7 +5405,7 @@ EDITED VERSION:
             try:
                 _load_suggestions(use_ai=True)
             except Exception:
-                pass
+                _stop_loading_animation()
         threading.Thread(target=_bg_load_ai_suggestions, daemon=True).start()
 
         def _refresh_selection_label():
