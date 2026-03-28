@@ -91,7 +91,7 @@
               <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
-          <node oor:name="MA5a" oor:op="replace">
+          <node oor:name="MA5" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">💬 Reformuler la sélection (⌘L)</value>
             </prop>
@@ -105,37 +105,15 @@
               <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
-          <node oor:name="MA5b" oor:op="replace">
+          <node oor:name="MA6" oor:op="replace">
             <prop oor:name="URL" oor:type="xs:string">
               <value>private:separator</value>
-            </prop>
-            <prop oor:name="Context" oor:type="xs:string">
-              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
-            </prop>
-          </node>
-          <node oor:name="MA6" oor:op="replace">
-            <prop oor:name="Title">
-              <value xml:lang="en-US">🌐 Accéder au site mirai</value>
-            </prop>
-            <prop oor:name="URL">
-              <value>service:fr.gouv.interieur.mirai.do?OpenmiraiWebsite</value>
-            </prop>
-            <prop oor:name="Target" oor:type="xs:string">
-              <value>_self</value>
             </prop>
             <prop oor:name="Context" oor:type="xs:string">
               <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
           <node oor:name="MA7" oor:op="replace">
-            <prop oor:name="URL" oor:type="xs:string">
-              <value>private:separator</value>
-            </prop>
-            <prop oor:name="Context" oor:type="xs:string">
-              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
-            </prop>
-          </node>
-          <node oor:name="MA8" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">📚 Documentation</value>
             </prop>
@@ -149,7 +127,29 @@
               <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
+          <node oor:name="MA8" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🌐 Accéder au site mirai</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?OpenmiraiWebsite</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
+          </node>
           <node oor:name="MA9" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
+          </node>
+          <node oor:name="MAa" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">⚙️ Paramètres</value>
             </prop>

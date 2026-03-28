@@ -10,7 +10,7 @@
 
 ### Qu'est-ce que c'est ?
 
-Un **plug-in LibreOffice** (format `.oxt`) qui intègre un LLM (Large Language Model) directement dans Writer et Calc. L'utilisateur peut sélectionner du texte et déclencher des actions IA (générer, modifier, résumer, reformuler) via un menu dédié.
+Un **plug-in LibreOffice** (format `.oxt`) qui intègre un LLM (Large Language Model) directement dans Writer et Calc. L'utilisateur peut sélectionner du texte et déclencher des actions IA (générer, modifier, ajuster la longueur, résumer, reformuler) via un menu dédié.
 
 Le plug-in est conçu pour une organisation (Ministère de l'Intérieur, France) qui :
 - Gère une infrastructure propre (SSO Keycloak, serveur LLM derrière relay)
@@ -69,7 +69,8 @@ AssistantMiraiLibreOffice/
 │       ├── config.default.docker.json       # ✓ localhost:3001
 │       ├── config.default.local-llm.json    # ✓ Ollama local, pas de bootstrap
 │       ├── config.default.dgx.json          # ✓ on-premise GPU
-│       ├── config.default.integration.json  # ⛔ gitignored — URLs réelles intégration
+│       ├── config.default.kubernetes.json   # ✓ bootstrap.fake-domain.name (Scaleway)
+│       ├── config.default.integration.json  # ⛔ gitignored — URLs réelles intégration (profile=int)
 │       └── config.default.production.json   # ⛔ gitignored — URLs réelles prod
 ├── scripts/
 │   ├── 00-clean-install.sh          # ★ Purge config + logs + extension cache (--uninstall)
@@ -337,7 +338,7 @@ body["stream"] = False
 }
 ```
 
-**Events instrumentés :** ExtensionLoaded, ExtendSelection, EditSelection, SummarizeSelection, SimplifySelection, OpenmiraiWebsite, OpenSettings, OpenDocumentation
+**Events instrumentés :** ExtensionLoaded, ExtendSelection, EditSelection, ResizeSelection, SummarizeSelection, SimplifySelection, OpenmiraiWebsite, OpenSettings, OpenDocumentation
 
 **Garanties de privacy :** Aucun texte utilisateur, aucun prompt, aucune PII dans les spans.
 
@@ -459,19 +460,37 @@ else:
 
 ---
 
-### 3.10 Menu Documentation & propagation `doc_url` / `portal_url`
+### 3.10 Ajuster la longueur — `ResizeSelection` (⌘J)
+
+Mini-dialogue flottant avec boutons **−** / **+** pour réduire ou développer le texte sélectionné.
+
+**Architecture :**
+- `_show_resize_dialog()` dans `entrypoint.py` — dialogue UNO singleton
+- `_resize_selection()` dans `menu_actions/writer.py` — dispatch
+- `_do_resize(direction)` — appel LLM avec objectif de mots (65% pour réduire, 140% pour développer)
+
+**Comportement :**
+- Remplacement en place via `rng.setString(raw)` (pas d'insertion après)
+- Undo groupé (`enterUndoContext` / `leaveUndoContext`)
+- Zone de prévisualisation avec streaming en temps réel et auto-scroll
+- Filtrage robuste des blocs `<think>` (3 passes regex : complets, dangling `</think>`, unclosed `<think>`)
+- Label de statut avec décompte de mots et delta : "OK (42 mots, -18). Ctrl+Z pour annuler."
+- Le callback `_do_resize` s'exécute sur le thread principal (pas de `threading.Thread`) car `stream_request` utilise `processEventsToIdle`
+
+### 3.11 Menu Documentation & propagation `doc_url` / `portal_url`
 
 **Structure menu `oxt/Addons.xcu` (Writer) :**
 ```
-MA1  Générer la suite          (Ctrl+Q)
-MA2  Modifier la sélection     (Ctrl+E)
-MA3  Résumer la sélection      (Ctrl+R)
-MA4  Reformuler la sélection   (Ctrl+L)
-MA5  ─────────────────────
-MA6  Accéder au service MIrAI
-MA7  ─────────────────────
-MA8  📚 Documentation          ← NOUVEAU (service:...do?Documentation)
-MA9  ⚙️ Paramètres
+MA1   Générer la suite          (⌘Q)
+MA2   Modifier la sélection     (⌘E)
+MA3   Ajuster la longueur       (⌘J)
+MA4   Résumer la sélection      (⌘R)
+MA5a  Reformuler la sélection   (⌘L)
+MA5b  ─────────────────────
+MA6   Accéder au service MIrAI
+MA7   ─────────────────────
+MA8   📚 Documentation
+MA9   ⚙️ Paramètres
 ```
 
 **Implémentation `_open_documentation(job)` dans `menu_actions/writer.py` :**
@@ -505,7 +524,7 @@ keys_to_sync = [
 {
   "config": {
     "portal_url": "https://mirai.interieur.gouv.fr",
-    "doc_url": "https://github.com/IA-Generative/AssistantmiraiLibreOffice"
+    "doc_url": "https://github.com/IA-Generative/AssistantMiraiLibreOffice/blob/master/docs/notice-utilisateur.md"
   }
 }
 ```
@@ -857,7 +876,7 @@ open -a LibreOffice tests/fixtures/sample.odt
 2. **Menu** : `oxt/Addons.xcu` + `oxt/META-INF/manifest.xml`
 3. **Config locale** : `_get_config_from_file()` + `set_config()` + `_config_write_lock`
 4. **Appels LLM** : `make_api_request()` + `stream_request()` + `_build_auth_headers()`
-5. **Actions Writer** : `menu_actions/writer.py` (extend, edit, summarize, simplify)
+5. **Actions Writer** : `menu_actions/writer.py` (extend, edit, resize, summarize, simplify)
 6. **Actions Calc** : `menu_actions/calc.py`
 7. **SSL** : `get_ssl_context()` + CA bundle
 8. **Proxy** : `_urlopen()` + `_build_proxy_opener()` + settings dialog
@@ -889,6 +908,12 @@ open -a LibreOffice tests/fixtures/sample.odt
 | Multi-wizard (timer + menu) | Deux threads peuvent lancer `_show_enrollment_wizard()` quasi-simultanément | `_enrollment_wizard_lock` + `_enrollment_wizard_active` flag |
 | Menu Documentation relance wizard | `trigger()` interceptait tous les args non-connus → lançait le flow d'enrôlement | `_enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings"}` |
 | `doc_url` absent de config locale | `_persist_bootstrap_config` a une liste `keys_to_sync` explicite — les clés absentes sont ignorées | Ajouter la clé à `keys_to_sync` dans `_persist_bootstrap_config` |
+| K8s relay-assistant DNS | Nginx `proxy_pass` vers hostname externe échoue sans `resolver` | Ajouter `resolver <kube-dns-IP> valid=30s ipv6=off;` dans le configmap nginx |
+| K8s JWKs port mismatch | `DM_AUTH_JWKS_URL` avec port 8080 (containerPort) au lieu de 80 (Service port) → timeout | Utiliser `http://relay-assistant/...` (port 80 = Service) |
+| K8s env vars manquantes | Placeholders `${{LLM_BASE_URL}}` non résolus car la clé n'est pas dans le deployment env | Ajouter les `secretKeyRef` dans le deployment manifest |
+| Profil `integration` vs `int` | Le device-management accepte uniquement `dev`, `prod`, `int` — pas `integration` | Utiliser `?profile=int` dans `config_path` |
+| Config dupliquée configmap/fichier | Les configs libreoffice existent dans `config/libreoffice/` ET dans le configmap K8s `10-configmap-device-management.yaml` | Mettre à jour les deux |
+| `_do_resize` dans un thread | `stream_request` utilise `processEventsToIdle` (thread principal) → crash si appelé depuis un thread secondaire | Appeler directement depuis `actionPerformed` sans `threading.Thread` |
 
 ---
 
