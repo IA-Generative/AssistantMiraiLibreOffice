@@ -327,7 +327,10 @@ VERSION REFORMULÉE :
             "la même langue que le texte fourni. Tu utilises des phrases courtes "
             "et des mots courants."
         )
-        max_tokens = len(original_text) + job.get_config("edit_selection_max_new_tokens", 15000)
+        configured_sp = str(job.get_config("simplify_selection_system_prompt", "") or "").strip()
+        if configured_sp:
+            system_prompt = configured_sp + " " + system_prompt
+        max_tokens = len(original_text) + job.get_config("simplify_selection_max_tokens", 15000)
 
         api_type = str(job.get_config("api_type", "completions")).lower()
         request = job.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
