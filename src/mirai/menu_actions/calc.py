@@ -1,8 +1,41 @@
 """Calc menu actions extracted from MainJob.trigger."""
 
+import re
+
 from .shared import apply_settings_result
 
 _ERR_PREFIX = "#ERREUR: "
+
+
+def _strip_markdown(text):
+    """Convert markdown formatting to clean plain text for Calc cells."""
+    # Remove <think>...</think> blocks
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove everything up to </think> (dangling close)
+    text = re.sub(r"^.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
+    # Remove heading markers: ### Title → Title
+    text = re.sub(r"^#{1,6}\s+", "", text, flags=re.MULTILINE)
+    # Bold+italic: ***text*** or ___text___
+    text = re.sub(r"\*{3}(.+?)\*{3}", r"\1", text)
+    text = re.sub(r"_{3}(.+?)_{3}", r"\1", text)
+    # Bold: **text** or __text__
+    text = re.sub(r"\*{2}(.+?)\*{2}", r"\1", text)
+    text = re.sub(r"_{2}(.+?)_{2}", r"\1", text)
+    # Italic: *text* or _text_
+    text = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"\1", text)
+    text = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", text)
+    # Inline code: `text`
+    text = re.sub(r"`(.+?)`", r"\1", text)
+    # Code blocks: ```...```
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Bullet lists: - item or * item → • item
+    text = re.sub(r"^[\s]*[-*]\s+", "• ", text, flags=re.MULTILINE)
+    # Numbered lists: 1. item → 1. item (keep as-is)
+    # Horizontal rules
+    text = re.sub(r"^---+$", "", text, flags=re.MULTILINE)
+    # Clean up extra blank lines
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _col_letter(col: int) -> str:
@@ -109,25 +142,7 @@ def _open_settings(job):
         pass
 
 
-def _strip_markdown(text):
-    """Remove common LLM markdown artifacts from plain-text cell content.
-
-    Targets only unambiguous formatting markers: bold (**…** / __…__),
-    italic (*…* / _…_), ATX headers (# …) and inline code (`…`).
-    Single bare ``*`` or ``_`` characters that aren't paired are left alone.
-    """
-    import re
-    # Bold — greedy enough to handle multi-line but not across paragraphs
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text, flags=re.DOTALL)
-    text = re.sub(r'__(.+?)__',     r'\1', text, flags=re.DOTALL)
-    # Italic (only when surrounded by non-space)
-    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'\1', text, flags=re.DOTALL)
-    text = re.sub(r'(?<!_)_(?!_)(.+?)(?<!_)_(?!_)',       r'\1', text, flags=re.DOTALL)
-    # ATX headers
-    text = re.sub(r'(?m)^#{1,6}\s+', '', text)
-    # Inline code
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    return text
+    # _strip_markdown defined at module level (see top of file)
 
 
 def _safe_set_string(cell, text):
@@ -616,12 +631,21 @@ def _analyze_range(job, sheet, col_range, row_range):
         pass
 
     try:
-        request = job.make_api_request(prompt, system_prompt, 1000, api_type=api_type)
+        max_tokens = int(job.get_config("analyze_range_max_tokens", 4000))
+        request = job.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
 
-        def append_analysis(chunk_text, rc=result_cell):
-            rc.setString(rc.getString() + chunk_text)
+        accumulated = []
+
+        def append_analysis(chunk_text):
+            accumulated.append(chunk_text)
+            # Show raw streaming progress in cell
+            result_cell.setString("".join(accumulated))
 
         job.stream_request(request, api_type, append_analysis)
+
+        # Clean markdown and think blocks, then write final result
+        raw = "".join(accumulated)
+        result_cell.setString(_strip_markdown(raw))
     except Exception as e:
         result_cell.setString(_ERR_PREFIX + str(e))
 
