@@ -57,7 +57,13 @@ def _make_job(stream_chunks=None):
             callback(chunk)
 
     job.stream_request.side_effect = _stream
-    job.get_config.return_value = ""
+    def _get_config(key, default=""):
+        config_defaults = {
+            "api_type": "chat",
+            "analyze_range_max_tokens": 4000,
+        }
+        return config_defaults.get(key, default)
+    job.get_config.side_effect = _get_config
     job._formula_dialog = None
     job._formula_dialog_state = None
     return job

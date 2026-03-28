@@ -951,11 +951,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
     def _schedule_update(self, directive):
         """Start a background daemon thread to perform the plugin update if not already running."""
+        urgency = directive.get("urgency", "normal")
+
         with self._update_lock:
             if self._update_in_progress:
                 log_to_file("Update already in progress, skipping duplicate schedule")
                 return
             self._update_in_progress = True
+
+        if urgency == "deferred":
+            log_to_file(f"Deferred update scheduled: target={directive.get('target_version')} — download only, install on next restart")
+
+        if urgency == "critical":
+            log_to_file(f"Critical update initiated: target={directive.get('target_version')}")
 
         def _worker():
             try:
@@ -966,7 +974,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
-        log_to_file(f"Update thread scheduled: action={directive.get('action')} target={directive.get('target_version')}")
+        log_to_file(f"Update thread scheduled: action={directive.get('action')} target={directive.get('target_version')} urgency={urgency}")
 
     def _perform_update(self, directive):
         """Download, verify checksum and install the artifact via ExtensionManager."""
@@ -976,6 +984,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         expected_checksum = directive.get("checksum", "")
         urgency = directive.get("urgency", "normal")
         campaign_id = directive.get("campaign_id")
+        version_before = self._get_extension_version()
 
         base_url = str(self._get_config_from_file("bootstrap_url", "")).strip().rstrip("/")
         if not base_url or not artifact_url:
@@ -983,12 +992,25 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return
 
         full_url = base_url + artifact_url if artifact_url.startswith("/") else artifact_url
-        log_to_file(f"_perform_update: downloading {full_url} (action={action} target={target_version})")
+        log_to_file(f"_perform_update: downloading {full_url} (action={action} target={target_version} urgency={urgency})")
 
+        tmp_path = None
         try:
-            request = urllib.request.Request(full_url, headers=_with_user_agent({}))
-            with self._urlopen(request, context=self.get_ssl_context(), timeout=60) as response:
-                binary = response.read()
+            # Download with retry (3 attempts with exponential backoff)
+            binary = None
+            for dl_attempt in range(3):
+                try:
+                    request = urllib.request.Request(full_url, headers=_with_user_agent({}))
+                    with self._urlopen(request, context=self.get_ssl_context(), timeout=60) as response:
+                        binary = response.read()
+                    break
+                except Exception as dl_err:
+                    log_to_file(f"_perform_update: download attempt {dl_attempt+1}/3 failed: {dl_err}")
+                    if dl_attempt < 2:
+                        time.sleep(2 ** (dl_attempt + 1))
+            if binary is None:
+                self._report_update_status(campaign_id, "download_error", version_before, "", "all download attempts failed")
+                return
 
             # Verify checksum
             if expected_checksum and expected_checksum.startswith("sha256:"):
@@ -996,22 +1018,38 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 actual_hex = hashlib.sha256(binary).hexdigest()
                 if actual_hex != expected_hex:
                     log_to_file(f"_perform_update: checksum mismatch expected={expected_hex} actual={actual_hex}")
+                    self._report_update_status(campaign_id, "checksum_error", version_before, "", "checksum mismatch")
                     return
                 log_to_file("_perform_update: checksum OK")
 
-            # Write to temp file and install via ExtensionManager
+            # Write to temp file
             import tempfile
             suffix = ".oxt" if "libreoffice" in full_url.lower() or full_url.endswith(".oxt") else ".oxt"
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
                 tmp.write(binary)
                 tmp_path = tmp.name
 
-            tmp_url = uno.systemPathToFileUrl(tmp_path)
-            ext_manager = self.ctx.getServiceManager().createInstanceWithContext(
-                "com.sun.star.deployment.ExtensionManager", self.ctx
-            )
-            ext_manager.addExtension(tmp_url, None, "user", None, None)
-            log_to_file(f"_perform_update: extension installed version={target_version}")
+            # Deferred urgency: save artifact for next restart, skip install
+            if urgency == "deferred":
+                log_to_file(f"_perform_update: deferred update saved to {tmp_path} for next restart")
+                self._report_update_status(campaign_id, "deferred", version_before, "", "")
+                return
+
+            # Install via ExtensionManager
+            try:
+                tmp_url = uno.systemPathToFileUrl(tmp_path)
+                ext_manager = self.ctx.getServiceManager().createInstanceWithContext(
+                    "com.sun.star.deployment.ExtensionManager", self.ctx
+                )
+                ext_manager.addExtension(tmp_url, None, "user", None, None)
+                log_to_file(f"_perform_update: extension installed version={target_version}")
+            except Exception as install_err:
+                log_to_file(f"_perform_update: install error: {install_err}")
+                self._report_update_status(campaign_id, "failed", version_before, "", str(install_err))
+                return
+
+            # Report success
+            self._report_update_status(campaign_id, "installed", version_before, target_version)
 
             # Notify user
             try:
@@ -1022,12 +1060,15 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 if active_frame:
                     toolkit = self.ctx.getServiceManager().createInstance("com.sun.star.awt.Toolkit")
                     parent = active_frame.getContainerWindow()
+                    msg_text = f"Mirai {target_version} installé. Redémarrez LibreOffice pour finaliser."
+                    if urgency == "critical":
+                        msg_text = f"Mise à jour critique Mirai {target_version} installée. Veuillez redémarrer LibreOffice immédiatement."
                     msgbox = toolkit.createMessageBox(
                         parent,
                         1,  # MessageBoxType.INFOBOX
                         MSG_BUTTONS.BUTTONS_OK,
                         "Mirai — Mise à jour",
-                        f"Mirai {target_version} installé. Redémarrez LibreOffice pour finaliser."
+                        msg_text
                     )
                     msgbox.execute()
             except Exception as notify_err:
@@ -1043,6 +1084,50 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         except Exception as e:
             log_to_file(f"_perform_update: error: {e}")
+            self._report_update_status(campaign_id, "failed", version_before, "", str(e))
+        finally:
+            # Clean up temp file (unless deferred — kept for restart)
+            if tmp_path and urgency != "deferred":
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+    def _report_update_status(self, campaign_id, status, version_before, version_after, error_detail=""):
+        """Report update status back to device-management server."""
+        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip().rstrip("/")
+        if not base_url:
+            return
+        endpoint = base_url + "/update/status"
+        client_uuid = str(self._ensure_plugin_uuid() or "")
+
+        import json
+        payload = {
+            "campaign_id": campaign_id,
+            "client_uuid": client_uuid,
+            "status": status,
+            "version_before": version_before,
+            "version_after": version_after,
+            "error_detail": error_detail,
+        }
+
+        # Retry 3 times with backoff
+        for attempt in range(3):
+            try:
+                data = json.dumps(payload).encode("utf-8")
+                headers = {"Content-Type": "application/json"}
+                access_token = str(self._get_config_from_file("access_token", "") or "")
+                if access_token:
+                    headers["Authorization"] = f"Bearer {access_token}"
+                req = urllib.request.Request(endpoint, data=data, headers=_with_user_agent(headers))
+                with self._urlopen(req, context=self.get_ssl_context(), timeout=10) as resp:
+                    resp.read()
+                log_to_file(f"Update status reported: {status} campaign={campaign_id}")
+                return
+            except Exception as e:
+                log_to_file(f"Update status report attempt {attempt+1}/3 failed: {e}")
+                if attempt < 2:
+                    time.sleep(2 ** (attempt + 1))  # 2s, 4s
 
     def _get_setting(self, key):
         now = time.time()
