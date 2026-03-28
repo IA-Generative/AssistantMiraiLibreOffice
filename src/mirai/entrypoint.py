@@ -887,12 +887,18 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             keys_to_sync = [
                 "llm_base_urls", "llm_api_tokens",
                 "llm_default_models",
-                "systemPrompt", "model", "api_type", "is_openwebui",
+                "systemPrompt", "api_type", "is_openwebui",
                 "openai_compatibility",
                 "telemetryEndpoint", "telemetryKey",
-                "telemetryAuthorizationType", "telemetrySel",
+                "telemetryAuthorizationType",
                 "relayAssistantBaseUrl",
                 "doc_url", "portal_url",
+                "keycloak_redirect_uri", "keycloak_allowed_redirect_uri",
+                "analyze_range_max_tokens", "llm_request_timeout_seconds",
+                "simplify_selection_max_tokens", "simplify_selection_system_prompt",
+                "extend_selection_max_tokens", "extend_selection_system_prompt",
+                "edit_selection_max_new_tokens", "edit_selection_system_prompt",
+                "summarize_selection_max_tokens", "summarize_selection_system_prompt",
             ]
             # Keys that are only written locally if the user has no local value yet
             user_preference_keys = {"llm_default_models"}
