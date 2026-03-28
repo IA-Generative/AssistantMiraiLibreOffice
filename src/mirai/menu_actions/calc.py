@@ -668,6 +668,12 @@ def handle_calc_action(job, args, model):
         if args == "settings":
             _open_settings(job)
             return True
+        if args == "AboutDialog":
+            try:
+                job._show_about_dialog()
+            except Exception as e:
+                job._log(f"AboutDialog error: {e}")
+            return True
 
         # Collect user input before touching the sheet
         user_input = ""

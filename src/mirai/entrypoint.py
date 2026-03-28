@@ -4942,6 +4942,283 @@ EDITED VERSION:
         except Exception as e:
             log_to_file(f"EditSelection insert failed: {str(e)}")
 
+    def _show_about_dialog(self):
+        """Show the About dialog with version, icon, description and update check."""
+        from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
+
+        WIDTH = 420
+        BTN_HEIGHT = 26
+        HORI_MARGIN = 20
+        VERT_MARGIN = 16
+        CHANGELOG_HEIGHT = 110
+        HEIGHT = 430
+
+        ctx = uno.getComponentContext()
+        def create(name):
+            return ctx.getServiceManager().createInstanceWithContext(name, ctx)
+
+        dialog = create("com.sun.star.awt.UnoControlDialog")
+        dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
+        dialog.setModel(dialog_model)
+        dialog.setVisible(False)
+        dialog.setTitle("À propos de l'IA'ssistant MIrAI")
+        dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
+        try:
+            dialog_model.BackgroundColor = _UI["bg"]
+        except Exception:
+            pass
+
+        def add(name, type_, x_, y_, width_, height_, props):
+            try:
+                m = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type_ + "Model")
+                dialog_model.insertByName(name, m)
+                control = dialog.getControl(name)
+                control.setPosSize(x_, y_, width_, height_, POSSIZE)
+                for key, value in props.items():
+                    try:
+                        setattr(m, key, value)
+                    except Exception:
+                        pass
+                return control
+            except Exception:
+                return None
+
+        y = VERT_MARGIN
+
+        # Logo — search in multiple locations
+        logo_url = ""
+        _candidates = [
+            # Installed extension: entrypoint.py is at .../mirai.oxt/src/mirai/entrypoint.py
+            # logo is at .../mirai.oxt/assets/logo.png
+            os.path.join(os.path.dirname(__file__), "..", "..", "assets", "logo.png"),
+            # Dev: from src/mirai/ → oxt/assets/
+            os.path.join(os.path.dirname(__file__), "..", "..", "oxt", "assets", "logo.png"),
+        ]
+        for _lp in _candidates:
+            _lp = os.path.normpath(_lp)
+            if os.path.exists(_lp):
+                logo_url = uno.systemPathToFileUrl(_lp)
+                break
+
+        LOGO_SIZE = 64
+        if logo_url:
+            add("about_logo", "ImageControl",
+                WIDTH // 2 - LOGO_SIZE // 2, y, LOGO_SIZE, LOGO_SIZE,
+                {"ImageURL": logo_url, "Border": 0, "ScaleImage": True})
+            y += LOGO_SIZE + 10
+        else:
+            y += 10  # small spacing if no logo
+
+        # Title
+        add("about_title", "FixedText",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, 22,
+            {"Label": "MIrAI — IA'ssistant LibreOffice",
+             "FontHeight": 16, "FontWeight": 200,
+             "TextColor": _UI["primary"], "Align": 1})
+        y += 26
+
+        # Version
+        version = self._get_extension_version() or "0.1.0"
+        add("about_version", "FixedText",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, 16,
+            {"Label": f"Version {version}",
+             "FontHeight": _UI["font_label"],
+             "TextColor": _UI["text_secondary"], "Align": 1})
+        y += 22
+
+        # Separator
+        add("about_sep1", "FixedLine",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, 6, {})
+        y += 12
+
+        # Description (non-editable label, smaller text, white bg)
+        desc_line1 = (
+            "Extension LibreOffice intégrant un assistant IA dans Writer et Calc. "
+            "Sélectionnez du texte et utilisez le menu MIrAI pour générer, modifier, "
+            "résumer, reformuler ou ajuster la longueur de vos documents."
+        )
+        add("about_desc1", "FixedText",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, 30,
+            {"Label": desc_line1, "NoLabel": True, "MultiLine": True,
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_secondary"]})
+        y += 32
+        add("about_desc2", "FixedText",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, 12,
+            {"Label": "Programme MIrAI — Ministère de l'Intérieur", "NoLabel": True,
+             "FontHeight": 7, "FontSlant": 2,
+             "TextColor": _UI["text_light"]})
+        y += 18
+
+        # Separator
+        add("about_sep2", "FixedLine",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, 6, {})
+        y += 12
+
+        # Changelog title
+        add("about_changelog_title", "FixedText",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, 16,
+            {"Label": "Derniers ajouts",
+             "FontHeight": _UI["font_section"], "FontWeight": 150,
+             "TextColor": _UI["primary"]})
+        y += 20
+
+        changelog = (
+            "• Ajuster la longueur — mini-dialogue − / + pour réduire ou développer\n"
+            "• Suggestions IA contextuelles dans le dialogue d'édition\n"
+            "• Analyse de plage Calc avec nettoyage markdown\n"
+            "• Déploiement automatisé avec rollout progressif\n"
+            "• Notice utilisateur double persona (novice / expert)\n"
+            "• Filtrage robuste du raisonnement LLM (blocs <think>)"
+        )
+        add("about_changelog", "Edit",
+            HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, CHANGELOG_HEIGHT,
+            {"Text": changelog, "MultiLine": True, "ReadOnly": True,
+             "BackgroundColor": _UI["bg_section"],
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_light"],
+             "Border": 1, "BorderColor": _UI["border"],
+             "VScroll": True})
+        y += CHANGELOG_HEIGHT + 10
+
+        # Buttons pinned at bottom
+        BTN_WIDTH = 140
+        btn_y = HEIGHT - VERT_MARGIN - BTN_HEIGHT - 18
+
+        # Check updates button
+        _mascot_path = os.path.join(os.path.dirname(__file__), "icons", "mascot16.png")
+        btn_update_props = {
+            "Label": "  Mises à jour",
+            "FontHeight": _UI["font_small"],
+            "FontWeight": 150,
+            "TextColor": _UI["btn_primary_fg"],
+            "BackgroundColor": _UI["btn_primary_bg"],
+        }
+        if os.path.exists(_mascot_path):
+            btn_update_props["ImageURL"] = uno.systemPathToFileUrl(_mascot_path)
+            btn_update_props["ImagePosition"] = 0
+            btn_update_props["ImageAlign"] = 0
+
+        btn_update = add("about_btn_update", "Button",
+            HORI_MARGIN, btn_y, BTN_WIDTH, BTN_HEIGHT, btn_update_props)
+
+        # Close button
+        btn_close = add("about_btn_close", "Button",
+            WIDTH - HORI_MARGIN - BTN_WIDTH, btn_y, BTN_WIDTH, BTN_HEIGHT,
+            {"Label": "Fermer",
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_secondary"],
+             "BackgroundColor": _UI["bg_section"]})
+
+        # Status label for update check
+        update_status = add("about_update_status", "FixedText",
+            HORI_MARGIN, btn_y + BTN_HEIGHT + 4, WIDTH - HORI_MARGIN * 2, 14,
+            {"Label": "", "NoLabel": True,
+             "FontHeight": 7,
+             "TextColor": _UI["text_secondary"], "Align": 1})
+
+        about_self = self
+
+        class AboutActionListener(unohelper.Base, XActionListener):
+            def actionPerformed(self, event):
+                source = getattr(event, "Source", None)
+                if source == btn_close:
+                    try:
+                        dialog.setVisible(False)
+                        dialog.dispose()
+                    except Exception:
+                        pass
+                elif source == btn_update:
+                    # Trigger a config refresh which will check for updates
+                    if update_status:
+                        try:
+                            update_status.getModel().Label = "Vérification en cours..."
+                            update_status.getModel().TextColor = _UI["primary"]
+                        except Exception:
+                            pass
+                    try:
+                        about_self._schedule_config_refresh(force=True, reason="manual_update_check")
+                        if update_status:
+                            try:
+                                if about_self._update_in_progress:
+                                    update_status.getModel().Label = "Mise à jour en cours de téléchargement..."
+                                    update_status.getModel().TextColor = _UI["info"]
+                                else:
+                                    update_status.getModel().Label = "Vous utilisez la dernière version."
+                                    update_status.getModel().TextColor = _UI["success"]
+                            except Exception:
+                                pass
+                    except Exception as e:
+                        if update_status:
+                            try:
+                                update_status.getModel().Label = f"Erreur : {str(e)[:50]}"
+                                update_status.getModel().TextColor = _UI["error"]
+                            except Exception:
+                                pass
+            def disposing(self, event):
+                return
+
+        listener = AboutActionListener()
+        if btn_update:
+            try:
+                btn_update.addActionListener(listener)
+            except Exception:
+                pass
+        if btn_close:
+            try:
+                btn_close.addActionListener(listener)
+            except Exception:
+                pass
+
+        # Rollover effects
+        if btn_update:
+            class _UpdateRollover(unohelper.Base, XMouseListener):
+                def mousePressed(self, e): return
+                def mouseReleased(self, e): return
+                def mouseEntered(self, e):
+                    try: btn_update.getModel().BackgroundColor = _UI["primary_hover"]
+                    except: pass
+                def mouseExited(self, e):
+                    try: btn_update.getModel().BackgroundColor = _UI["btn_primary_bg"]
+                    except: pass
+                def disposing(self, e): return
+            try:
+                btn_update.addMouseListener(_UpdateRollover())
+            except Exception:
+                pass
+
+        # Window close
+        class AboutTopWindowListener(unohelper.Base, XTopWindowListener):
+            def windowClosing(self, e):
+                try:
+                    dialog.setVisible(False)
+                    dialog.dispose()
+                except: pass
+            def windowOpened(self, e): return
+            def windowClosed(self, e): return
+            def windowMinimized(self, e): return
+            def windowNormalized(self, e): return
+            def windowActivated(self, e): return
+            def windowDeactivated(self, e): return
+            def disposing(self, e): return
+
+        # Position and show
+        frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
+        window = frame.getContainerWindow() if frame else None
+        dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
+        if window:
+            ps = window.getPosSize()
+            dialog.setPosSize(ps.Width // 2 - WIDTH // 2, ps.Height // 2 - HEIGHT // 2, 0, 0, POS)
+
+        try:
+            peer = dialog.getPeer()
+            if peer:
+                peer.addTopWindowListener(AboutTopWindowListener())
+        except Exception:
+            pass
+
+        dialog.setVisible(True)
+
     def _show_resize_dialog(self, text, text_range, controller=None, model=None):
         """Mini floating dialog with − / + buttons to shrink or expand selected text."""
         # Singleton: reuse if already open
@@ -8068,7 +8345,7 @@ EDITED VERSION:
 
         # First-time enrollment: intercept before any action
         # Informational/navigation actions bypass enrollment check
-        _enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings"}
+        _enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings", "AboutDialog"}
         if args not in _enrollment_bypass and not self._enrollment_dismissed and self._needs_first_enrollment():
             with self._enrollment_wizard_lock:
                 if self._enrollment_wizard_active:

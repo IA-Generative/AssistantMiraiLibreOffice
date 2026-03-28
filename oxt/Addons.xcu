@@ -164,6 +164,21 @@
             </prop>
           </node>
 
+          <node oor:name="MAb" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">ℹ️ À propos de l'IA'ssistant...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?AboutDialog</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+            </prop>
+          </node>
+
           <!-- ── Bloc Calc (MB*) — masqué en Writer ───────────────────── -->
           <node oor:name="MB1" oor:op="replace">
             <prop oor:name="Title">
@@ -257,6 +272,21 @@
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?settings</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+            <prop oor:name="Context" oor:type="xs:string">
+              <value>com.sun.star.sheet.SpreadsheetDocument</value>
+            </prop>
+          </node>
+
+          <node oor:name="MB9" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">ℹ️ À propos de l'IA'ssistant...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?AboutDialog</value>
             </prop>
             <prop oor:name="Target" oor:type="xs:string">
               <value>_self</value>

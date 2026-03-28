@@ -439,6 +439,11 @@ def handle_writer_action(job, args, model):
         _simplify_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "ResizeSelection":
         _resize_selection(job, text, selection, text_range, controller=ctrl, model=model)
+    elif args == "AboutDialog":
+        try:
+            job._show_about_dialog()
+        except Exception as e:
+            job._log(f"AboutDialog error: {e}")
     elif args == "OpenmiraiWebsite":
         _open_mirai_website(job)
     elif args == "Documentation":
