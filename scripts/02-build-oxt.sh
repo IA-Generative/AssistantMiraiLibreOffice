@@ -140,6 +140,15 @@ cp -R "$ROOT_DIR/oxt/." "$STAGE_DIR/"
 cp "$ROOT_DIR/main.py" "$STAGE_DIR/main.py"
 cp -R "$ROOT_DIR/src" "$STAGE_DIR/src"
 cp "$CONFIG_IN_USE" "$STAGE_DIR/config.default.json"
+# Calc functions reference for formula generation
+mkdir -p "$STAGE_DIR/config"
+if [ -f "$ROOT_DIR/config/calc-functions.json" ]; then
+  cp "$ROOT_DIR/config/calc-functions.json" "$STAGE_DIR/config/calc-functions.json"
+fi
+# Documentation (README + notice utilisateur) for device-management auto-description
+mkdir -p "$STAGE_DIR/docs"
+[ -f "$ROOT_DIR/README.md" ] && cp "$ROOT_DIR/README.md" "$STAGE_DIR/docs/README.md"
+[ -f "$ROOT_DIR/docs/notice-utilisateur.md" ] && cp "$ROOT_DIR/docs/notice-utilisateur.md" "$STAGE_DIR/docs/notice-utilisateur.md"
 
 find "$STAGE_DIR" -name ".DS_Store" -delete
 find "$STAGE_DIR" -name "*.pyc" -delete
