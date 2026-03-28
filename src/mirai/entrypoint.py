@@ -886,7 +886,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 "llm_base_urls", "llm_api_tokens",
                 "llm_default_models", "systemPrompt",
                 "telemetryEndpoint", "telemetryKey",
-                "telemetryAuthorizationType",
+                "telemetryAuthorizationType", "telemetrySel",
                 "relayAssistantBaseUrl",
                 "doc_url", "portal_url",
                 "keycloak_redirect_uri", "keycloak_allowed_redirect_uri",
