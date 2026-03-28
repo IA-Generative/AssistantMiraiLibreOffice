@@ -5124,8 +5124,8 @@ EDITED VERSION:
                     rng.setString(raw)
                     if ctrl:
                         try:
-                            view_cursor = ctrl.getViewCursor()
-                            view_cursor.gotoRange(rng.getEnd(), False)
+                            # Select the newly inserted text so user can resize again
+                            ctrl.select(rng)
                         except Exception:
                             pass
                 finally:

@@ -40,6 +40,16 @@ Ouvre une boîte de dialogue permettant de saisir des instructions (traduction, 
 ---fin-de-la-modification---
 ```
 
+### 📏 Ajuster la longueur — `Ctrl+J`
+
+Ouvre un mini-dialogue flottant avec deux boutons **−** (réduire) et **+** (développer) pour ajuster la longueur du texte sélectionné. Le texte est remplacé en place (annulable par `Ctrl+Z`).
+
+- **−** réduit d'environ 35% à chaque passe
+- **+** développe d'environ 40% à chaque passe
+- Fonctionnement itératif : cliquer plusieurs fois pour affiner progressivement
+- Zone de prévisualisation montrant le flux LLM en temps réel
+- Compteur de mots et delta affiché après chaque opération
+
 ### 📝 Résumer la sélection — `Ctrl+R`
 
 Génère un résumé concis du texte sélectionné. Utile pour synthétiser des rapports, extraire les points clés ou préparer un support de présentation. Résultat inséré avec délimiteurs :
@@ -106,7 +116,7 @@ Analyse une plage de cellules sélectionnée et insère un **résumé des tendan
 
 ### Préservation du texte original
 
-Les fonctions **Modifier**, **Résumer** et **Simplifier** n'effacent jamais le texte original : le résultat est ajouté après la sélection avec des délimiteurs. Seul **Continuer** insère directement (c'est son rôle).
+Les fonctions **Modifier**, **Résumer** et **Simplifier** n'effacent jamais le texte original : le résultat est ajouté après la sélection avec des délimiteurs. Seul **Continuer** insère directement (c'est son rôle). **Ajuster la longueur** remplace la sélection en place (annulable par `Ctrl+Z`).
 
 ### Gestion des modèles
 
@@ -350,6 +360,10 @@ Wizard en 5 étapes qui reste ouvert pendant le login Keycloak. Affiche un écra
 
 | Version / Date | Changements principaux |
 | --- | --- |
+| 2026-03 | **Ajuster la longueur** : mini-dialogue − / + pour réduire/développer, remplacement en place, preview streaming, filtrage think robuste |
+| 2026-03 | **Suggestions IA** : filtrage raisonnement LLM, forçage français, animation "Mirai prépare des suggestions" |
+| 2026-03 | **Notice utilisateur** : `docs/notice-utilisateur.md` — double persona novice/expert |
+| 2026-03 | **Déploiement Scaleway** : fix DNS resolver relay-assistant, JWKs port, env vars LLM, profil `int` |
 | 2026-03 | **GenerateFormula Calc** : contexte schéma, boucle retry erreur, nettoyage markdown |
 | 2026-03 | **Benchmark Scaleway** : 10/13 modèles ✅ sur textes Wikipedia ; rapport dans `bench/` |
 | 2026-03 | **writer.py** : suppression appel `stream_request` en double, suppression faux positifs « voici/voilà » dans simplify, ajout `_strip_think_blocks()` pour deepseek-r1 |
