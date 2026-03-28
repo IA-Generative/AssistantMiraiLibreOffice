@@ -170,7 +170,7 @@ def _safe_set_string(cell, text):
 
 
 def _extend_cells(job, sheet, col_range, row_range):
-    api_type = str(job.get_config("api_type", "completions")).lower()
+    api_type = "chat"
     extend_system_prompt = job.get_config("extend_selection_system_prompt", "")
     extend_max_tokens = job.get_config("extend_selection_max_tokens", 70)
 
@@ -199,7 +199,7 @@ def _extend_cells(job, sheet, col_range, row_range):
 
 
 def _edit_cells(job, sheet, col_range, row_range, user_input):
-    api_type = str(job.get_config("api_type", "completions")).lower()
+    api_type = "chat"
     edit_system_prompt = job.get_config("edit_selection_system_prompt", "")
     edit_max_new_tokens = job.get_config("edit_selection_max_new_tokens", 0)
     try:
@@ -341,7 +341,7 @@ def _transform_to_column(job, sheet, col_range, row_range, user_input):
     function walks right until it finds an empty column and labels it
     'Résultat IA'.
     """
-    api_type = str(job.get_config("api_type", "completions")).lower()
+    api_type = "chat"
     system_prompt = (
         "Tu es un assistant de transformation de données. "
         "Pour chaque valeur fournie, applique l'instruction demandée. "
@@ -733,7 +733,7 @@ def _clean_formula(raw):
 
 def _generate_formula_raw(job, user_input, schema_context="", messages=None):
     """Generate a formula without applying it. Returns (formula, messages)."""
-    api_type = str(job.get_config("api_type", "completions")).lower()
+    api_type = "chat"
 
     if messages is None:
         messages = []
@@ -775,7 +775,7 @@ def _generate_formula_raw(job, user_input, schema_context="", messages=None):
 
 def _explain_formula(job, formula, schema_context=""):
     """Ask the LLM for a short explanation + alternative for a formula."""
-    api_type = str(job.get_config("api_type", "completions")).lower()
+    api_type = "chat"
     system = (
         "Tu es un expert LibreOffice Calc. "
         "On te donne une formule. Réponds en français avec EXACTEMENT 3 lignes :\n"
@@ -839,7 +839,7 @@ def _analyze_range(job, sheet, col_range, row_range):
     Attempts to merge the output row across the selection width so the
     analysis reads as a single block rather than a single narrow cell.
     """
-    api_type = str(job.get_config("api_type", "completions")).lower()
+    api_type = "chat"
     system_prompt = (
         "Tu es un analyste de données expert. "
         "Tu analyses des tableaux et fournis des insights concis et actionnables en français."

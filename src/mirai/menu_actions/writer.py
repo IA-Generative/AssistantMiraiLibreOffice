@@ -121,8 +121,7 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
         system_prompt = (directive + " " + configured_sp) if configured_sp else directive
 
         max_tokens = job.get_config("extend_selection_max_tokens", 15000)
-        api_type = str(job.get_config("api_type", "completions")).lower()
-        request = job.make_api_request(base_text, system_prompt, max_tokens, api_type=api_type)
+        request = job.make_api_request(base_text, system_prompt, max_tokens)
 
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
@@ -137,7 +136,7 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
             text.insertString(cursor, "\n\n---début-du-texte-généré---\n", False)
 
             job.stream_request(
-                request, api_type,
+                request, "chat",
                 _make_extend_callback(text, cursor, controller, extend_done, _on_question_attempt1),
             )
 
@@ -155,7 +154,7 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
                     + "\n\nÉcris UNIQUEMENT la suite directe, sans aucune introduction."
                 )
                 retry_request = job.make_api_request(
-                    retry_prompt, retry_sp, max_tokens, api_type=api_type
+                    retry_prompt, retry_sp, max_tokens
                 )
 
                 def _on_question_retry():
@@ -167,7 +166,7 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
                     )
 
                 job.stream_request(
-                    retry_request, api_type,
+                    retry_request, "chat",
                     _make_extend_callback(text, cursor, controller, extend_done, _on_question_retry),
                 )
 
@@ -246,9 +245,7 @@ RÉSUMÉ :
             "que le texte fourni."
         )
         max_tokens = int(job.get_config("summarize_selection_max_tokens", 15000))
-
-        api_type = str(job.get_config("api_type", "completions")).lower()
-        request = job.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
+        request = job.make_api_request(prompt, system_prompt, max_tokens)
 
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
@@ -276,7 +273,7 @@ RÉSUMÉ :
                     text.insertString(cursor, to_insert, False)
                     _scroll_to_cursor(controller, cursor)
 
-            job.stream_request(request, api_type, append_summary)
+            job.stream_request(request, "chat", append_summary)
             text.insertString(cursor, "\n---fin-du-résumé---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
@@ -331,9 +328,7 @@ VERSION REFORMULÉE :
         if configured_sp:
             system_prompt = configured_sp + " " + system_prompt
         max_tokens = len(original_text) + job.get_config("simplify_selection_max_tokens", 15000)
-
-        api_type = str(job.get_config("api_type", "completions")).lower()
-        request = job.make_api_request(prompt, system_prompt, max_tokens, api_type=api_type)
+        request = job.make_api_request(prompt, system_prompt, max_tokens)
 
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
@@ -375,7 +370,7 @@ VERSION REFORMULÉE :
                     text.insertString(cursor, to_insert, False)
                     _scroll_to_cursor(controller, cursor)
 
-            job.stream_request(request, api_type, append_simplified)
+            job.stream_request(request, "chat", append_simplified)
             text.insertString(cursor, "\n---fin-de-reformulation---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)

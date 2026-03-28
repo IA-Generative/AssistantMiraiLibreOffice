@@ -433,10 +433,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         except Exception as e:
             log_to_file(f"Failed to initialize device management: {str(e)}")
 
-        try:
-            self._check_proxy_consistency()
-        except Exception as e:
-            log_to_file(f"Failed to check proxy consistency: {str(e)}")
+        # Proxy consistency check removed — proxy is configured via
+        # bootstrap or the Settings dialog, no startup prompt needed.
 
         # Auto-launch enrollment wizard on first use (deferred to let UI init)
         try:
@@ -886,9 +884,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 return
             keys_to_sync = [
                 "llm_base_urls", "llm_api_tokens",
-                "llm_default_models",
-                "systemPrompt", "api_type", "is_openwebui",
-                "openai_compatibility",
+                "llm_default_models", "systemPrompt",
                 "telemetryEndpoint", "telemetryKey",
                 "telemetryAuthorizationType",
                 "relayAssistantBaseUrl",
@@ -2981,32 +2977,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 mismatches.append("username")
         return mismatches, cfg, lo
 
-    def _check_proxy_consistency(self):
-        checked_once = self._as_bool(self._get_config_from_file("proxy_consistency_checked_once", False))
-        if checked_once:
-            log_to_file("[PROXY] consistency check skipped (already checked)")
-            return
-        mismatches, cfg, lo = self._proxy_mismatch()
-        if not mismatches:
-            try:
-                self.set_config("proxy_consistency_checked_once", True)
-            except Exception:
-                pass
-            return
-        msg = (
-            "Les paramètres proxy de LibreOffice sont différents des préférences de MIrAI.\n\n"
-            "Voulez-vous vérifier et valider les informations de proxy ?"
-        )
-        if self._confirm_message("Proxy", msg):
-            try:
-                self.proxy_settings_box("Proxy")
-            except Exception:
-                pass
-        try:
-            self.set_config("proxy_consistency_checked_once", True)
-        except Exception:
-            pass
-
     def _schedule_enrollment_check(self):
         """Deferred enrollment check — fires ~3s after init to let UI start."""
         def _deferred_enrollment():
@@ -3817,14 +3787,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         return models[0] if models else None
 
 
-    def _is_openai_compatible(self):
-        endpoint = str(self.get_config("llm_base_urls", "http://127.0.0.1:5000"))
-        compatibility_flag = self._as_bool(self.get_config("openai_compatibility", False))
-        return compatibility_flag or ("api.openai.com" in endpoint.lower())
-
     def make_api_request(self, prompt, system_prompt="", max_tokens=15000, api_type=None):
         """
-        Build a streaming completion/chat request that can target local or OpenAI-compatible endpoints.
+        Build a streaming chat/completions request for OpenAI-compatible endpoints.
+        The api_type parameter is accepted for backwards compatibility but ignored
+        — all requests use the chat/completions format.
         """
         try:
             max_tokens = int(max_tokens)
@@ -3833,9 +3800,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         endpoint = str(self.get_config("llm_base_urls", "http://127.0.0.1:5000")).rstrip("/")
         api_key = self._effective_api_token(self.get_config("llm_api_tokens", ""))
-        if api_type is None:
-            api_type = str(self.get_config("api_type", "completions")).lower()
-        api_type = "chat" if api_type == "chat" else "completions"
+        api_type = "chat"
         model = str(self.get_config("llm_default_models", ""))
         
         # Add default system prompt to ensure plain text output and language preservation.
@@ -3856,48 +3821,24 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             'Content-Type': 'application/json'
         }
 
-        # Detect OpenWebUI endpoints (they use /api/ instead of /v1/)
-        is_openwebui = True
-        endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
-        if is_openwebui:
-            header_name, header_prefix = self._auth_header()
-            if api_key:
-                headers[header_name] = f'{header_prefix}{api_key}'
-        elif api_key:
-            header_name, header_prefix = self._auth_header()
+        endpoint, api_path = self._split_endpoint_api_path(endpoint, True)
+        header_name, header_prefix = self._auth_header()
+        if api_key:
             headers[header_name] = f'{header_prefix}{api_key}'
-        
-        log_to_file(f"Is OpenWebUI: {is_openwebui}")
-        log_to_file(f"API Path: {api_path}")
 
-        if api_type == "chat":
-            url = endpoint + api_path + "/chat/completions"
-            log_to_file(f"Full URL: {url}")
-            messages = []
-            if system_prompt:
-                messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": prompt})
-            data = {
-                'messages': messages,
-                'max_tokens': max_tokens,
-                'temperature': 1,
-                'top_p': 0.9,
-                'stream': True
-            }
-        else:
-            url = endpoint + api_path + "/completions"
-            full_prompt = prompt
-            if system_prompt:
-                full_prompt = f"SYSTEM PROMPT\n{system_prompt}\nEND SYSTEM PROMPT\n{prompt}"
-            data = {
-                'prompt': full_prompt,
-                'max_tokens': max_tokens,
-                'temperature': 1,
-                'top_p': 0.9,
-                'stream': True
-            }
-            if not self._is_openai_compatible():
-                data['seed'] = 10
+        url = endpoint + api_path + "/chat/completions"
+        log_to_file(f"Full URL: {url}")
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+        data = {
+            'messages': messages,
+            'max_tokens': max_tokens,
+            'temperature': 1,
+            'top_p': 0.9,
+            'stream': True
+        }
 
         if model:
             data["model"] = model
@@ -3941,6 +3882,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         Unlike make_api_request, the messages list is forwarded as-is
         (no default system-prompt prepended).  Useful for multi-turn
         conversations where the caller manages the history.
+        The api_type parameter is accepted for backwards compatibility but ignored.
         """
         try:
             max_tokens = int(max_tokens)
@@ -3949,8 +3891,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         endpoint = str(self.get_config("llm_base_urls", "http://127.0.0.1:5000")).rstrip("/")
         api_key = self._effective_api_token(self.get_config("llm_api_tokens", ""))
-        if api_type is None:
-            api_type = str(self.get_config("api_type", "completions")).lower()
         model = str(self.get_config("llm_default_models", ""))
 
         headers = {"Content-Type": "application/json"}
@@ -3974,20 +3914,15 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         request.get_method = lambda: "POST"
         return request
 
-    def extract_content_from_response(self, chunk, api_type="completions"):
+    def extract_content_from_response(self, chunk, api_type="chat"):
+        """Extract text content from an OpenAI chat/completions SSE chunk.
+
+        The api_type parameter is accepted for backwards compatibility but ignored
+        — always uses the chat format (delta.content).
         """
-        Extract text content from API response chunk based on API type.
-        """
-        if api_type == "chat":
-            # OpenAI chat completions format
-            if "choices" in chunk and len(chunk["choices"]) > 0:
-                delta = chunk["choices"][0].get("delta", {})
-                return delta.get("content", ""), chunk["choices"][0].get("finish_reason")
-        else:
-            # Legacy completions format
-            if "choices" in chunk and len(chunk["choices"]) > 0:
-                return chunk["choices"][0].get("text", ""), chunk["choices"][0].get("finish_reason")
-        
+        if "choices" in chunk and len(chunk["choices"]) > 0:
+            delta = chunk["choices"][0].get("delta", {})
+            return delta.get("content", ""), chunk["choices"][0].get("finish_reason")
         return "", None
 
     def get_ssl_context(self):
