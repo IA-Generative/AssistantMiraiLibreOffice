@@ -299,5 +299,154 @@
         </node>
       </node>
     </node>
+    <!-- ══════════════════════════════════════════════════════════════
+         Toolbar — boutons d'accès rapide dans la barre d'outils
+         ══════════════════════════════════════════════════════════════ -->
+    <node oor:name="OfficeToolBar">
+      <node oor:name="fr.gouv.interieur.mirai.toolbar" oor:op="replace">
+
+        <!-- ── Writer buttons ─────────────────────────────────────── -->
+        <node oor:name="W1" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?ExtendSelection</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Générer la suite</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/plume.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+          </prop>
+        </node>
+        <node oor:name="W2" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?EditSelection</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Modifier la sélection</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/send.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+          </prop>
+        </node>
+        <node oor:name="W3" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?ResizeSelection</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Ajuster la longueur</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/mascot16.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+          </prop>
+        </node>
+        <node oor:name="W4" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?SummarizeSelection</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Résumer</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/mascot16.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+          </prop>
+        </node>
+        <node oor:name="W5" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?SimplifySelection</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Reformuler</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/mascot16.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+          </prop>
+        </node>
+
+        <!-- ── Calc buttons ───────────────────────────────────────── -->
+        <node oor:name="C1" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?TransformToColumn</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Transformer</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/send.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.sheet.SpreadsheetDocument</value>
+          </prop>
+        </node>
+        <node oor:name="C2" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?GenerateFormula</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Formule IA</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/mascot16.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.sheet.SpreadsheetDocument</value>
+          </prop>
+        </node>
+        <node oor:name="C3" oor:op="replace">
+          <prop oor:name="URL" oor:type="xs:string">
+            <value>service:fr.gouv.interieur.mirai.do?AnalyzeRange</value>
+          </prop>
+          <prop oor:name="Title" oor:type="xs:string">
+            <value xml:lang="en-US">Analyser</value>
+          </prop>
+          <prop oor:name="ImageIdentifier" oor:type="xs:string">
+            <value>%origin%/icons/plume.png</value>
+          </prop>
+          <prop oor:name="Target" oor:type="xs:string">
+            <value>_self</value>
+          </prop>
+          <prop oor:name="Context" oor:type="xs:string">
+            <value>com.sun.star.sheet.SpreadsheetDocument</value>
+          </prop>
+        </node>
+
+      </node>
+    </node>
+
   </node>
 </oor:component-data>

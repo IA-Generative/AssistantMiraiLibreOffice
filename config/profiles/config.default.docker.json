@@ -2,5 +2,5 @@
     "configVersion": 1,
     "enabled": true,
     "bootstrap_url": "http://localhost:3001",
-    "config_path": "/config/libreoffice/config.json?profile=dev"
+    "config_path": "/config/mirai-libreoffice/config.json?profile=dev"
 }

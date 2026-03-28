@@ -2,5 +2,5 @@
     "configVersion": 1,
     "enabled": true,
     "bootstrap_url": "https://onyxia.gpu.minint.fr/bootstrap",
-    "config_path": "/config/libreoffice/config.json?profile=prod"
+    "config_path": "/config/mirai-libreoffice/config.json?profile=prod"
 }

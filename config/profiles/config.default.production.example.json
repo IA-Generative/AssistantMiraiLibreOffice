@@ -3,7 +3,7 @@
     "configVersion": 1,
     "enabled": true,
     "bootstrap_url": "https://bootstrap.change-me.example.com",
-    "config_path": "/config/libreoffice/config.json?profile=prod",
+    "config_path": "/config/mirai-libreoffice/config.json?profile=prod",
     "keycloakIssuerUrl": "https://sso.change-me.example.com/realms/mirai",
     "keycloakRealm": "mirai",
     "keycloakClientId": "bootstrap-iassistant"

@@ -2,7 +2,7 @@
     "configVersion": 1,
     "enabled": true,
     "bootstrap_url": "http://localhost:8082",
-    "config_path": "/config/libreoffice/config.json?profile=dev",
+    "config_path": "/config/mirai-libreoffice/config.json?profile=dev",
     "keycloakIssuerUrl": "http://localhost:8082/realms/openwebui",
     "keycloakRealm": "openwebui",
     "keycloakClientId": "bootstrap-iassistant"
