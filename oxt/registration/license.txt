@@ -1,10 +1,76 @@
-Ce logiciel constitue une version expérimentale développée dans le cadre du programme mirai du Ministère de l’Intérieur. Il s’appuie en partie sur le travail réalisé par John Balis, auteur de l’extension mirai, qui a servi de base technique pour cette adaptation.
+MIrAI — IA'ssistant LibreOffice
+Licence d'utilisation et mentions légales
 
-Sources et inspirations :
-- Projet original mirai de John Balis : https://github.com/balisujohn/mirai
-- Portions de code issues du projet LibreOffice (MPL 2.0) : https://gerrit.libreoffice.org/c/core/+/159938
-- Code source de la version expérimentale dédiée à mirai : https://github.com/IA-Generative/AssistantmiraiLibreOffice
 
-Conformément à la licence MPL 2.0, l’ensemble des modifications réalisées dans cette version mirai est distribué sous la même licence, et les portions dérivées conservent leurs mentions d’origine.
+A propos
 
-----
+MIrAI est une extension LibreOffice qui intègre un assistant
+d'intelligence artificielle dans Writer et Calc. Elle vous aide à
+rédiger, reformuler, résumer, générer des formules et ajuster vos
+documents, directement depuis votre traitement de texte ou tableur.
+
+Ce logiciel est développé dans le cadre du programme MIrAI du
+ministère de l'Intérieur et des Outre-mer.
+
+
+Origine du projet
+
+Cette extension s'appuie sur le travail original de John Balis,
+auteur de l'extension « localwriter » pour LibreOffice, publiée
+sous licence libre :
+  https://github.com/balisujohn/localwriter
+
+Des portions de code sont issues du projet LibreOffice, distribuées
+sous licence Mozilla Public License 2.0 (MPL 2.0) :
+  https://gerrit.libreoffice.org/c/core/+/159938
+
+Le code source de cette version est disponible sur :
+  https://github.com/IA-Generative/AssistantMiraiLibreOffice
+
+Conformément à la licence MPL 2.0, l'ensemble des modifications
+est distribué sous la même licence et les portions dérivées
+conservent leurs mentions d'origine.
+
+
+Limites de l'intelligence artificielle
+
+L'assistant IA est un outil d'aide à la rédaction. Il ne remplace
+pas le jugement humain. En particulier :
+
+- Les textes générés peuvent contenir des erreurs factuelles,
+  des approximations ou des formulations inadaptées.
+
+- Les formules Calc générées doivent être vérifiées avant
+  utilisation dans des contextes critiques (finances, statistiques,
+  décisions).
+
+- L'IA ne garantit pas la confidentialité des données traitées.
+  Les textes sélectionnés sont envoyés à un serveur de traitement
+  configuré par votre organisation. Ne soumettez pas de données
+  classifiées ou sensibles sans l'accord de votre responsable.
+
+- Les résultats varient selon le modèle de langage utilisé.
+  Certains modèles peuvent produire des réponses en anglais,
+  des raisonnements visibles ou des résultats tronqués.
+
+- Toute action de l'assistant est annulable par Ctrl+Z.
+  Relisez toujours le résultat avant de le valider.
+
+L'utilisateur reste seul responsable du contenu final
+de ses documents.
+
+
+Données et vie privée
+
+L'extension communique avec un serveur d'IA configuré par votre
+organisation (aucun serveur tiers n'est contacté sans configuration
+explicite). Une télémétrie anonyme peut être collectée pour mesurer
+l'usage et améliorer le service. Elle ne contient pas le contenu
+de vos documents.
+
+
+Version
+
+MIrAI IA'ssistant LibreOffice — version 0.2.0
+Programme MIrAI — Ministère de l'Intérieur et des Outre-mer
+Mars 2026
