@@ -1,5 +1,6 @@
 """Calc menu actions extracted from MainJob.trigger."""
 
+import os
 import re
 
 from .shared import apply_settings_result
@@ -455,11 +456,174 @@ _FORMULA_SYSTEM = (
     "You are a LibreOffice Calc expert. "
     "You generate only valid Calc formulas using ENGLISH function names "
     "(e.g. AVERAGE, SUM, IF, VLOOKUP, COUNTIF, AVERAGEIF, IFERROR, INDEX, MATCH). "
-    "IMPORTANT: use SEMICOLONS (;) as function argument separators, not commas. "
-    "Examples: =IF(A1>0;A1;0)  =VLOOKUP(A1;B:C;2;0)  =IFERROR(SUM(C2:F2);0) "
-    "Use COLON (:) for ranges (e.g. C2:F2). "
-    "Reply ONLY with the formula starting with =, no markdown, no explanation."
+    "IMPORTANT SYNTAX RULES for LibreOffice Calc:\n"
+    "- Use SEMICOLONS (;) to separate function ARGUMENTS: =IF(A1>0;A1;0)\n"
+    "- Use COLON (:) for contiguous ranges: C2:F2, A1:A100\n"
+    "- To sum multiple separate ranges, use + operator: =SUM(C2:C9)+SUM(D2:D9)\n"
+    "- Or use a single contiguous range when possible: =SUM(C2:G9)\n"
+    "- NEVER put multiple ranges separated by ; inside SUM() — this causes Err:522\n"
+    "- WRONG: =SUM(C2:C9;D2:D9)  CORRECT: =SUM(C2:D9) or =SUM(C2:C9)+SUM(D2:D9)\n"
+    "- CRITICAL: the formula must NOT reference the target cell itself (circular reference)\n"
+    "Examples: =IF(A1>0;A1;0)  =VLOOKUP(A1;B:C;2;0)  =IFERROR(SUM(C2:F2);0)\n"
+    "Reply ONLY with the formula starting with =, no markdown, no explanation, no reasoning."
 )
+
+# ── Calc functions reference for context-aware formula generation ────────
+
+_CALC_FUNCTIONS_DB = None  # lazy-loaded
+
+
+def _load_functions_db():
+    """Load calc-functions.json once (lazy singleton)."""
+    global _CALC_FUNCTIONS_DB
+    if _CALC_FUNCTIONS_DB is not None:
+        return _CALC_FUNCTIONS_DB
+    import json
+    candidates = [
+        # Installed OXT: src/mirai/menu_actions/ → ../../config/
+        os.path.join(os.path.dirname(__file__), "..", "..", "config", "calc-functions.json"),
+        # Dev: src/mirai/menu_actions/ → ../../../config/
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "config", "calc-functions.json"),
+    ]
+    for path in candidates:
+        path = os.path.normpath(path)
+        if os.path.isfile(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                # Remove _meta key
+                _CALC_FUNCTIONS_DB = {k: v for k, v in data.items() if not k.startswith("_")}
+                return _CALC_FUNCTIONS_DB
+            except Exception:
+                pass
+    _CALC_FUNCTIONS_DB = {}
+    return _CALC_FUNCTIONS_DB
+
+
+# Keywords → function names mapping for common natural-language queries
+_KEYWORD_MAP = {
+    "somme": ["SUM", "SUMIF", "SUMIFS", "SUMPRODUCT"],
+    "sum": ["SUM", "SUMIF", "SUMIFS", "SUMPRODUCT"],
+    "total": ["SUM", "SUMIF", "SUMIFS", "SUBTOTAL"],
+    "additionner": ["SUM", "SUMIF"],
+    "moyenne": ["AVERAGE", "AVERAGEIF", "AVERAGEIFS"],
+    "average": ["AVERAGE", "AVERAGEIF", "AVERAGEIFS"],
+    "compter": ["COUNT", "COUNTA", "COUNTIF", "COUNTIFS", "COUNTBLANK"],
+    "count": ["COUNT", "COUNTA", "COUNTIF", "COUNTIFS"],
+    "nombre": ["COUNT", "COUNTA", "COUNTIF", "COUNTIFS"],
+    "max": ["MAX", "MAXIFS", "LARGE"],
+    "maximum": ["MAX", "MAXIFS", "LARGE"],
+    "min": ["MIN", "MINIFS", "SMALL"],
+    "minimum": ["MIN", "MINIFS", "SMALL"],
+    "chercher": ["VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "LOOKUP"],
+    "rechercher": ["VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "SEARCH", "FIND"],
+    "lookup": ["VLOOKUP", "HLOOKUP", "INDEX", "MATCH", "LOOKUP"],
+    "trouver": ["VLOOKUP", "MATCH", "SEARCH", "FIND"],
+    "si": ["IF", "IFS", "IFERROR", "IFNA", "SUMIF", "COUNTIF", "AVERAGEIF"],
+    "condition": ["IF", "IFS", "AND", "OR", "SWITCH"],
+    "erreur": ["IFERROR", "IFNA", "ISERROR"],
+    "date": ["DATE", "TODAY", "NOW", "YEAR", "MONTH", "DAY", "DATEDIF", "EDATE", "EOMONTH"],
+    "jour": ["DAY", "DAYS", "WEEKDAY", "WORKDAY", "TODAY", "NETWORKDAYS"],
+    "mois": ["MONTH", "EOMONTH", "EDATE"],
+    "année": ["YEAR", "YEARFRAC", "YEARS"],
+    "année": ["YEAR", "YEARFRAC"],
+    "semaine": ["WEEKNUM", "ISOWEEKNUM", "WEEKDAY"],
+    "heure": ["HOUR", "TIME", "NOW"],
+    "texte": ["TEXT", "LEFT", "RIGHT", "MID", "LEN", "CONCATENATE", "TEXTJOIN", "SUBSTITUTE"],
+    "text": ["TEXT", "LEFT", "RIGHT", "MID", "CONCATENATE", "TEXTJOIN"],
+    "concaténer": ["CONCATENATE", "CONCAT", "TEXTJOIN"],
+    "join": ["TEXTJOIN", "CONCATENATE", "CONCAT"],
+    "remplacer": ["SUBSTITUTE", "REPLACE"],
+    "extraire": ["LEFT", "RIGHT", "MID", "REGEX"],
+    "majuscule": ["UPPER", "PROPER"],
+    "minuscule": ["LOWER"],
+    "arrondi": ["ROUND", "ROUNDUP", "ROUNDDOWN", "CEILING", "FLOOR", "MROUND", "INT"],
+    "round": ["ROUND", "ROUNDUP", "ROUNDDOWN"],
+    "rang": ["RANK", "LARGE", "SMALL", "PERCENTILE"],
+    "rank": ["RANK", "LARGE", "SMALL"],
+    "tri": ["RANK", "LARGE", "SMALL"],
+    "pourcentage": ["PERCENTILE", "PERCENTRANK"],
+    "médiane": ["MEDIAN"],
+    "écart": ["STDEV", "VAR", "AVEDEV"],
+    "corrélation": ["CORREL", "PEARSON", "RSQ"],
+    "prévision": ["FORECAST.LINEAR", "TREND", "GROWTH", "SLOPE", "INTERCEPT"],
+    "forecast": ["FORECAST.LINEAR", "TREND", "GROWTH"],
+    "régression": ["LINEST", "SLOPE", "INTERCEPT", "FORECAST.LINEAR"],
+    "ouvré": ["WORKDAY", "WORKDAY.INTL", "NETWORKDAYS", "NETWORKDAYS.INTL"],
+    "working": ["WORKDAY", "NETWORKDAYS"],
+    "vide": ["ISBLANK", "COUNTBLANK"],
+    "empty": ["ISBLANK", "COUNTBLANK"],
+    "unique": ["COUNTIF", "COUNTIFS"],
+    "doublon": ["COUNTIF"],
+    "dupliquer": ["COUNTIF"],
+    "matrice": ["MMULT", "TRANSPOSE", "MDETERM", "MINVERSE"],
+    "fréquence": ["FREQUENCY"],
+    "aléatoire": ["RAND", "RANDBETWEEN"],
+    "random": ["RAND", "RANDBETWEEN"],
+    "pivot": ["GETPIVOTDATA"],
+    "lien": ["HYPERLINK"],
+    "url": ["HYPERLINK", "ENCODEURL", "WEBSERVICE"],
+    "monétaire": ["DOLLAR", "FV", "PV", "PMT"],
+    "financ": ["FV", "PV", "PMT", "NPV", "IRR", "RATE", "NPER"],
+    "intérêt": ["RATE", "IPMT", "PPMT", "PMT"],
+    "prêt": ["PMT", "NPER", "RATE", "PV"],
+    "regex": ["REGEX"],
+    "expression": ["REGEX"],
+    "conversion": ["CONVERT", "CONVERT_OOO", "DEC2HEX", "HEX2DEC", "BIN2DEC", "DEC2BIN"],
+    "convertir": ["CONVERT", "CONVERT_OOO", "VALUE", "DATEVALUE", "NUMBERVALUE"],
+}
+
+
+def _match_relevant_functions(user_input, max_results=8):
+    """Match user query to relevant Calc functions using keyword analysis.
+
+    Returns a list of (function_name, function_info) tuples.
+    """
+    db = _load_functions_db()
+    if not db:
+        return []
+
+    query = user_input.lower()
+    scores = {}  # function_name → score
+
+    # 1. Keyword-based scoring
+    for keyword, func_names in _KEYWORD_MAP.items():
+        if keyword in query:
+            for fn in func_names:
+                if fn in db:
+                    scores[fn] = scores.get(fn, 0) + 2
+
+    # 2. Direct function name mention (e.g. user says "VLOOKUP")
+    for fn in db:
+        if fn.lower() in query:
+            scores[fn] = scores.get(fn, 0) + 5
+
+    # 3. Category matching from description words
+    query_words = set(query.split())
+    for fn, info in db.items():
+        desc_lower = info.get("desc", "").lower()
+        for w in query_words:
+            if len(w) > 3 and w in desc_lower:
+                scores[fn] = scores.get(fn, 0) + 1
+
+    # Sort by score descending, take top N
+    ranked = sorted(scores.items(), key=lambda x: -x[1])
+    result = []
+    for fn, score in ranked[:max_results]:
+        if score > 0:
+            result.append((fn, db[fn]))
+    return result
+
+
+def _format_functions_context(matches):
+    """Format matched functions as a concise prompt context block."""
+    if not matches:
+        return ""
+    lines = ["Relevant LibreOffice Calc functions (use SEMICOLONS as separators):"]
+    for fn, info in matches:
+        lines.append(f"  {info['syn']}")
+        lines.append(f"    {info['desc']}. Ex: {info['ex']}")
+    return "\n".join(lines)
 
 
 def _build_from_selection(job, sheet, raw_selection):
@@ -496,46 +660,93 @@ def _build_from_selection(job, sheet, raw_selection):
     sc = _build_schema_context(sheet, area)
     msgs = []
 
+    # Preview state shared between _on_gen and _on_apply
+    _preview = {"formula": "", "explanation": ""}
+
     def _on_gen(user_input):
-        formula = _generate_formula(job, tc, user_input, schema_context=sc, messages=msgs)
+        """Generate formula WITHOUT applying — returns (history_lines, detail_text)."""
+        formula, _ = _generate_formula_raw(job, user_input, schema_context=sc, messages=msgs)
         new_lines = [f"▶ {user_input}"]
+        detail = ""
         if formula:
-            if area.EndRow > area.StartRow:
-                _fill_formula_down(job, sheet, formula, area)
-                new_lines.append(f"↓ Appliqué sur {area.EndRow - area.StartRow + 1} lignes")
             new_lines.append(f"◀ {formula}")
-            err = _get_cell_error(tc)
-            if err:
-                new_lines.append(f"⚠ Erreur : {err}")
-                msgs.append({
-                    "role": "user",
-                    "content": (
-                        f"La formule produit l'erreur LibreOffice : {err}. "
-                        "Analyse le contexte et corrige la formule."
-                    ),
-                })
-        return new_lines
+            _preview["formula"] = formula
+            explanation = _explain_formula(job, formula, schema_context=sc)
+            _preview["explanation"] = explanation
+            detail = f"Formule : {formula}\n\n{explanation}" if explanation else f"Formule : {formula}"
+            new_lines.append("── Cliquez Appliquer pour insérer ──")
+        else:
+            new_lines.append("⚠ Aucune formule générée")
+            _preview["formula"] = ""
+            _preview["explanation"] = ""
+        return new_lines, detail
 
-    return _on_gen, sc
+    def _on_apply():
+        """Apply the previewed formula to the target cell."""
+        formula = _preview.get("formula", "")
+        if not formula:
+            return ["⚠ Aucune formule à appliquer"]
+        _apply_formula(job, tc, formula)
+        result_lines = [f"✓ Appliqué : {formula}"]
+        if area.EndRow > area.StartRow:
+            _fill_formula_down(job, sheet, formula, area)
+            result_lines.append(f"↓ Répliqué sur {area.EndRow - area.StartRow + 1} lignes")
+        err = _get_cell_error(tc)
+        if err:
+            result_lines.append(f"⚠ Erreur : {err}")
+            msgs.append({
+                "role": "user",
+                "content": (
+                    f"La formule produit l'erreur LibreOffice : {err}. "
+                    "Analyse le contexte et corrige la formule."
+                ),
+            })
+        return result_lines
+
+    return _on_gen, sc, _on_apply
 
 
-def _generate_formula(job, target_cell, user_input, schema_context="", messages=None):
-    """Generate (or refine) a Calc formula.
+def _clean_formula(raw):
+    """Strip think blocks, markdown fences, and ensure leading =."""
+    formula = raw.strip()
+    # Strip <think>...</think> blocks (complete, dangling open/close)
+    formula = re.sub(r"<think>.*?</think>", "", formula, flags=re.DOTALL | re.IGNORECASE)
+    formula = re.sub(r"^.*?</think>", "", formula, flags=re.DOTALL | re.IGNORECASE)
+    formula = re.sub(r"<think>.*$", "", formula, flags=re.DOTALL | re.IGNORECASE)
+    formula = formula.strip()
+    # Strip markdown fences
+    for fence in ("```python", "```", "`"):
+        formula = formula.strip(fence).strip()
+    # If the model returned reasoning text before the formula, extract last line starting with =
+    if formula and not formula.startswith("="):
+        lines = formula.split("\n")
+        for line in reversed(lines):
+            line = line.strip()
+            if line.startswith("="):
+                formula = line
+                break
+        else:
+            # No line starts with =, prefix it
+            formula = "=" + formula.split("\n")[-1].strip()
+    return formula
 
-    When *messages* is provided the full conversation history is forwarded to
-    the LLM so it can refine a previous answer.  On the first call pass
-    messages=[] and the function will initialise it with the system message.
 
-    Returns the formula string (with leading "=") that was applied, or "".
-    """
+def _generate_formula_raw(job, user_input, schema_context="", messages=None):
+    """Generate a formula without applying it. Returns (formula, messages)."""
     api_type = str(job.get_config("api_type", "completions")).lower()
 
     if messages is None:
         messages = []
 
-    # Build / refresh system message on first turn
     if not messages:
         system_content = _FORMULA_SYSTEM
+
+        func_matches = _match_relevant_functions(user_input)
+        func_context = _format_functions_context(func_matches)
+        if func_context:
+            system_content += "\n\n" + func_context
+            job._log(f"[formula] injected {len(func_matches)} function refs: {[m[0] for m in func_matches]}")
+
         if schema_context:
             system_content += "\n\nTable context:\n" + schema_context
         job._log(f"[formula] schema_context: {schema_context!r}")
@@ -552,29 +763,73 @@ def _generate_formula(job, target_cell, user_input, schema_context="", messages=
         request = job.make_chat_request(messages, max_tokens=2000, api_type=api_type)
         job.stream_request(request, api_type, collect)
 
-        formula = "".join(result_parts).strip()
-        # Strip stray markdown fences if the model wrapped it
-        for fence in ("```python", "```", "`"):
-            formula = formula.strip(fence).strip()
-        if not formula:
-            return ""
-        if not formula.startswith("="):
-            formula = "=" + formula
-
-        messages.append({"role": "assistant", "content": formula})
+        formula = _clean_formula("".join(result_parts))
+        if formula:
+            messages.append({"role": "assistant", "content": formula})
         job._log(f"[formula] generated: {formula!r}")
-
-        try:
-            target_cell.setFormula(formula)
-            job._log(f"[formula] setFormula OK, getString={target_cell.getString()!r}")
-        except Exception as e:
-            job._log(f"[formula] setFormula FAILED ({e}), using setString")
-            target_cell.setString(formula)
-        return formula
+        return formula, messages
     except Exception as e:
         job._log(f"[formula] error: {e}")
-        target_cell.setString(_ERR_PREFIX + str(e))
+        return "", messages
+
+
+def _explain_formula(job, formula, schema_context=""):
+    """Ask the LLM for a short explanation + alternative for a formula."""
+    api_type = str(job.get_config("api_type", "completions")).lower()
+    system = (
+        "Tu es un expert LibreOffice Calc. "
+        "On te donne une formule. Réponds en français avec EXACTEMENT 3 lignes :\n"
+        "Ligne 1 : une explication courte de ce que fait la formule (1 phrase)\n"
+        "Ligne 2 : commence par 'Alternative : ' suivi d'une formule alternative qui donne le même résultat (ou approchant) avec une syntaxe différente\n"
+        "Ligne 3 : commence par 'Note : ' suivi d'un conseil pratique (1 phrase courte)\n"
+        "Utilise des POINT-VIRGULES (;) comme séparateurs dans les formules."
+    )
+    prompt = f"Formule : {formula}"
+    if schema_context:
+        prompt += f"\n\nContexte du tableau :\n{schema_context}"
+
+    try:
+        msgs = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+        parts = []
+
+        def collect(chunk):
+            parts.append(chunk)
+
+        request = job.make_chat_request(msgs, max_tokens=500, api_type=api_type)
+        job.stream_request(request, api_type, collect)
+        raw = "".join(parts).strip()
+        # Strip think blocks then markdown
+        raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
+        raw = re.sub(r"^.*?</think>", "", raw, flags=re.DOTALL | re.IGNORECASE)
+        raw = re.sub(r"<think>.*$", "", raw, flags=re.DOTALL | re.IGNORECASE)
+        raw = _strip_markdown(raw.strip())
+        return raw
+    except Exception as e:
+        job._log(f"[formula] explain error: {e}")
         return ""
+
+
+def _apply_formula(job, target_cell, formula):
+    """Apply a formula to a target cell."""
+    try:
+        target_cell.setFormula(formula)
+        job._log(f"[formula] setFormula OK, getString={target_cell.getString()!r}")
+    except Exception as e:
+        job._log(f"[formula] setFormula FAILED ({e}), using setString")
+        target_cell.setString(formula)
+
+
+def _generate_formula(job, target_cell, user_input, schema_context="", messages=None):
+    """Generate, apply a formula and return it. Legacy wrapper."""
+    formula, messages = _generate_formula_raw(job, user_input, schema_context, messages)
+    if formula:
+        _apply_formula(job, target_cell, formula)
+    else:
+        target_cell.setString(_ERR_PREFIX + "empty response")
+    return formula
 
 
 def _analyze_range(job, sheet, col_range, row_range):
@@ -714,13 +969,14 @@ def handle_calc_action(job, args, model):
         # GenerateFormula uses a dedicated multi-turn assistant dialog
         if args == "GenerateFormula":
             # Build initial state from current selection
-            on_gen, schema_ctx = _build_from_selection(job, sheet, selection)
-            if on_gen is None:
+            build_result = _build_from_selection(job, sheet, selection)
+            if build_result[0] is None:
                 return True
+            on_gen, schema_ctx, on_apply = build_result
             history_lines = []
 
             def schema_builder(raw_sel):
-                """Rebuild (on_generate, schema_ctx) when the user changes selection."""
+                """Rebuild (on_generate, schema_ctx, on_apply) when the user changes selection."""
                 return _build_from_selection(job, sheet, raw_sel)
 
             # If the dialog is already open, just focus it — the selection listener
@@ -737,6 +993,7 @@ def handle_calc_action(job, args, model):
                 schema_context=schema_ctx,
                 history_lines=history_lines,
                 on_generate=on_gen,
+                on_apply=on_apply,
                 schema_builder=schema_builder,
             )
             return True

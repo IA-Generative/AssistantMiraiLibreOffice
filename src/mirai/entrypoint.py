@@ -6793,10 +6793,11 @@ EDITED VERSION:
         schema_context: str = "",
         history_lines: list = None,
         on_generate=None,
+        on_apply=None,
         schema_builder=None,
         title: str = "MIrAI — Assistant Formule",
     ) -> None:
-        """Non-modal multi-turn formula assistant dialog.
+        """Non-modal multi-turn formula assistant dialog with preview.
 
         Layout (top→bottom):
           Input zone (label + textarea + Générer button)
@@ -6804,8 +6805,10 @@ EDITED VERSION:
           History zone (label + small utils + clickable listbox)
 
         on_generate(user_input) — called on Générer, returns new history lines.
+          Does NOT apply the formula — only previews it.
+        on_apply() — called on Appliquer, applies the previewed formula.
         schema_builder(raw_selection) — called on selection change, returns
-          (on_generate_fn, schema_ctx_str). When provided, a
+          (on_generate_fn, schema_ctx_str, on_apply_fn). When provided, a
           XSelectionChangeListener keeps the context strip live.
         Closing the window (X) disposes the dialog.
         """
@@ -6818,7 +6821,8 @@ EDITED VERSION:
         VERT_SEP = 8
         LABEL_HEIGHT = 20
         CONTEXT_HEIGHT = 36       # 2 lines of schema info
-        HISTORY_HEIGHT = 220      # clickable conversation history (listbox)
+        HISTORY_HEIGHT = 140      # clickable conversation history (listbox)
+        DETAIL_HEIGHT = 80        # formula explanation + alternative
         INPUT_HEIGHT = 70         # user input area
         BUTTON_HEIGHT = 30
         BUTTON_WIDTH = 130
@@ -6828,7 +6832,8 @@ EDITED VERSION:
             + LABEL_HEIGHT + VERT_SEP          # section header
             + LABEL_HEIGHT + VERT_SEP          # "Votre demande" label
             + INPUT_HEIGHT + VERT_SEP          # input textarea
-            + BUTTON_HEIGHT + VERT_SEP         # Générer button row
+            + BUTTON_HEIGHT + VERT_SEP         # Générer + Appliquer button row
+            + DETAIL_HEIGHT + VERT_SEP         # formula detail (explanation + alt)
             + CONTEXT_HEIGHT + VERT_SEP        # schema context strip
             + LABEL_HEIGHT + VERT_SEP          # "Conversation" label row (with utils)
             + HISTORY_HEIGHT + VERT_MARGIN     # clickable conversation history
@@ -6907,18 +6912,41 @@ EDITED VERSION:
         })
         y += INPUT_HEIGHT + VERT_SEP
 
-        # ── Générer button (right-aligned) ─────────────────────────────
-        btn_x_send = WIDTH - HORI_MARGIN - BUTTON_WIDTH
+        # ── Générer + Appliquer buttons (right-aligned) ──────────────
+        APPLY_WIDTH = 110
+        btn_x_apply = WIDTH - HORI_MARGIN - APPLY_WIDTH
+        btn_x_send = btn_x_apply - BUTTON_WIDTH - 8
 
         _add("btn_send", "Button", btn_x_send, y, BUTTON_WIDTH, BUTTON_HEIGHT, {
-            "Label": "⚡ Générer",
+            "Label": "⚡ Prévisualiser",
             "PushButtonType": 0,
             "DefaultButton": True,
             "FontHeight": _UI["font_label"],
             "BackgroundColor": _UI["btn_primary_bg"],
             "TextColor": _UI["btn_primary_fg"],
         })
+        _add("btn_apply", "Button", btn_x_apply, y, APPLY_WIDTH, BUTTON_HEIGHT, {
+            "Label": "✓ Appliquer",
+            "PushButtonType": 0,
+            "FontHeight": _UI["font_label"],
+            "BackgroundColor": _UI["success"],
+            "TextColor": _UI["text_on_dark"],
+        })
         y += BUTTON_HEIGHT + VERT_SEP
+
+        # ── Formula detail zone (explanation + alternative) ─────────────
+        _add("txt_detail", "Edit", HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, DETAIL_HEIGHT, {
+            "Text": "La formule et son explication apparaîtront ici après la prévisualisation.",
+            "MultiLine": True,
+            "ReadOnly": True,
+            "VScroll": True,
+            "FontHeight": _UI["font_small"],
+            "TextColor": _UI["text_secondary"],
+            "BackgroundColor": _UI["bg_section"],
+            "Border": 1,
+            "BorderColor": _UI["border"],
+        })
+        y += DETAIL_HEIGHT + VERT_SEP
 
         # ── Schema context strip ────────────────────────────────────────
         _add("lbl_ctx", "FixedText", HORI_MARGIN, y, WIDTH - HORI_MARGIN * 2, CONTEXT_HEIGHT, {
@@ -6966,6 +6994,7 @@ EDITED VERSION:
         # Mutable state — on_generate replaced in-place on selection change
         _job._formula_dialog_state = {
             "on_generate": on_generate,
+            "on_apply": on_apply,
             "history_lines": history_lines,
             "schema_builder": schema_builder,
             "sel_listener": None,   # (listener, controller) set after createPeer
@@ -6973,24 +7002,84 @@ EDITED VERSION:
 
         class GenerateListener(unohelper.Base, XActionListener):
             def actionPerformed(self, _ev):
+                source = getattr(_ev, "Source", None)
+                state = _job._formula_dialog_state
+                if state is None:
+                    return
+
+                def _set_busy(busy, label=""):
+                    """Toggle busy state on the dialog."""
+                    try:
+                        btn = dlg.getControl("btn_send")
+                        lbl = dlg.getControl("lbl_input")
+                        if busy:
+                            btn.getModel().Label = "⏳ Mirai réfléchit..."
+                            btn.setEnable(False)
+                            lbl.getModel().Label = label or "Mirai génère la formule..."
+                            lbl.getModel().TextColor = _UI["primary"]
+                        else:
+                            btn.getModel().Label = "⚡ Prévisualiser"
+                            btn.setEnable(True)
+                            lbl.getModel().Label = "Votre demande :"
+                            lbl.getModel().TextColor = _UI["text"]
+                    except Exception:
+                        pass
+
+                # ── Appliquer button ──
+                try:
+                    apply_ctrl = dlg.getControl("btn_apply")
+                except Exception:
+                    apply_ctrl = None
+                if source == apply_ctrl:
+                    on_apply_fn = state.get("on_apply")
+                    if on_apply_fn is None:
+                        return
+                    try:
+                        _set_busy(True, "Application de la formule...")
+                        result_lines = on_apply_fn()
+                        state["history_lines"].extend(result_lines or [])
+                        dlg.getControl("lst_history").getModel().StringItemList = tuple(state["history_lines"])
+                        dlg.getControl("lst_history").selectItemPos(len(state["history_lines"]) - 1, True)
+                    except Exception as e:
+                        _job._log(f"[formula_dlg] apply error: {e}")
+                    finally:
+                        _set_busy(False)
+                    return
+
+                # ── Prévisualiser button ──
                 try:
                     user_input = dlg.getControl("txt_input").getText().strip()
                 except Exception:
                     return
                 if not user_input:
                     return
-                state = _job._formula_dialog_state
-                if state is None or state.get("on_generate") is None:
+                if state.get("on_generate") is None:
                     return
                 try:
-                    new_lines = state["on_generate"](user_input)
+                    _set_busy(True)
+                    result = state["on_generate"](user_input)
+                    # on_generate returns (lines, detail_text) or just lines
+                    if isinstance(result, tuple) and len(result) == 2:
+                        new_lines, detail_text = result
+                    else:
+                        new_lines = result
+                        detail_text = ""
                     state["history_lines"].extend(new_lines or [])
                     _job._save_prompt_calc(user_input)
                     dlg.getControl("lst_history").getModel().StringItemList = tuple(state["history_lines"])
                     dlg.getControl("lst_history").selectItemPos(len(state["history_lines"]) - 1, True)
                     dlg.getControl("txt_input").getModel().Text = ""
+                    # Update detail zone
+                    if detail_text:
+                        try:
+                            dlg.getControl("txt_detail").getModel().Text = detail_text
+                            dlg.getControl("txt_detail").getModel().TextColor = _UI["text"]
+                        except Exception:
+                            pass
                 except Exception as e:
                     _job._log(f"[formula_dlg] generate error: {e}")
+                finally:
+                    _set_busy(False)
 
         class ClearListener(unohelper.Base, XActionListener):
             def actionPerformed(self, _ev):
@@ -7079,10 +7168,15 @@ EDITED VERSION:
                     return
                 try:
                     new_sel = ev.Source.getSelection()
-                    new_on_gen, new_sc = state["schema_builder"](new_sel)
+                    build_result = state["schema_builder"](new_sel)
+                    new_on_gen = build_result[0]
+                    new_sc = build_result[1]
+                    new_on_apply = build_result[2] if len(build_result) > 2 else None
                     if new_on_gen is None:
                         return
                     state["on_generate"] = new_on_gen
+                    if new_on_apply is not None:
+                        state["on_apply"] = new_on_apply
                     # Add separator to history so the user sees the context switch
                     hl = state["history_lines"]
                     if hl:
@@ -7098,7 +7192,9 @@ EDITED VERSION:
                     _job._log(f"[formula_dlg] selectionChanged error: {e}")
             def disposing(self, _ev): return
 
-        dlg.getControl("btn_send").addActionListener(GenerateListener())
+        _gen_listener = GenerateListener()
+        dlg.getControl("btn_send").addActionListener(_gen_listener)
+        dlg.getControl("btn_apply").addActionListener(_gen_listener)
         dlg.getControl("btn_clear").addActionListener(ClearListener())
         dlg.getControl("btn_open_prompts").addActionListener(OpenPromptsListener())
         try:

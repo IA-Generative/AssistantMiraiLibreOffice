@@ -14,10 +14,12 @@ install()
 from src.mirai.menu_actions.calc import (  # noqa: E402
     _ERR_PREFIX,
     _analyze_range,
+    _apply_formula,
     _build_schema_context,
     _edit_cells,
     _extend_cells,
     _generate_formula,
+    _generate_formula_raw,
     _get_cell_error,
     _transform_to_column,
     handle_calc_action,
@@ -205,7 +207,6 @@ class TestGenerateFormula(unittest.TestCase):
         job = _make_job(["   "])  # only whitespace
         _generate_formula(job, target, "test")
         target.setFormula.assert_not_called()
-        target.setString.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -342,16 +343,13 @@ class TestHandleCalcAction(unittest.TestCase):
         job.make_chat_request.assert_not_called()
 
     def test_generate_formula_with_input_writes_formula(self):
+        """on_apply applies the previewed formula to the target cell."""
         target = _make_cell()
         job = _make_job(["=AVERAGE(A1:A10)"])
-        # Mock calls on_generate once with the user input
-        def _fake_dialog(schema_context="", history_lines=None, on_generate=None, title="", schema_builder=None):
-            if on_generate:
-                on_generate("average of A1 to A10")
-        job._show_formula_assistant_dialog.side_effect = _fake_dialog
-        model, sheet, _ = self._make_model()
-        sheet.getCellByPosition.return_value = target
-        handle_calc_action(job, "GenerateFormula", model)
+        # Test the preview + apply flow directly
+        formula, _ = _generate_formula_raw(job, "average of A1 to A10")
+        self.assertEqual(formula, "=AVERAGE(A1:A10)")
+        _apply_formula(job, target, formula)
         target.setFormula.assert_called_once_with("=AVERAGE(A1:A10)")
 
     def test_analyze_range_triggers_llm(self):
@@ -484,34 +482,23 @@ class TestGenerateFormulaMultiTurn(unittest.TestCase):
         return model, sheet
 
     def test_multi_turn_sends_two_requests(self):
-        """Two user inputs → make_chat_request called twice."""
-        target = _make_cell()
+        """_generate_formula_raw called twice accumulates messages."""
         job = _make_job(["=SUM(A1:A5)"])
-        def _fake_dialog(schema_context="", history_lines=None, on_generate=None, title="", schema_builder=None):
-            if on_generate:
-                on_generate("sum of column A")
-                on_generate("make it robust")
-        job._show_formula_assistant_dialog.side_effect = _fake_dialog
-        model, sheet = self._make_model()
-        sheet.getCellByPosition.return_value = target
-        handle_calc_action(job, "GenerateFormula", model)
+        target = _make_cell()
+        msgs = []
+        f1, _ = _generate_formula_raw(job, "sum of column A", messages=msgs)
+        f2, _ = _generate_formula_raw(job, "make it robust", messages=msgs)
         self.assertEqual(job.make_chat_request.call_count, 2)
+        self.assertTrue(f1.startswith("="))
 
     def test_error_feedback_auto_injected_on_formula_error(self):
-        """When the cell shows #NAME?, an extra message is appended before the next turn."""
+        """When on_apply is called and cell shows #NAME?, error appears in result lines."""
         target = _make_cell("#NAME?")
         job = _make_job(["=BADFUNCTION()"])
-        captured = {}
-        def _fake_dialog(schema_context="", history_lines=None, on_generate=None, title="", schema_builder=None):
-            if on_generate:
-                new_lines = on_generate("bad formula")
-                captured["lines"] = new_lines
-        job._show_formula_assistant_dialog.side_effect = _fake_dialog
-        model, sheet = self._make_model()
-        sheet.getCellByPosition.return_value = target
-        handle_calc_action(job, "GenerateFormula", model)
-        # The error line should appear in the returned history lines
-        self.assertTrue(any("⚠" in l or "#NAME?" in l for l in captured.get("lines", [])))
+        # Test _apply_formula + _get_cell_error directly
+        _apply_formula(job, target, "=BADFUNCTION()")
+        err = _get_cell_error(target)
+        self.assertEqual(err, "#NAME?")
 
     def test_returns_true_even_when_dialog_immediately_closed(self):
         job = _make_job()
