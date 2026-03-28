@@ -1,0 +1,66 @@
+{
+  "configVersion": 1,
+  "default": {
+    "authHeaderName": "Authorization",
+    "authHeaderPrefix": "Bearer ",
+    "portal_url": "https://mirai.interieur.gouv.fr",
+    "doc_url": "https://github.com/IA-Generative/AssistantMiraiLibreOffice/blob/master/docs/notice-utilisateur.md",
+    "systemPrompt": "Tu es un assistant spécialisé dans la rédaction de documents le contenu doit est concis et professionnels. Ton rôle est d'assister le redacteur pour disposer d'une redaction impecable. Ne répète pas mot pour mot le texte, reformule. Uniquement en texte seul et en français",
+    "extend_selection_max_tokens": 15000,
+    "extend_selection_system_prompt": "",
+    "edit_selection_max_new_tokens": 15000,
+    "edit_selection_system_prompt": "",
+    "summarize_selection_max_tokens": 15000,
+    "summarize_selection_system_prompt": "",
+    "simplify_selection_max_tokens": 15000,
+    "simplify_selection_system_prompt": "",
+    "analyze_range_max_tokens": 4000,
+    "llm_request_timeout_seconds": 45,
+    "enabled": true,
+    "telemetryEnabled": true,
+    "telemetrylogJson": true,
+    "telemetryAuthorizationType": "Bearer"
+  },
+  "local": {
+    "_description": "Dev autonome, sans DM, sans Keycloak",
+    "llm_base_urls": "http://localhost:11434/api",
+    "llm_default_models": "llama3.2",
+    "llm_api_tokens": "not-needed",
+    "telemetryEnabled": false,
+    "bootstrap_url": "",
+    "config_path": ""
+  },
+  "dev": {
+    "_description": "Dev avec DM Docker Compose local",
+    "llm_base_urls": "${{LLM_BASE_URL}}",
+    "llm_default_models": "${{DEFAULT_MODEL_NAME}}",
+    "llm_api_tokens": "${{LLM_API_TOKEN}}",
+    "keycloakIssuerUrl": "${{KEYCLOAK_ISSUER_URL}}",
+    "keycloakRealm": "${{KEYCLOAK_REALM}}",
+    "keycloakClientId": "${{KEYCLOAK_CLIENT_ID}}",
+    "keycloak_redirect_uri": "${{KEYCLOAK_REDIRECT_URI}}",
+    "keycloak_allowed_redirect_uri": "${{KEYCLOAK_ALLOWED_REDIRECT_URI}}"
+  },
+  "int": {
+    "_description": "Intégration / recette",
+    "llm_base_urls": "${{LLM_BASE_URL}}",
+    "llm_default_models": "${{DEFAULT_MODEL_NAME}}",
+    "llm_api_tokens": "${{LLM_API_TOKEN}}",
+    "keycloakIssuerUrl": "${{KEYCLOAK_ISSUER_URL}}",
+    "keycloakRealm": "${{KEYCLOAK_REALM}}",
+    "keycloakClientId": "${{KEYCLOAK_CLIENT_ID}}",
+    "keycloak_redirect_uri": "${{KEYCLOAK_REDIRECT_URI}}",
+    "keycloak_allowed_redirect_uri": "${{KEYCLOAK_ALLOWED_REDIRECT_URI}}"
+  },
+  "prod": {
+    "_description": "Production",
+    "llm_base_urls": "${{LLM_BASE_URL}}",
+    "llm_default_models": "${{DEFAULT_MODEL_NAME}}",
+    "llm_api_tokens": "${{LLM_API_TOKEN}}",
+    "keycloakIssuerUrl": "${{KEYCLOAK_ISSUER_URL}}",
+    "keycloakRealm": "${{KEYCLOAK_REALM}}",
+    "keycloakClientId": "${{KEYCLOAK_CLIENT_ID}}",
+    "keycloak_redirect_uri": "${{KEYCLOAK_REDIRECT_URI}}",
+    "keycloak_allowed_redirect_uri": "${{KEYCLOAK_ALLOWED_REDIRECT_URI}}"
+  }
+}

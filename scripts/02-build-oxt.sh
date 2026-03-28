@@ -145,6 +145,10 @@ mkdir -p "$STAGE_DIR/config"
 if [ -f "$ROOT_DIR/config/calc-functions.json" ]; then
   cp "$ROOT_DIR/config/calc-functions.json" "$STAGE_DIR/config/calc-functions.json"
 fi
+# dm-config.json for device-management auto-registration
+if [ -f "$ROOT_DIR/dm-config.json" ]; then
+  cp "$ROOT_DIR/dm-config.json" "$STAGE_DIR/dm-config.json"
+fi
 # Documentation (README + notice utilisateur) for device-management auto-description
 mkdir -p "$STAGE_DIR/docs"
 [ -f "$ROOT_DIR/README.md" ] && cp "$ROOT_DIR/README.md" "$STAGE_DIR/docs/README.md"
