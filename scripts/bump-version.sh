@@ -6,6 +6,7 @@
 #
 # If no version is given, the script proposes the next patch version.
 # All manifest files are updated, the OXT is built, and deploy instructions are printed.
+# Works on macOS, Linux and Windows (Git Bash / MSYS2).
 
 set -euo pipefail
 
@@ -14,11 +15,20 @@ DESC_XML="$ROOT_DIR/oxt/description.xml"
 MANIFEST="$ROOT_DIR/dm-manifest.json"
 LICENSE="$ROOT_DIR/oxt/registration/license.txt"
 
+# Portable sed -i (macOS vs Linux)
+_sed_i() {
+  if sed --version >/dev/null 2>&1; then
+    sed -i "$@"      # GNU sed (Linux)
+  else
+    sed -i '' "$@"    # BSD sed (macOS)
+  fi
+}
+
 # ── 1. Read current version ──────────────────────────────────────────────────
 CURRENT=$(sed -n 's/.*<version value="\([^"]*\)".*/\1/p' "$DESC_XML" 2>/dev/null || echo "0.0.0")
 echo "Version actuelle : $CURRENT"
 
-# ── 2. Propose next version ─────────────────────────────────────────────────���
+# ── 2. Propose next version ──────────────────────────────────────────────────
 if [ -n "${1:-}" ]; then
   PROPOSED="$1"
 else
@@ -41,7 +51,7 @@ NEW_VERSION="$PROPOSED"
 echo "▶ Mise à jour des fichiers..."
 
 # description.xml
-sed -i '' "s|<version value=\"[^\"]*\"|<version value=\"${NEW_VERSION}\"|" "$DESC_XML"
+_sed_i "s|<version value=\"[^\"]*\"|<version value=\"${NEW_VERSION}\"|" "$DESC_XML"
 echo "  ✓ oxt/description.xml"
 
 # dm-manifest.json — update first changelog entry version
@@ -58,7 +68,7 @@ with open(path, 'w') as f:
 echo "  ✓ dm-manifest.json"
 
 # license.txt
-sed -i '' "s|version [0-9][0-9.]*|version ${NEW_VERSION}|" "$LICENSE"
+_sed_i "s|version [0-9][0-9.]*|version ${NEW_VERSION}|" "$LICENSE"
 echo "  ✓ oxt/registration/license.txt"
 
 # ── 4. Build OXT ─────────────────────────────────────────────────────────────
@@ -66,7 +76,12 @@ echo "▶ Build du package..."
 "$ROOT_DIR/scripts/02-build-oxt.sh" --config config/profiles/config.default.integration.json 2>&1 | tail -2
 echo "  ✓ dist/mirai.oxt (version $NEW_VERSION)"
 
-# ── 5. Deploy instructions ───────────────────────────────────────────────────
+# ── 5. Checksum ──────────────────────────────────────────────────────────────
+CHECKSUM=$(shasum -a 256 "$ROOT_DIR/dist/mirai.oxt" 2>/dev/null || sha256sum "$ROOT_DIR/dist/mirai.oxt" 2>/dev/null)
+CHECKSUM=$(echo "$CHECKSUM" | cut -d' ' -f1)
+echo "  ✓ sha256:${CHECKSUM}"
+
+# ── 6. Deploy instructions ───────────────────────────────────────────────────
 cat <<INSTRUCTIONS
 
 ════════════════════════════════════════════════════════════
@@ -95,6 +110,8 @@ cat <<INSTRUCTIONS
 
 5. Déploiement manuel (sans script) :
    Voir docs/DEPLOY.md
+
+Checksum : sha256:${CHECKSUM}
 
 ════════════════════════════════════════════════════════════
 INSTRUCTIONS
