@@ -103,7 +103,7 @@ fi
 # ── 3. Install extension ──────────────────────────────────────────────────────
 log "Installing extension..."
 "$UNOPKG" remove "fr.gouv.interieur.mirai" 2>/dev/null || true
-printf "yes\n" | "$UNOPKG" add "$OXT_PATH"
+"$UNOPKG" add --force --suppress-license "$OXT_PATH"
 ok "Extension installed"
 
 # ── 4. Create test document if needed ────────────────────────────────────────

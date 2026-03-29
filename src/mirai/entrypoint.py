@@ -1141,7 +1141,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             sf.write("@echo off\r\n")
                             sf.write("timeout /t 3 /nobreak >nul\r\n")
                             sf.write(f'"{unopkg}" remove fr.gouv.interieur.mirai 2>nul\r\n')
-                            sf.write(f'echo yes | "{unopkg}" add "{tmp_path}"\r\n')
+                            sf.write(f'"{unopkg}" add --force --suppress-license "{tmp_path}"\r\n')
                             sf.write(f'start "" "{os.path.dirname(unopkg)}\\soffice.exe"\r\n')
                             sf.write(f'del "{install_script}"\r\n')
                         subprocess.Popen(
@@ -1160,7 +1160,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             sf.write("#!/bin/bash\n")
                             sf.write("sleep 3\n")
                             sf.write(f'"{unopkg}" remove fr.gouv.interieur.mirai 2>/dev/null || true\n')
-                            sf.write(f'printf "yes\\n" | "{unopkg}" add "{tmp_path}"\n')
+                            sf.write(f'"{unopkg}" add --force --suppress-license "{tmp_path}"\n')
                             sf.write(f'{relaunch_cmd}\n')
                             sf.write(f'rm -f "{install_script}"\n')
                         os.chmod(install_script, 0o755)
