@@ -1133,36 +1133,83 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         raise FileNotFoundError("unopkg not found")
                     log_to_file(f"_perform_update: unopkg={unopkg} platform={sys_name}")
 
-                    # Stage the update: quit LO → remove old → install new → relaunch
-                    tmp_dir = os.path.dirname(tmp_path)
+                    # Copy OXT to a stable location (tmp_path may be cleaned when LO exits)
+                    try:
+                        stable_dir = os.path.join(self._get_user_config_dir(), "pending_update")
+                        os.makedirs(stable_dir, exist_ok=True)
+                    except Exception:
+                        stable_dir = os.path.dirname(tmp_path)
+                    stable_oxt = os.path.join(stable_dir, "mirai_update.oxt")
+                    import shutil
+                    shutil.copy2(tmp_path, stable_oxt)
+                    log_to_file(f"_perform_update: OXT copied to {stable_oxt}")
+
+                    # Stage the update: quit LO → wait → remove old → install new → relaunch
+                    log_path = os.path.expanduser("~/log.txt")
+                    _ts = 'date "+%Y-%m-%d %H:%M:%S"'
+
                     if sys_name == "Windows":
-                        install_script = os.path.join(tmp_dir, "mirai_update.bat")
+                        soffice_path = os.path.join(os.path.dirname(unopkg), "soffice.exe")
+                        install_script = os.path.join(stable_dir, "mirai_update.bat")
+                        # Windows: use %TIME% for timestamp
                         with open(install_script, "w") as sf:
                             sf.write("@echo off\r\n")
-                            sf.write("timeout /t 3 /nobreak >nul\r\n")
+                            sf.write(f'echo %DATE% %TIME% - [UPDATE] script started >> "{log_path}"\r\n')
+                            sf.write(":wait_lo\r\n")
+                            sf.write("tasklist /FI \"IMAGENAME eq soffice.bin\" 2>nul | find /I \"soffice.bin\" >nul\r\n")
+                            sf.write("if not errorlevel 1 (\r\n")
+                            sf.write("  timeout /t 2 /nobreak >nul\r\n")
+                            sf.write("  goto wait_lo\r\n")
+                            sf.write(")\r\n")
+                            sf.write(f'echo %DATE% %TIME% - [UPDATE] LO quit detected >> "{log_path}"\r\n')
                             sf.write(f'"{unopkg}" remove fr.gouv.interieur.mirai 2>nul\r\n')
-                            sf.write(f'"{unopkg}" add --force --suppress-license "{tmp_path}"\r\n')
-                            sf.write(f'start "" "{os.path.dirname(unopkg)}\\soffice.exe"\r\n')
-                            sf.write(f'del "{install_script}"\r\n')
-                        subprocess.Popen(
-                            ["cmd", "/c", install_script],
-                            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
-                        )
+                            sf.write(f'echo %DATE% %TIME% - [UPDATE] old extension removed >> "{log_path}"\r\n')
+                            sf.write(f'"{unopkg}" add --force --suppress-license "{stable_oxt}"\r\n')
+                            sf.write(f'if errorlevel 1 (\r\n')
+                            sf.write(f'  echo %DATE% %TIME% - [UPDATE] unopkg add FAILED >> "{log_path}"\r\n')
+                            sf.write(f') else (\r\n')
+                            sf.write(f'  echo %DATE% %TIME% - [UPDATE] extension installed OK >> "{log_path}"\r\n')
+                            sf.write(f')\r\n')
+                            sf.write(f'echo %DATE% %TIME% - [UPDATE] launching LibreOffice >> "{log_path}"\r\n')
+                            sf.write(f'start "" "{soffice_path}"\r\n')
+                            sf.write(f'del "{stable_oxt}" 2>nul\r\n')
+                            sf.write(f'del "{install_script}" 2>nul\r\n')
+                        try:
+                            subprocess.Popen(
+                                ["cmd", "/c", "start", "/min", "", install_script],
+                                close_fds=True,
+                            )
+                        except Exception:
+                            subprocess.Popen(["cmd", "/c", install_script])
                     else:
                         # macOS / Linux
-                        install_script = os.path.join(tmp_dir, "mirai_update.sh")
                         if sys_name == "Darwin":
                             relaunch_cmd = "open -a LibreOffice"
+                            wait_cmd = "while pgrep -x soffice >/dev/null 2>&1; do sleep 1; done"
                         else:
                             soffice = os.path.join(os.path.dirname(unopkg), "soffice")
                             relaunch_cmd = f'"{soffice}" &' if os.path.isfile(soffice) else "libreoffice &"
+                            wait_cmd = "while pgrep -x soffice >/dev/null 2>&1; do sleep 1; done"
+                        install_script = os.path.join(stable_dir, "mirai_update.sh")
                         with open(install_script, "w") as sf:
                             sf.write("#!/bin/bash\n")
-                            sf.write("sleep 3\n")
+                            sf.write(f'LOG="{log_path}"\n')
+                            sf.write(f'echo "$({_ts}) - [UPDATE] script started" >> "$LOG"\n')
+                            sf.write(f'{wait_cmd}\n')
+                            sf.write(f'echo "$({_ts}) - [UPDATE] LO quit detected" >> "$LOG"\n')
+                            sf.write("sleep 2\n")
                             sf.write(f'"{unopkg}" remove fr.gouv.interieur.mirai 2>/dev/null || true\n')
-                            sf.write(f'"{unopkg}" add --force --suppress-license "{tmp_path}"\n')
+                            sf.write(f'echo "$({_ts}) - [UPDATE] old extension removed" >> "$LOG"\n')
+                            sf.write(f'"{unopkg}" add --force --suppress-license "{stable_oxt}"\n')
+                            sf.write(f'RC=$?\n')
+                            sf.write(f'if [ "$RC" -eq 0 ]; then\n')
+                            sf.write(f'  echo "$({_ts}) - [UPDATE] extension installed OK" >> "$LOG"\n')
+                            sf.write(f'else\n')
+                            sf.write(f'  echo "$({_ts}) - [UPDATE] unopkg add FAILED rc=$RC" >> "$LOG"\n')
+                            sf.write(f'fi\n')
+                            sf.write(f'echo "$({_ts}) - [UPDATE] launching LibreOffice" >> "$LOG"\n')
                             sf.write(f'{relaunch_cmd}\n')
-                            sf.write(f'rm -f "{install_script}"\n')
+                            sf.write(f'rm -f "{stable_oxt}" "{install_script}"\n')
                         os.chmod(install_script, 0o755)
                         subprocess.Popen(
                             ["bash", install_script],
