@@ -746,6 +746,7 @@ class SecureBootstrapFlow(object):
         headers = {
             "Content-Type": _CONTENT_TYPE_JSON,
             "Authorization": f"Bearer {token}",
+            "X-Client-UUID": self.plugin_uuid,
         }
         body = _json_bytes(payload)
         status, response_headers, response_body = self._http_call(

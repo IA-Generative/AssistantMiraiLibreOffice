@@ -7,22 +7,22 @@
       <node oor:name="com.sun.star.text.TextDocument">
         <node oor:name="Q_MOD1" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?ExtendSelection</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?ExtendSelection&amp;src=key</value>
           </prop>
         </node>
         <node oor:name="E_MOD1" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?EditSelection</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?EditSelection&amp;src=key</value>
           </prop>
         </node>
         <node oor:name="R_MOD1" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?SummarizeSelection</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?SummarizeSelection&amp;src=key</value>
           </prop>
         </node>
         <node oor:name="L_MOD1" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?SimplifySelection</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?SimplifySelection&amp;src=key</value>
           </prop>
         </node>
       </node>
@@ -31,17 +31,17 @@
       <node oor:name="com.sun.star.sheet.SpreadsheetDocument">
         <node oor:name="T_MOD1" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?TransformToColumn</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?TransformToColumn&amp;src=key</value>
           </prop>
         </node>
         <node oor:name="G_MOD1" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?GenerateFormula</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?GenerateFormula&amp;src=key</value>
           </prop>
         </node>
         <node oor:name="K_MOD1" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?AnalyzeRange</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?AnalyzeRange&amp;src=key</value>
           </prop>
         </node>
       </node>

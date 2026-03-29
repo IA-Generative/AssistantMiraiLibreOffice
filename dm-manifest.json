@@ -26,6 +26,18 @@
   ],
   "changelog": [
     {
+      "version": "0.2.1",
+      "date": "2026-03-29",
+      "changes": [
+        "Télémétrie : attribut plugin.action condensé sur chaque trace (extend, edit, summarize...)",
+        "Télémétrie : attribut trigger.source identifie la source (menu, toolbar, key)",
+        "Télémétrie : ajout traces lifecycle (launch, bootstrap, enroll.ok, enroll.fail, update)",
+        "Télémétrie : ajout traces Calc manquantes (transform, formula, analyze)",
+        "Télémétrie : header X-Client-UUID envoyé pour identification pré-enrollment",
+        "Suppression entrée menu Générer la suite (conserve toolbar + raccourci clavier)"
+      ]
+    },
+    {
       "version": "0.2.0",
       "date": "2026-03-28",
       "changes": [

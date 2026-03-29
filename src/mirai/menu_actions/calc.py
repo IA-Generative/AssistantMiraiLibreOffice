@@ -170,6 +170,7 @@ def _safe_set_string(cell, text):
 
 
 def _extend_cells(job, sheet, col_range, row_range):
+    job._send_telemetry("ExtendSelection", {"context": "calc", "cells": str(len(col_range) * len(row_range))})
     api_type = "chat"
     extend_system_prompt = job.get_config("extend_selection_system_prompt", "")
     extend_max_tokens = job.get_config("extend_selection_max_tokens", 70)
@@ -199,6 +200,7 @@ def _extend_cells(job, sheet, col_range, row_range):
 
 
 def _edit_cells(job, sheet, col_range, row_range, user_input):
+    job._send_telemetry("EditSelection", {"context": "calc", "cells": str(len(col_range) * len(row_range))})
     api_type = "chat"
     edit_system_prompt = job.get_config("edit_selection_system_prompt", "")
     edit_max_new_tokens = job.get_config("edit_selection_max_new_tokens", 0)
@@ -341,6 +343,7 @@ def _transform_to_column(job, sheet, col_range, row_range, user_input):
     function walks right until it finds an empty column and labels it
     'Résultat IA'.
     """
+    job._send_telemetry("TransformToColumn", {"context": "calc", "rows": str(len(row_range))})
     api_type = "chat"
     system_prompt = (
         "Tu es un assistant de transformation de données. "
@@ -839,6 +842,7 @@ def _analyze_range(job, sheet, col_range, row_range):
     Attempts to merge the output row across the selection width so the
     analysis reads as a single block rather than a single narrow cell.
     """
+    job._send_telemetry("AnalyzeRange", {"context": "calc", "rows": str(len(row_range)), "cols": str(len(col_range))})
     api_type = "chat"
     system_prompt = (
         "Tu es un analyste de données expert. "
@@ -921,9 +925,11 @@ def handle_calc_action(job, args, model):
         selection = model.CurrentController.Selection
 
         if args == "settings":
+            job._send_telemetry("OpenSettings", {"context": "calc"})
             _open_settings(job)
             return True
         if args == "AboutDialog":
+            job._send_telemetry("AboutDialog", {"context": "calc"})
             try:
                 job._show_about_dialog()
             except Exception as e:
@@ -968,6 +974,7 @@ def handle_calc_action(job, args, model):
             )
         # GenerateFormula uses a dedicated multi-turn assistant dialog
         if args == "GenerateFormula":
+            job._send_telemetry("GenerateFormula", {"context": "calc"})
             # Build initial state from current selection
             build_result = _build_from_selection(job, sheet, selection)
             if build_result[0] is None:
