@@ -145,7 +145,10 @@ mkdir -p "$STAGE_DIR/config"
 if [ -f "$ROOT_DIR/config/calc-functions.json" ]; then
   cp "$ROOT_DIR/config/calc-functions.json" "$STAGE_DIR/config/calc-functions.json"
 fi
-# dm-config.json for device-management auto-registration
+# Device Management metadata and config template
+if [ -f "$ROOT_DIR/dm-manifest.json" ]; then
+  cp "$ROOT_DIR/dm-manifest.json" "$STAGE_DIR/dm-manifest.json"
+fi
 if [ -f "$ROOT_DIR/dm-config.json" ]; then
   cp "$ROOT_DIR/dm-config.json" "$STAGE_DIR/dm-config.json"
 fi

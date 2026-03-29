@@ -1,0 +1,59 @@
+{
+  "slug": "mirai-libreoffice",
+  "name": "MIrAI — IA'ssistant LibreOffice",
+  "description": "Extension LibreOffice intégrant un assistant IA dans Writer et Calc. Génération, modification, résumé, reformulation, ajustement de longueur, formules IA et analyse de données.",
+  "intent": "Assister les rédacteurs dans la production de documents professionnels en intégrant l'IA directement dans LibreOffice.",
+  "device_type": "libreoffice",
+  "category": "productivity",
+  "publisher": "Programme MIrAI — Ministère de l'Intérieur et des Outre-mer",
+  "visibility": "public",
+  "homepage_url": "https://github.com/IA-Generative/AssistantMiraiLibreOffice",
+  "support_email": "fabrique-numerique@interieur.gouv.fr",
+  "icon_url": "assets/logo.png",
+  "doc_url": "https://github.com/IA-Generative/AssistantMiraiLibreOffice/blob/master/docs/notice-utilisateur.md",
+  "license": "MPL-2.0",
+  "key_features": [
+    "Générer la suite d'un texte (Writer)",
+    "Modifier la sélection avec instructions libres (Writer)",
+    "Ajuster la longueur − / + itératif (Writer)",
+    "Résumer la sélection (Writer)",
+    "Reformuler en langage clair (Writer)",
+    "Transformer une colonne avec IA (Calc)",
+    "Générer des formules en langage naturel avec preview (Calc)",
+    "Analyser une plage de données (Calc)",
+    "Référence de 150+ fonctions Calc embarquée",
+    "Déploiement automatisé avec rollout progressif"
+  ],
+  "changelog": [
+    {
+      "version": "0.2.0",
+      "date": "2026-03-28",
+      "changes": [
+        "Ajuster la longueur : mini-dialogue − / + avec preview streaming",
+        "Suggestions IA contextuelles dans le dialogue d'édition",
+        "Générateur de formules interactif avec preview, explication et alternative",
+        "Référence de 150+ fonctions Calc avec matching par mots-clés",
+        "Dialogue À propos avec version, changelog et vérification de mises à jour",
+        "Barre d'outils MIrAI avec boutons d'accès rapide",
+        "Système de déploiement automatisé (rollout progressif par paliers)",
+        "Analyse Calc : max_tokens augmenté, nettoyage markdown",
+        "Filtrage robuste du raisonnement LLM (<think> blocks)",
+        "Nettoyage des clés de config obsolètes (api_type, is_openwebui, proxy check)",
+        "Notice utilisateur double persona (novice / expert)",
+        "Licence mise à jour avec limites IA et mentions vie privée",
+        "dm-config.json pour auto-enregistrement dans Device Management"
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "date": "2026-03-01",
+      "changes": [
+        "Générer la suite, Modifier, Résumer, Reformuler (Writer)",
+        "Transformer colonne, Générer formule, Analyser plage (Calc)",
+        "Wizard d'enrôlement Keycloak PKCE",
+        "Support proxy, télémétrie OpenTelemetry",
+        "Menu Documentation avec fallback portal_url"
+      ]
+    }
+  ]
+}
