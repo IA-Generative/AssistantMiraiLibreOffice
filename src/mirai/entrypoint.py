@@ -1178,13 +1178,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             sf.write(f'start "" "{soffice_path}"\r\n')
                             sf.write(f'del "{stable_oxt}" 2>nul\r\n')
                             sf.write(f'del "{install_script}" 2>nul\r\n')
-                        try:
-                            subprocess.Popen(
-                                ["cmd", "/c", "start", "/min", "", install_script],
-                                close_fds=True,
-                            )
-                        except Exception:
-                            subprocess.Popen(["cmd", "/c", install_script])
+                        self._pending_install_script = install_script
                     else:
                         # macOS / Linux
                         if sys_name == "Darwin":
@@ -1215,12 +1209,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             sf.write(f'{relaunch_cmd}\n')
                             sf.write(f'rm -f "{stable_oxt}" "{install_script}"\n')
                         os.chmod(install_script, 0o755)
-                        subprocess.Popen(
-                            ["bash", install_script],
-                            start_new_session=True,
-                        )
+                        self._pending_install_script = install_script
                     installed = True
-                    log_to_file(f"_perform_update: install staged, quitting LO for version={target_version}")
+                    log_to_file(f"_perform_update: install staged for version={target_version}")
                 except Exception as pkg_err:
                     log_to_file(f"_perform_update: unopkg error: {pkg_err}")
             if not installed:
@@ -1230,7 +1221,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             # Report success
             self._report_update_status(campaign_id, "installed", version_before, target_version)
 
-            # Notify user with restart option
+            # Ask user BEFORE launching the install script
+            user_wants_restart = False
             try:
                 desktop = self.ctx.getServiceManager().createInstanceWithContext(
                     "com.sun.star.frame.Desktop", self.ctx
@@ -1258,13 +1250,31 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         msg_text
                     )
                     answer = msgbox.execute()
-                    if answer == 2:  # YES
-                        log_to_file("_perform_update: user accepted restart")
-                        desktop.terminate()
-                    else:
-                        log_to_file("_perform_update: user postponed restart")
+                    user_wants_restart = (answer == 2)  # YES
             except Exception as notify_err:
                 log_to_file(f"_perform_update: notification error (non-fatal): {notify_err}")
+
+            if user_wants_restart:
+                # NOW launch the install script and quit LO
+                log_to_file("_perform_update: user accepted restart, launching install script")
+                try:
+                    install_script = self._pending_install_script
+                    if install_script and os.path.isfile(install_script):
+                        import platform as _pf
+                        if _pf.system() == "Windows":
+                            try:
+                                subprocess.Popen(["cmd", "/c", "start", "/min", "", install_script], close_fds=True)
+                            except Exception:
+                                subprocess.Popen(["cmd", "/c", install_script])
+                        else:
+                            subprocess.Popen(["bash", install_script], start_new_session=True)
+                        desktop.terminate()
+                    else:
+                        log_to_file("_perform_update: install script not found, skipping")
+                except Exception as launch_err:
+                    log_to_file(f"_perform_update: failed to launch install script: {launch_err}")
+            else:
+                log_to_file("_perform_update: user postponed restart")
 
             # Send telemetry
             self._send_telemetry("ExtensionUpdated", {
