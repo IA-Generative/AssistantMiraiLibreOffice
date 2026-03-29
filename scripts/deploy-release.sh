@@ -1,14 +1,22 @@
 #!/usr/bin/env bash
 # Deploy a new MIrAI LibreOffice release via device-management.
 #
+# Uses the unified endpoint: POST /api/plugins/{slug}/deploy
+# which handles everything in one call:
+#   - artifact upload (upsert)
+#   - version creation (upsert + deprecate old versions)
+#   - dm-config.json + dm-manifest.json extraction
+#   - campaign creation (auto-complete old campaigns)
+#
 # Usage:
 #   scripts/deploy-release.sh --bootstrap-url <url> [options]
 #
 # Options:
 #   --bootstrap-url <url>    Bootstrap server URL (required)
-#   --version <ver>          Version string (default: from oxt/description.xml)
-#   --profile <p>            Config profile: dev|int|prod (default: int)
+#   --slug <slug>            Plugin slug (default: mirai-libreoffice)
+#   --version <ver>          Version string (default: auto-detected from package)
 #   --strategy <s>           Rollout strategy: immediate|canary (default: canary)
+#   --urgency <u>            Urgency: low|normal|critical (default: normal)
 #   --admin-token <tok>      Admin API token (default: $DM_ADMIN_TOKEN env var)
 #   --cohort-id <id>         Target cohort ID (default: none = all devices)
 #   --config <path>          Config file for OXT build (optional)
@@ -22,9 +30,10 @@ OXT_PATH="$ROOT_DIR/dist/mirai.oxt"
 
 # Defaults
 BOOTSTRAP_URL=""
+SLUG="mirai-libreoffice"
 VERSION=""
-PROFILE="int"
 STRATEGY="canary"
+URGENCY="normal"
 ADMIN_TOKEN="${DM_ADMIN_TOKEN:-}"
 COHORT_ID=""
 BUILD_CONFIG=""
@@ -35,16 +44,17 @@ ok()   { printf '✓ %s\n' "$*"; }
 err()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,15p' "$0"
+  sed -n '2,25p' "$0"
   exit 0
 }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --bootstrap-url) BOOTSTRAP_URL="${2:-}"; shift 2 ;;
+    --slug)          SLUG="${2:-}"; shift 2 ;;
     --version)       VERSION="${2:-}"; shift 2 ;;
-    --profile)       PROFILE="${2:-}"; shift 2 ;;
     --strategy)      STRATEGY="${2:-}"; shift 2 ;;
+    --urgency)       URGENCY="${2:-}"; shift 2 ;;
     --admin-token)   ADMIN_TOKEN="${2:-}"; shift 2 ;;
     --cohort-id)     COHORT_ID="${2:-}"; shift 2 ;;
     --config)        BUILD_CONFIG="${2:-}"; shift 2 ;;
@@ -59,10 +69,9 @@ done
 
 # ── 1. Extract version from description.xml if not provided ──────────────
 if [ -z "$VERSION" ]; then
-  VERSION=$(grep -oP '(?<=<version value=")[^"]+' "$ROOT_DIR/oxt/description.xml" 2>/dev/null || echo "")
-  [ -n "$VERSION" ] || err "Could not extract version from oxt/description.xml. Use --version."
+  VERSION=$(sed -n 's/.*<version value="\([^"]*\)".*/\1/p' "$ROOT_DIR/oxt/description.xml" 2>/dev/null || echo "")
 fi
-log "Version: $VERSION"
+log "Version: ${VERSION:-auto-detect from package}"
 
 # ── 2. Build OXT ─────────────────────────────────────────────────────────
 log "Building OXT..."
@@ -79,26 +88,21 @@ FILE_SIZE=$(stat -f%z "$OXT_PATH" 2>/dev/null || stat --printf=%s "$OXT_PATH")
 log "Checksum: $CHECKSUM"
 log "Size: $((FILE_SIZE / 1024)) KB"
 
-# ── 4. Rollout config ────────────────────────────────────────────────────
-if [ "$STRATEGY" = "canary" ]; then
-  ROLLOUT_CONFIG='{"strategy":"percentage","stages":[{"percent":5,"duration_hours":24,"label":"canary"},{"percent":25,"duration_hours":48,"label":"early_adopters"},{"percent":100,"duration_hours":0,"label":"general_availability"}],"auto_advance":true,"rollback_on_failure_rate":0.1}'
-else
-  ROLLOUT_CONFIG='{"strategy":"immediate","stages":[{"percent":100,"duration_hours":0,"label":"immediate"}],"auto_advance":true,"rollback_on_failure_rate":0.1}'
-fi
-
-# ── 5. Show plan ─────────────────────────────────────────────────────────
+# ── 4. Show plan ─────────────────────────────────────────────────────────
 printf '\n'
 printf '┌─────────────────────────────────────────┐\n'
 printf '│  MIrAI Release Deployment Plan          │\n'
 printf '├─────────────────────────────────────────┤\n'
-printf '│  Version:    %-26s │\n' "$VERSION"
+printf '│  Plugin:     %-26s │\n' "$SLUG"
+printf '│  Version:    %-26s │\n' "${VERSION:-auto}"
 printf '│  Strategy:   %-26s │\n' "$STRATEGY"
-printf '│  Profile:    %-26s │\n' "$PROFILE"
+printf '│  Urgency:    %-26s │\n' "$URGENCY"
 printf '│  Bootstrap:  %-26s │\n' "$BOOTSTRAP_URL"
 printf '│  Checksum:   %-26s │\n' "${CHECKSUM:0:20}..."
 if [ -n "$COHORT_ID" ]; then
   printf '│  Cohort:     %-26s │\n' "$COHORT_ID"
 fi
+printf '│  Endpoint:   %-26s │\n' "POST /api/plugins/$SLUG/deploy"
 printf '└─────────────────────────────────────────┘\n'
 printf '\n'
 
@@ -107,78 +111,56 @@ if [ "$DRY_RUN" = true ]; then
   exit 0
 fi
 
-# ── 6. Upload artifact ───────────────────────────────────────────────────
-log "Uploading artifact..."
-UPLOAD_RESPONSE=$(curl -s -X POST \
-  "${BOOTSTRAP_URL}/api/artifacts" \
-  -H "X-Admin-Token: ${ADMIN_TOKEN}" \
-  -F "device_type=libreoffice" \
-  -F "version=${VERSION}" \
-  -F "binary=@${OXT_PATH}" \
-  -F "changelog_url=https://github.com/IA-Generative/AssistantMiraiLibreOffice/releases/tag/v${VERSION}" \
-  2>&1)
+# ── 5. Deploy (single unified call) ─────────────────────────────────────
+log "Deploying to ${BOOTSTRAP_URL}..."
 
-ARTIFACT_ID=$(echo "$UPLOAD_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('artifact_id',''))" 2>/dev/null || echo "")
-if [ -z "$ARTIFACT_ID" ]; then
-  printf 'Upload response: %s\n' "$UPLOAD_RESPONSE" >&2
-  err "Failed to upload artifact"
+DEPLOY_ARGS=(
+  -s -X POST
+  "${BOOTSTRAP_URL}/api/plugins/${SLUG}/deploy"
+  -H "X-Admin-Token: ${ADMIN_TOKEN}"
+  -F "binary=@${OXT_PATH}"
+  -F "strategy=${STRATEGY}"
+  -F "urgency=${URGENCY}"
+)
+if [ -n "$VERSION" ]; then
+  DEPLOY_ARGS+=(-F "version=${VERSION}")
 fi
-ok "Artifact uploaded: ID=$ARTIFACT_ID"
-
-# ── 7. Create campaign ───────────────────────────────────────────────────
-log "Creating campaign..."
-CAMPAIGN_BODY=$(python3 -c "
-import json
-body = {
-    'name': 'Release v${VERSION}',
-    'description': 'Automated release of MIrAI v${VERSION} (${STRATEGY})',
-    'type': 'plugin_update',
-    'artifact_id': ${ARTIFACT_ID},
-    'urgency': 'normal',
-    'status': 'draft',
-    'rollout_config': json.loads('${ROLLOUT_CONFIG}'),
-}
-cohort = '${COHORT_ID}'
-if cohort:
-    body['target_cohort_id'] = int(cohort)
-print(json.dumps(body))
-")
-
-CAMPAIGN_RESPONSE=$(curl -s -X POST \
-  "${BOOTSTRAP_URL}/api/campaigns" \
-  -H "Content-Type: application/json" \
-  -H "X-Admin-Token: ${ADMIN_TOKEN}" \
-  -d "$CAMPAIGN_BODY" \
-  2>&1)
-
-CAMPAIGN_ID=$(echo "$CAMPAIGN_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('campaign_id',''))" 2>/dev/null || echo "")
-if [ -z "$CAMPAIGN_ID" ]; then
-  printf 'Campaign response: %s\n' "$CAMPAIGN_RESPONSE" >&2
-  err "Failed to create campaign"
+if [ -n "$COHORT_ID" ]; then
+  DEPLOY_ARGS+=(-F "cohort_id=${COHORT_ID}")
 fi
-ok "Campaign created: ID=$CAMPAIGN_ID"
 
-# ── 8. Start rollout ─────────────────────────────────────────────────────
-log "Starting rollout..."
-START_RESPONSE=$(curl -s -X PATCH \
-  "${BOOTSTRAP_URL}/api/campaigns/${CAMPAIGN_ID}/start" \
-  -H "X-Admin-Token: ${ADMIN_TOKEN}" \
-  2>&1)
+RESPONSE=$(curl "${DEPLOY_ARGS[@]}" 2>&1)
 
-START_OK=$(echo "$START_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "")
-if [ "$START_OK" != "True" ]; then
-  printf 'Start response: %s\n' "$START_RESPONSE" >&2
-  err "Failed to start campaign"
+# Parse response
+DEPLOY_OK=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('ok',False))" 2>/dev/null || echo "")
+if [ "$DEPLOY_OK" != "True" ]; then
+  printf 'Deploy response: %s\n' "$RESPONSE" >&2
+  err "Deployment failed"
 fi
-ok "Rollout started"
 
-# ── 9. Show tracking info ────────────────────────────────────────────────
+CAMPAIGN_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('campaign_id',''))" 2>/dev/null)
+ARTIFACT_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('artifact_id',''))" 2>/dev/null)
+VERSION_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version_id',''))" 2>/dev/null)
+DEPLOYED_VER=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version',''))" 2>/dev/null)
+DEPLOYED_CHECKSUM=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('checksum',''))" 2>/dev/null)
+
+ok "Deployed successfully!"
 printf '\n'
-printf '✓ Deployment initiated successfully!\n'
+printf '  Version:     %s\n' "$DEPLOYED_VER"
+printf '  Artifact:    ID=%s\n' "$ARTIFACT_ID"
+printf '  Version:     ID=%s\n' "$VERSION_ID"
+printf '  Campaign:    ID=%s\n' "$CAMPAIGN_ID"
+printf '  Checksum:    %s\n' "$DEPLOYED_CHECKSUM"
+printf '  Strategy:    %s\n' "$STRATEGY"
+
+# ── 6. Show tracking info ────────────────────────────────────────────────
 printf '\n'
 printf '  Track progress:\n'
 printf '    curl -s -H "X-Admin-Token: $DM_ADMIN_TOKEN" \\\n'
 printf '      %s/api/campaigns/%s/progress | python3 -m json.tool\n' "$BOOTSTRAP_URL" "$CAMPAIGN_ID"
+printf '\n'
+printf '  Admin UI:\n'
+printf '    %s/admin/deploy/%s\n' "$BOOTSTRAP_URL" "$CAMPAIGN_ID"
 printf '\n'
 printf '  Pause rollout:\n'
 printf '    curl -s -X PATCH -H "X-Admin-Token: $DM_ADMIN_TOKEN" \\\n'
