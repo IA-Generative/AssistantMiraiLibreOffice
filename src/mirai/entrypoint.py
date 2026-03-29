@@ -806,7 +806,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("DM config fetch skipped: recursion guard active")
             return None
         now = time.time()
-        if self.config_cache and (now - self.config_loaded_at) < self.config_ttl:
+        if not force and self.config_cache and (now - self.config_loaded_at) < self.config_ttl:
             return self.config_cache
         if (
             not force
@@ -854,9 +854,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     if client_uuid:
                         headers["X-Client-UUID"] = client_uuid
                     request = urllib.request.Request(url, headers=_with_user_agent(headers))
+                    _relay_present = "X-Relay-Client" in headers
+                    log_to_file(f"DM config fetch headers: relay={'yes' if _relay_present else 'no'} keys={list(headers.keys())}")
                     with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=use_proxy) as response:
                         payload = response.read().decode("utf-8")
-                    log_to_file(f"DM bootstrap raw response ({mode}): {payload[:2000]}")
+                    log_to_file(f"DM bootstrap raw response ({mode}): {payload[:4000]}")
                     config_data = json.loads(payload)
                     if isinstance(config_data, dict):
                         # Handle EnrichedConfigResponse (schema_version=2)
@@ -936,6 +938,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             self.set_config(key, val)
                     elif val != current and val != "":
                         self.set_config(key, val)
+                        if key == "llm_api_tokens":
+                            log_to_file(f"[persist] llm_api_tokens synced from DM ({len(str(val))} chars)")
             log_to_file("Bootstrap config persisted to local file")
         except Exception as e:
             log_to_file(f"Failed to persist bootstrap config: {str(e)}")
@@ -943,17 +947,30 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     # ── Update & Feature Toggling (schema_version 2) ─────────────────
 
     def _get_extension_version(self):
-        """Return the installed version of this extension via PackageInformationProvider."""
+        """Return the installed version from description.xml in the .oxt package."""
         try:
             pip = self.ctx.getServiceManager().createInstanceWithContext(
                 "com.sun.star.deployment.PackageInformationProvider", self.ctx
             )
-            ext_id = "mirai.libreoffice.assistant"
-            version = pip.getExtensionVersion(ext_id)
-            return str(version).strip() if version else ""
-        except Exception as e:
-            log_to_file(f"_get_extension_version error: {e}")
-            return ""
+            if pip:
+                version = pip.getExtensionVersion("fr.gouv.interieur.mirai")
+                if version:
+                    return str(version).strip()
+        except Exception:
+            pass
+        # Fallback: parse description.xml from the package directory
+        try:
+            pkg_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            desc_path = os.path.join(pkg_dir, "description.xml")
+            if os.path.isfile(desc_path):
+                import re
+                with open(desc_path, "r", encoding="utf-8") as f:
+                    m = re.search(r'<version\s+value="([^"]+)"', f.read())
+                    if m:
+                        return m.group(1)
+        except Exception:
+            pass
+        return ""
 
     def _get_lo_version(self):
         """Return LibreOffice host version string (e.g. '24.8.0')."""
@@ -2768,6 +2785,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 if relay_expires_at > 0:
                     self.set_config("relay_key_expires_at", relay_expires_at)
                 log_to_file("Device management enroll succeeded with relay credentials")
+                # Immediately fetch config with new relay creds to sync LLM token
+                try:
+                    self._fetch_config(force=True)
+                except Exception as _e:
+                    log_to_file(f"Post-enroll config refresh failed: {_e}")
             else:
                 log_to_file("Device management enroll succeeded without relay credentials")
             self.set_config("enrolled", True)
@@ -4060,6 +4082,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         _DONE = object()          # sentinel
         _ERROR_401 = object()     # sentinel for auth error
+        _ERROR_403 = object()     # sentinel for permission error (token not yet synced)
         chunk_queue = _queue.Queue()
 
         def _network_thread():
@@ -4102,6 +4125,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 if e.code == 401 or ("\"401\"" in body or "status\":401" in body
                                      or "code\":401" in body):
                     chunk_queue.put(_ERROR_401)
+                elif e.code == 403:
+                    chunk_queue.put(_ERROR_403)
                 log_to_file(
                     f"ERROR in stream_request: HTTP {e.code} {e.reason} "
                     f"body={body[:2000]}")
@@ -4145,6 +4170,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         )
                     except Exception:
                         pass
+                    continue
+                if item is _ERROR_403:
+                    log_to_file("[stream] 403 received — caller should retry after config refresh")
                     continue
 
                 # Close thinking widget on first real chunk
@@ -4861,9 +4889,34 @@ EDITED VERSION:
                 pass
 
             # Edit selection as a single block (no segmentation)
+            # Retry once on empty result (handles 403 after fresh enrollment —
+            # first attempt fails, we force a blocking config refresh to sync
+            # the LLM token from the relay, then retry).
             _show_wait()
-            request = _edit_segment(original_text)
-            self.stream_request(request, api_type, append_text)
+            for _attempt in range(2):
+                accumulated_text = ""
+                aborted["value"] = False
+                request = _edit_segment(original_text)
+                self.stream_request(request, api_type, append_text)
+                if accumulated_text.strip() or cancelled["value"] or aborted["value"]:
+                    break
+                if _attempt == 0:
+                    log_to_file("[edit] empty result on first attempt, forcing config refresh")
+                    try:
+                        self._fetch_config(force=True)
+                    except Exception:
+                        pass
+                    # Verify token is now available — read directly from disk
+                    try:
+                        _cfg_path = os.path.join(self._get_user_config_dir(), "config.json")
+                        with open(_cfg_path, "r", encoding="utf-8") as _f:
+                            _disk = json.load(_f)
+                        token_check = str(_disk.get("llm_api_tokens", "") or "").strip()
+                    except Exception:
+                        token_check = str(self._get_config_from_file("llm_api_tokens", "") or "").strip()
+                    log_to_file(f"[edit] after refresh: llm_api_tokens={'present' if token_check else 'still empty'}")
+                    if not token_check:
+                        break  # no point retrying without a token
             _close_wait()
             if cancelled["value"]:
                 return
@@ -4873,6 +4926,13 @@ EDITED VERSION:
                     "Le modèle a tenté de poser une question. Reformulez la demande de manière plus directive."
                 )
                 return
+            # Strip think/reasoning blocks (e.g. deepseek-r1)
+            import re as _re
+            accumulated_text = _re.sub(r"<think>.*?</think>", "", accumulated_text, flags=_re.DOTALL | _re.IGNORECASE)
+            accumulated_text = _re.sub(r"^.*?</think>", "", accumulated_text, flags=_re.DOTALL | _re.IGNORECASE)
+            accumulated_text = _re.sub(r"<think>.*$", "", accumulated_text, flags=_re.DOTALL | _re.IGNORECASE)
+            accumulated_text = accumulated_text.strip()
+
             if not accumulated_text.strip():
                 self._show_message(
                     "Modification",
@@ -6026,12 +6086,29 @@ EDITED VERSION:
                     f"Tes 8 instructions en français :"
                 )
                 api_type = str(self.get_config("api_type", "completions")).lower()
+                # Use non-streaming HTTP call — this runs in a background thread
+                # and stream_request must NOT be called from background threads
+                # (processEventsToIdle crashes LibreOffice).
                 request = self.make_api_request(prompt, system, max_tokens=600, api_type=api_type)
-                accumulated = []
-                def _collect(chunk):
-                    accumulated.append(chunk)
-                self.stream_request(request, api_type, _collect)
-                raw = "".join(accumulated).strip()
+                # Override stream=false for a synchronous call
+                import copy as _copy
+                req_data = json.loads(request.data.decode("utf-8"))
+                req_data["stream"] = False
+                request.data = json.dumps(req_data).encode("utf-8")
+                try:
+                    ssl_ctx = self.get_ssl_context()
+                    timeout = int(self.get_config("llm_request_timeout_seconds", 45))
+                    with self._urlopen(request, context=ssl_ctx, timeout=timeout) as resp:
+                        body = resp.read().decode("utf-8")
+                    result = json.loads(body)
+                    choices = result.get("choices", [])
+                    raw = ""
+                    if choices:
+                        raw = choices[0].get("message", {}).get("content", "")
+                except Exception as e:
+                    log_to_file(f"AI suggestions HTTP error: {e}")
+                    raw = ""
+                raw = raw.strip()
                 if not raw:
                     return list(_FALLBACK_PROMPTS)
                 # Strip chain-of-thought blocks (<think>…</think>)
