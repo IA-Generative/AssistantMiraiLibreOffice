@@ -2146,11 +2146,29 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return redirect_uri
         return f"http://{host}:{port}{path}"
 
-    def _select_redirect_uri(self):
+    def _select_redirect_uri(self, config_data=None):
         redirect_uri = self._get_config_from_file("keycloak_redirect_uri", "")
+        if not redirect_uri and isinstance(config_data, dict):
+            inner = config_data.get("config", {}) if isinstance(config_data.get("config"), dict) else config_data
+            redirect_uri = (
+                inner.get("keycloak_redirect_uri")
+                or inner.get("redirect_uri")
+                or inner.get("redirectUri")
+                or ""
+            )
+            if redirect_uri:
+                log_to_file(f"redirect_uri resolved from DM config_data: {redirect_uri}")
         if not redirect_uri:
             return None
         allowed = self._get_config_from_file("keycloak_allowed_redirect_uri", [])
+        if not allowed and isinstance(config_data, dict):
+            inner = config_data.get("config", {}) if isinstance(config_data.get("config"), dict) else config_data
+            allowed = (
+                inner.get("keycloak_allowed_redirect_uri")
+                or inner.get("allowed_redirect_uri")
+                or inner.get("allowedRedirectUri")
+                or []
+            )
         if isinstance(allowed, str):
             allowed = [u.strip() for u in allowed.split(",") if u.strip()]
         if isinstance(allowed, list) and allowed:
@@ -2186,7 +2204,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             )
             return None
 
-        redirect_uri = self._select_redirect_uri()
+        redirect_uri = self._select_redirect_uri(config_data)
         if not redirect_uri:
             log_to_file("Keycloak redirect_uri missing; cannot open browser")
             self._show_message(
@@ -8333,6 +8351,9 @@ EDITED VERSION:
     def _needs_first_enrollment(self):
         """Check if user needs first-time enrollment (not yet enrolled)."""
         try:
+            # No enrollment needed if device management is disabled
+            if not self._device_management_enabled():
+                return False
             enrolled = self._as_bool(self._get_config_from_file("enrolled", False))
             if enrolled:
                 return False

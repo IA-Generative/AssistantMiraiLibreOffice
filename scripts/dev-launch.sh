@@ -18,6 +18,7 @@ OXT_PATH="$ROOT_DIR/dist/mirai.oxt"
 TEST_DOC="$ROOT_DIR/tests/fixtures/sample.odt"
 DO_BUILD=true
 BUILD_EXTRA_ARGS=()
+CONFIG_PROFILE=""
 
 log()  { printf '▶ %s\n' "$*"; }
 ok()   { printf '✓ %s\n' "$*"; }
@@ -31,7 +32,8 @@ while [ "$#" -gt 0 ]; do
     --no-build)
       DO_BUILD=false; shift ;;
     --config)
-      BUILD_EXTRA_ARGS+=(--config "${2:-}"); shift 2 ;;
+      CONFIG_PROFILE="${2:-}"
+      BUILD_EXTRA_ARGS+=(--config "$CONFIG_PROFILE"); shift 2 ;;
     -h|--help)
       sed -n '2,10p' "$0"; exit 0 ;;
     *)
@@ -62,6 +64,37 @@ if [ "$DO_BUILD" = true ]; then
 else
   [ -f "$OXT_PATH" ] || err "OXT not found: $OXT_PATH (run without --no-build first)"
   log "Skipping build, using: $OXT_PATH"
+fi
+
+# ── 2b. Apply config profile to local config ────────────────────────────────
+if [ -n "$CONFIG_PROFILE" ] && [ -f "$CONFIG_PROFILE" ]; then
+  LO_CONFIG_DIR="$HOME/Library/Application Support/LibreOffice/4/user/config"
+  LO_CONFIG_FILE="$LO_CONFIG_DIR/config.json"
+  mkdir -p "$LO_CONFIG_DIR"
+  if [ -f "$LO_CONFIG_FILE" ]; then
+    # Merge: profile values as base, preserve local-only keys (extensionUUID, plugin_uuid)
+    python3 - "$CONFIG_PROFILE" "$LO_CONFIG_FILE" <<'PY'
+import json, sys
+profile_path, local_path = sys.argv[1], sys.argv[2]
+with open(profile_path, "r") as f:
+    profile = json.load(f)
+try:
+    with open(local_path, "r") as f:
+        local = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    local = {}
+# Keep local-only runtime keys
+for key in ("extensionUUID", "plugin_uuid"):
+    if key in local and key not in profile:
+        profile[key] = local[key]
+with open(local_path, "w", encoding="utf-8") as f:
+    json.dump(profile, f, indent=4, ensure_ascii=False)
+    f.write("\n")
+PY
+  else
+    cp "$CONFIG_PROFILE" "$LO_CONFIG_FILE"
+  fi
+  log "Config profile applied: $CONFIG_PROFILE"
 fi
 
 # ── 3. Install extension ──────────────────────────────────────────────────────
