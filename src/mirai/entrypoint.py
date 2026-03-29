@@ -844,8 +844,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     headers.update(self._relay_headers())
                     # Enrich headers for schema_version=2 support
                     plugin_version = self._get_extension_version()
-                    if plugin_version:
-                        headers["X-Plugin-Version"] = plugin_version
+                    headers["X-Plugin-Version"] = plugin_version or "unknown"
                     headers["X-Platform-Type"] = "libreoffice"
                     lo_version = self._get_lo_version()
                     if lo_version:
@@ -870,7 +869,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                                 log_to_file(f"Feature flags updated: {list(features.keys())}")
                             update_directive = config_data.get("update")
                             if isinstance(update_directive, dict) and update_directive.get("action") in ("update", "rollback"):
-                                self._schedule_update(update_directive)
+                                target_ver = str(update_directive.get("target_version", "")).strip()
+                                current_ver = str(self._get_extension_version() or "").strip()
+                                if target_ver and current_ver and target_ver == current_ver:
+                                    log_to_file(f"Update skipped: already at target version {target_ver}")
+                                else:
+                                    self._schedule_update(update_directive)
                             else:
                                 log_to_file("No update directive in EnrichedConfigResponse")
                         self.config_cache = config_data
