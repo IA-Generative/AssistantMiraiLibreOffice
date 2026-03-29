@@ -145,17 +145,41 @@ mkdir -p "$STAGE_DIR/config"
 if [ -f "$ROOT_DIR/config/calc-functions.json" ]; then
   cp "$ROOT_DIR/config/calc-functions.json" "$STAGE_DIR/config/calc-functions.json"
 fi
-# Device Management metadata and config template
+# ── Device Management packaging ──────────────────────────────────────────
+# Sync version from description.xml into dm-manifest.json
+OXT_VERSION=$(sed -n 's/.*<version value="\([^"]*\)".*/\1/p' "$STAGE_DIR/description.xml" 2>/dev/null || echo "")
+OXT_IDENTIFIER=$(sed -n 's/.*<identifier value="\([^"]*\)".*/\1/p' "$STAGE_DIR/description.xml" 2>/dev/null || echo "")
+
+# dm-manifest.json — plugin metadata for DM auto-registration
 if [ -f "$ROOT_DIR/dm-manifest.json" ]; then
-  cp "$ROOT_DIR/dm-manifest.json" "$STAGE_DIR/dm-manifest.json"
+  if [ -n "$OXT_VERSION" ]; then
+    # Inject current version into manifest changelog[0].version if it differs
+    python3 -c "
+import json, sys
+with open('$ROOT_DIR/dm-manifest.json') as f:
+    m = json.load(f)
+m['version'] = '$OXT_VERSION'
+if '$OXT_IDENTIFIER':
+    m['identifier'] = '$OXT_IDENTIFIER'
+with open('$STAGE_DIR/dm-manifest.json', 'w') as f:
+    json.dump(m, f, indent=2, ensure_ascii=False)
+    f.write('\n')
+" 2>/dev/null || cp "$ROOT_DIR/dm-manifest.json" "$STAGE_DIR/dm-manifest.json"
+  else
+    cp "$ROOT_DIR/dm-manifest.json" "$STAGE_DIR/dm-manifest.json"
+  fi
 fi
+
+# dm-config.json — config template for DM (default + profiles)
 if [ -f "$ROOT_DIR/dm-config.json" ]; then
   cp "$ROOT_DIR/dm-config.json" "$STAGE_DIR/dm-config.json"
 fi
-# Documentation (README + notice utilisateur) for device-management auto-description
+
+# Documentation — README, notice, licence
 mkdir -p "$STAGE_DIR/docs"
 [ -f "$ROOT_DIR/README.md" ] && cp "$ROOT_DIR/README.md" "$STAGE_DIR/docs/README.md"
 [ -f "$ROOT_DIR/docs/notice-utilisateur.md" ] && cp "$ROOT_DIR/docs/notice-utilisateur.md" "$STAGE_DIR/docs/notice-utilisateur.md"
+[ -f "$STAGE_DIR/registration/license.txt" ] && cp "$STAGE_DIR/registration/license.txt" "$STAGE_DIR/docs/license.txt"
 
 find "$STAGE_DIR" -name ".DS_Store" -delete
 find "$STAGE_DIR" -name "*.pyc" -delete
@@ -169,6 +193,20 @@ log "Creating package: $OUTPUT_PATH"
 ) >/dev/null
 
 log "OK: Package created: $OUTPUT_PATH"
+
+# Verify DM-required files are present
+_dm_ok=true
+_oxt_files=$(unzip -l "$OUTPUT_PATH" 2>/dev/null)
+for _check in "dm-manifest.json" "dm-config.json" "description.xml" "assets/logo.png" "docs/README.md" "docs/notice-utilisateur.md" "docs/license.txt" "registration/license.txt" "config/calc-functions.json"; do
+  if ! echo "$_oxt_files" | grep -qF "$_check"; then
+    warn "Missing in package: $_check"
+    _dm_ok=false
+  fi
+done
+if [ "$_dm_ok" = true ]; then
+  log "DM packaging: all required files present"
+fi
+[ -n "$OXT_VERSION" ] && log "Version: $OXT_VERSION"
 
 if [ "$INSTALL_AFTER_BUILD" != true ]; then
   exit 0
