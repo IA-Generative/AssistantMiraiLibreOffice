@@ -5,8 +5,7 @@
     "config_path": "/config/mirai-libreoffice/config.json?profile=prod",
     "llm_base_urls": "http://localhost:11434/v1",
     "llm_api_tokens": "",
-    "llm_default_models": "llama3.1:8b",
-    "api_type": "chat",
+    "llm_default_models": "llama3.2:latest",
     "authHeaderName": "Authorization",
     "authHeaderPrefix": "Bearer "
 }
