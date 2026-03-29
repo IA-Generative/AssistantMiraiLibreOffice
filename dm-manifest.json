@@ -26,7 +26,7 @@
   ],
   "changelog": [
     {
-      "version": "0.2.1",
+      "version": "0.0.8.0.0",
       "date": "2026-03-29",
       "changes": [
         "Télémétrie : attribut plugin.action condensé sur chaque trace (extend, edit, summarize...)",
@@ -34,7 +34,14 @@
         "Télémétrie : ajout traces lifecycle (launch, bootstrap, enroll.ok, enroll.fail, update)",
         "Télémétrie : ajout traces Calc manquantes (transform, formula, analyze)",
         "Télémétrie : header X-Client-UUID envoyé pour identification pré-enrollment",
-        "Suppression entrée menu Générer la suite (conserve toolbar + raccourci clavier)"
+        "Fix : filtrage <think> blocks dans le dialogue Édition (deepseek-r1)",
+        "Fix : suggestions IA en appel HTTP synchrone (évite gel UI sur background thread)",
+        "Fix : retry automatique sur 403 après enrollment (sync token LLM)",
+        "Fix : _fetch_config(force=True) bypass le cache TTL",
+        "Fix : _get_extension_version lit description.xml en fallback",
+        "Fix : fetch config post-enrollment immédiat avec relay headers",
+        "Suppression entrée menu et bouton toolbar Générer la suite",
+        "Simplification dev-launch.sh (remove + add, purge log auto)"
       ]
     },
     {
