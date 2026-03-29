@@ -4,7 +4,7 @@
   xmlns:dep="http://openoffice.org/extensions/description/2006"
   xmlns:xlink="http://www.w3.org/1999/xlink">
     <identifier value="fr.gouv.interieur.mirai"/>
-    <version value="0.0.8.0.0"/>
+    <version value="0.0.1.0.1"/>
     <registration>
         <simple-license accept-by="admin" default-license-id="ID0" suppress-on-update="true" >
             <license-text xlink:href="registration/license.txt" lang="en" license-id="ID0" />
