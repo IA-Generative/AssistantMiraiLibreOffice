@@ -1082,23 +1082,104 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 self._report_update_status(campaign_id, "deferred", version_before, "", "")
                 return
 
-            # Install via ExtensionManager
+            # Install via ExtensionManager (UNO) or unopkg fallback
+            installed = False
             try:
-                tmp_url = uno.systemPathToFileUrl(tmp_path)
                 ext_manager = self.ctx.getServiceManager().createInstanceWithContext(
                     "com.sun.star.deployment.ExtensionManager", self.ctx
                 )
-                ext_manager.addExtension(tmp_url, None, "user", None, None)
-                log_to_file(f"_perform_update: extension installed version={target_version}")
-            except Exception as install_err:
-                log_to_file(f"_perform_update: install error: {install_err}")
-                self._report_update_status(campaign_id, "failed", version_before, "", str(install_err))
+                if ext_manager:
+                    tmp_url = uno.systemPathToFileUrl(tmp_path)
+                    ext_manager.addExtension(tmp_url, None, "user", None, None)
+                    installed = True
+                    log_to_file(f"_perform_update: installed via ExtensionManager version={target_version}")
+            except Exception as uno_err:
+                log_to_file(f"_perform_update: ExtensionManager failed ({uno_err}), trying unopkg")
+            if not installed:
+                try:
+                    import subprocess, platform
+                    sys_name = platform.system()  # Darwin, Windows, Linux
+
+                    # Find unopkg
+                    unopkg = None
+                    if sys_name == "Darwin":
+                        for candidate in [
+                            "/Applications/LibreOffice.app/Contents/MacOS/unopkg",
+                            os.path.expanduser("~/Applications/LibreOffice.app/Contents/MacOS/unopkg"),
+                        ]:
+                            if os.path.isfile(candidate):
+                                unopkg = candidate
+                                break
+                    elif sys_name == "Windows":
+                        for candidate in [
+                            os.path.join(os.environ.get("PROGRAMFILES", "C:\\Program Files"), "LibreOffice", "program", "unopkg.com"),
+                            os.path.join(os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)"), "LibreOffice", "program", "unopkg.com"),
+                        ]:
+                            if os.path.isfile(candidate):
+                                unopkg = candidate
+                                break
+                    else:  # Linux
+                        for candidate in ["/usr/bin/unopkg", "/usr/lib/libreoffice/program/unopkg"]:
+                            if os.path.isfile(candidate):
+                                unopkg = candidate
+                                break
+                    if not unopkg:
+                        # Generic fallback: look relative to extension install
+                        fallback = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+                            os.path.dirname(os.path.abspath(__file__))))), "program", "unopkg")
+                        if os.path.isfile(fallback):
+                            unopkg = fallback
+                    if not unopkg:
+                        raise FileNotFoundError("unopkg not found")
+                    log_to_file(f"_perform_update: unopkg={unopkg} platform={sys_name}")
+
+                    # Stage the update: quit LO → remove old → install new → relaunch
+                    tmp_dir = os.path.dirname(tmp_path)
+                    if sys_name == "Windows":
+                        install_script = os.path.join(tmp_dir, "mirai_update.bat")
+                        with open(install_script, "w") as sf:
+                            sf.write("@echo off\r\n")
+                            sf.write("timeout /t 3 /nobreak >nul\r\n")
+                            sf.write(f'"{unopkg}" remove fr.gouv.interieur.mirai 2>nul\r\n')
+                            sf.write(f'echo yes | "{unopkg}" add "{tmp_path}"\r\n')
+                            sf.write(f'start "" "{os.path.dirname(unopkg)}\\soffice.exe"\r\n')
+                            sf.write(f'del "{install_script}"\r\n')
+                        subprocess.Popen(
+                            ["cmd", "/c", install_script],
+                            creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                        )
+                    else:
+                        # macOS / Linux
+                        install_script = os.path.join(tmp_dir, "mirai_update.sh")
+                        if sys_name == "Darwin":
+                            relaunch_cmd = "open -a LibreOffice"
+                        else:
+                            soffice = os.path.join(os.path.dirname(unopkg), "soffice")
+                            relaunch_cmd = f'"{soffice}" &' if os.path.isfile(soffice) else "libreoffice &"
+                        with open(install_script, "w") as sf:
+                            sf.write("#!/bin/bash\n")
+                            sf.write("sleep 3\n")
+                            sf.write(f'"{unopkg}" remove fr.gouv.interieur.mirai 2>/dev/null || true\n')
+                            sf.write(f'printf "yes\\n" | "{unopkg}" add "{tmp_path}"\n')
+                            sf.write(f'{relaunch_cmd}\n')
+                            sf.write(f'rm -f "{install_script}"\n')
+                        os.chmod(install_script, 0o755)
+                        subprocess.Popen(
+                            ["bash", install_script],
+                            start_new_session=True,
+                        )
+                    installed = True
+                    log_to_file(f"_perform_update: install staged, quitting LO for version={target_version}")
+                except Exception as pkg_err:
+                    log_to_file(f"_perform_update: unopkg error: {pkg_err}")
+            if not installed:
+                self._report_update_status(campaign_id, "failed", version_before, "", "install failed")
                 return
 
             # Report success
             self._report_update_status(campaign_id, "installed", version_before, target_version)
 
-            # Notify user
+            # Notify user with restart option
             try:
                 desktop = self.ctx.getServiceManager().createInstanceWithContext(
                     "com.sun.star.frame.Desktop", self.ctx
@@ -1107,17 +1188,30 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 if active_frame:
                     toolkit = self.ctx.getServiceManager().createInstance("com.sun.star.awt.Toolkit")
                     parent = active_frame.getContainerWindow()
-                    msg_text = f"Mirai {target_version} installé. Redémarrez LibreOffice pour finaliser."
+                    msg_text = (
+                        f"MIrAI {target_version} est prêt.\n\n"
+                        "Pour en profiter, LibreOffice doit redémarrer.\n\n"
+                        "Redémarrer maintenant ?"
+                    )
                     if urgency == "critical":
-                        msg_text = f"Mise à jour critique Mirai {target_version} installée. Veuillez redémarrer LibreOffice immédiatement."
+                        msg_text = (
+                            f"Une nouvelle version de MIrAI ({target_version})\n"
+                            "avec des améliorations importantes est prête.\n\n"
+                            "Redémarrer LibreOffice maintenant ?"
+                        )
                     msgbox = toolkit.createMessageBox(
                         parent,
-                        1,  # MessageBoxType.INFOBOX
-                        MSG_BUTTONS.BUTTONS_OK,
-                        "Mirai — Mise à jour",
+                        4,  # MessageBoxType.QUERYBOX
+                        MSG_BUTTONS.BUTTONS_YES_NO,
+                        "MIrAI — Mise à jour",
                         msg_text
                     )
-                    msgbox.execute()
+                    answer = msgbox.execute()
+                    if answer == 2:  # YES
+                        log_to_file("_perform_update: user accepted restart")
+                        desktop.terminate()
+                    else:
+                        log_to_file("_perform_update: user postponed restart")
             except Exception as notify_err:
                 log_to_file(f"_perform_update: notification error (non-fatal): {notify_err}")
 
@@ -1138,6 +1232,32 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+
+    def _restart_libreoffice(self):
+        """Quit LibreOffice and relaunch it."""
+        try:
+            desktop = self.ctx.ServiceManager.createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.ctx)
+            if desktop:
+                # Schedule relaunch before quitting
+                import subprocess
+                soffice = None
+                for candidate in [
+                    "/Applications/LibreOffice.app/Contents/MacOS/soffice",
+                    os.path.expanduser("~/Applications/LibreOffice.app/Contents/MacOS/soffice"),
+                ]:
+                    if os.path.isfile(candidate):
+                        soffice = candidate
+                        break
+                if soffice:
+                    # Detached process that waits 2s then launches LO
+                    subprocess.Popen(
+                        ["bash", "-c", f"sleep 2 && open -a LibreOffice"],
+                        start_new_session=True,
+                    )
+                desktop.terminate()
+        except Exception as e:
+            log_to_file(f"_restart_libreoffice error: {e}")
 
     def _report_update_status(self, campaign_id, status, version_before, version_after, error_detail=""):
         """Report update status back to device-management server."""
@@ -5177,32 +5297,52 @@ EDITED VERSION:
                     except Exception:
                         pass
                 elif source == btn_update:
-                    # Trigger a config refresh which will check for updates
                     if update_status:
                         try:
                             update_status.getModel().Label = "Vérification en cours..."
                             update_status.getModel().TextColor = _UI["primary"]
                         except Exception:
                             pass
-                    try:
-                        about_self._schedule_config_refresh(force=True, reason="manual_update_check")
-                        if update_status:
-                            try:
+                    def _check_update_bg():
+                        try:
+                            config_data = about_self._fetch_config(force=True)
+                            update_dir = None
+                            if isinstance(config_data, dict):
+                                update_dir = config_data.get("update")
+                            if not update_status:
+                                return
+                            if isinstance(update_dir, dict) and update_dir.get("action") in ("update", "rollback"):
+                                target = update_dir.get("target_version", "?")
+                                update_status.getModel().Label = f"Version {target} disponible. Mise à jour lancée..."
+                                update_status.getModel().TextColor = _UI["info"]
+                                # Wait for update to finish (max 60s)
+                                for _ in range(120):
+                                    time.sleep(0.5)
+                                    if not about_self._update_in_progress:
+                                        break
                                 if about_self._update_in_progress:
-                                    update_status.getModel().Label = "Mise à jour en cours de téléchargement..."
+                                    update_status.getModel().Label = f"Téléchargement de la v{target} en cours..."
                                     update_status.getModel().TextColor = _UI["info"]
                                 else:
-                                    update_status.getModel().Label = "Vous utilisez la dernière version."
-                                    update_status.getModel().TextColor = _UI["success"]
-                            except Exception:
-                                pass
-                    except Exception as e:
-                        if update_status:
-                            try:
-                                update_status.getModel().Label = f"Erreur : {str(e)[:50]}"
-                                update_status.getModel().TextColor = _UI["error"]
-                            except Exception:
-                                pass
+                                    new_ver = about_self._get_extension_version() or "?"
+                                    if new_ver == target:
+                                        update_status.getModel().Label = f"v{target} installée. Redémarrez LibreOffice."
+                                        update_status.getModel().TextColor = _UI["success"]
+                                    else:
+                                        update_status.getModel().Label = f"Échec du téléchargement de la v{target}."
+                                        update_status.getModel().TextColor = _UI["error"]
+                            else:
+                                current = about_self._get_extension_version() or "?"
+                                update_status.getModel().Label = f"Version {current} — à jour."
+                                update_status.getModel().TextColor = _UI["success"]
+                        except Exception as e:
+                            if update_status:
+                                try:
+                                    update_status.getModel().Label = f"Erreur : {str(e)[:50]}"
+                                    update_status.getModel().TextColor = _UI["error"]
+                                except Exception:
+                                    pass
+                    threading.Thread(target=_check_update_bg, daemon=True).start()
             def disposing(self, event):
                 return
 
@@ -8502,17 +8642,13 @@ EDITED VERSION:
         # Nothing else needed here — the timer handles the wizard auto-launch.
         return
 
-    @staticmethod
-    def _parse_trigger_args(raw_args):
-        """Extract (action, source) from 'ActionName&src=toolbar' style args."""
-        if "&src=" in raw_args:
-            action, source = raw_args.split("&src=", 1)
-            return action, source
-        return raw_args, "unknown"
-
     def trigger(self, args):
-        action, source = self._parse_trigger_args(args)
-        self._trigger_source = source  # menu | toolbar | key | unknown
+        # Parse &src= suffix if present (menu, toolbar, key)
+        if "&src=" in args:
+            action, source = args.split("&src=", 1)
+        else:
+            action, source = args, "user"
+        self._trigger_source = source
         self._log(f"=== trigger called: action={action} src={source} ===")
         try:
             self._schedule_config_refresh(force=True, reason=f"trigger:{action}")
