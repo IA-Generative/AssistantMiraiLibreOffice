@@ -289,7 +289,8 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
         req = urllib.request.Request(endpoint, data=json_data, method='POST')
         req.add_header('Content-Type', 'application/json')
         req.add_header('User-Agent', get_user_agent())
-        
+        req.add_header('X-Client-UUID', extension_uuid)
+
         # Add authentication header
         if auth_key:
             if auth_type == "Basic":
@@ -421,9 +422,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             self._ensure_extension_uuid()
             self._ensure_plugin_uuid()
             self._warmup_secure_flow_async()
-            send_telemetry_trace_async(self, "ExtensionLoaded", {
+            self._trigger_source = "auto"
+            self._send_telemetry("ExtensionLoaded", {
                 "event.type": "extension_loaded",
-                "extension.context": "libreoffice_writer"
+                "extension.context": "libreoffice_writer",
             })
         except Exception as e:
             log_to_file(f"Failed to send extension load telemetry: {str(e)}")
@@ -445,8 +447,32 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     def _log(self, message):
         log_to_file(message)
 
+    # Condensed action names for telemetry — appears as plugin.action attribute
+    _ACTION_NAMES = {
+        "ExtensionLoaded": "launch",
+        "ExtensionUpdated": "update",
+        "ExtendSelection": "extend",
+        "EditSelection": "edit",
+        "ResizeSelection": "resize",
+        "SummarizeSelection": "summarize",
+        "SimplifySelection": "simplify",
+        "TransformToColumn": "transform",
+        "GenerateFormula": "formula",
+        "AnalyzeRange": "analyze",
+        "OpenmiraiWebsite": "website",
+        "OpenDocumentation": "docs",
+        "OpenSettings": "settings",
+        "AboutDialog": "about",
+        "EnrollSuccess": "enroll.ok",
+        "EnrollFailed": "enroll.fail",
+        "BootstrapConfig": "bootstrap",
+    }
+
     def _send_telemetry(self, span_name, attributes=None):
-        send_telemetry_trace_async(self, span_name, attributes)
+        attrs = dict(attributes or {})
+        attrs.setdefault("plugin.action", self._ACTION_NAMES.get(span_name, span_name))
+        attrs.setdefault("trigger.source", getattr(self, "_trigger_source", "auto"))
+        send_telemetry_trace_async(self, span_name, attrs)
 
     def _get_user_config_dir(self):
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
@@ -534,8 +560,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 flow.ensure_identity()
                 try:
                     flow.fetch_bootstrap_config()
+                    self._send_telemetry("BootstrapConfig", {"status": "ok"})
                 except Exception as exc:
                     log_to_file(f"Secure flow bootstrap fetch failed: {str(exc)}")
+                    self._send_telemetry("BootstrapConfig", {"status": "error", "error": str(exc)[:120]})
             except Exception as exc:
                 log_to_file(f"Secure flow warmup failed: {str(exc)}")
 
@@ -1077,8 +1105,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file(f"_perform_update: notification error (non-fatal): {notify_err}")
 
             # Send telemetry
-            send_telemetry_trace_async(self, "ExtensionUpdated", {
-                "action": action,
+            self._send_telemetry("ExtensionUpdated", {
                 "version_after": target_version,
                 "campaign_id": str(campaign_id) if campaign_id is not None else "",
                 "urgency": urgency,
@@ -2783,7 +2810,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         relay_client_id = str(self._get_config_from_file("relay_client_id", "") or "").strip()
         relay_client_key = str(self._get_config_from_file("relay_client_key", "") or "").strip()
         if not relay_client_id or not relay_client_key:
+            log_to_file(f"[RELAY] no relay creds: id={'yes' if relay_client_id else 'no'} key={'yes' if relay_client_key else 'no'}")
             return {}
+        log_to_file(f"[RELAY] injecting relay headers: id={relay_client_id[:12]}...")
         return {
             "X-Relay-Client": relay_client_id,
             "X-Relay-Key": relay_client_key,
@@ -8383,8 +8412,10 @@ EDITED VERSION:
         access_token = self._ensure_access_token(config_data, interactive=True)
         if access_token:
             log_to_file("First enrollment: auth succeeded")
+            self._send_telemetry("EnrollSuccess", {"status": "ok"})
             return True
         log_to_file("First enrollment: auth flow canceled or failed")
+        self._send_telemetry("EnrollFailed", {"status": "canceled"})
         return False
 
     def execute(self, args):
@@ -8394,17 +8425,27 @@ EDITED VERSION:
         # Nothing else needed here — the timer handles the wizard auto-launch.
         return
 
+    @staticmethod
+    def _parse_trigger_args(raw_args):
+        """Extract (action, source) from 'ActionName&src=toolbar' style args."""
+        if "&src=" in raw_args:
+            action, source = raw_args.split("&src=", 1)
+            return action, source
+        return raw_args, "unknown"
+
     def trigger(self, args):
-        self._log(f"=== trigger called with args: {args} ===")
+        action, source = self._parse_trigger_args(args)
+        self._trigger_source = source  # menu | toolbar | key | unknown
+        self._log(f"=== trigger called: action={action} src={source} ===")
         try:
-            self._schedule_config_refresh(force=True, reason=f"trigger:{args}")
+            self._schedule_config_refresh(force=True, reason=f"trigger:{action}")
         except Exception:
             pass
 
         # First-time enrollment: intercept before any action
         # Informational/navigation actions bypass enrollment check
         _enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings", "AboutDialog"}
-        if args not in _enrollment_bypass and not self._enrollment_dismissed and self._needs_first_enrollment():
+        if action not in _enrollment_bypass and not self._enrollment_dismissed and self._needs_first_enrollment():
             with self._enrollment_wizard_lock:
                 if self._enrollment_wizard_active:
                     log_to_file("[ENROLL] Trigger: wizard already running, skipping")
@@ -8422,10 +8463,10 @@ EDITED VERSION:
         model = desktop.getCurrentComponent()
         self._log(f"Current component type: {type(model)}")
 
-        if handle_writer_action(self, args, model):
+        if handle_writer_action(self, action, model):
             return
 
-        if handle_calc_action(self, args, model):
+        if handle_calc_action(self, action, model):
             return
 
 # Starting from Python IDE

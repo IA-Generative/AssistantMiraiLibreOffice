@@ -45,6 +45,9 @@ done
 [ -x "$SOFFICE" ] || err "LibreOffice not found at $SOFFICE"
 [ -x "$UNOPKG"  ] || err "unopkg not found at $UNOPKG"
 
+# ── 0. Purge log ─────────────────────────────────────────────────────────────
+: > "$HOME/log.txt" 2>/dev/null || true
+
 # ── 1. Quit LibreOffice if running ───────────────────────────────────────────
 if pgrep -x soffice >/dev/null 2>&1; then
   log "Closing LibreOffice..."
@@ -99,10 +102,8 @@ fi
 
 # ── 3. Install extension ──────────────────────────────────────────────────────
 log "Installing extension..."
-"$UNOPKG" add --replace "$OXT_PATH" 2>/dev/null || {
-  "$UNOPKG" remove "fr.gouv.interieur.mirai" 2>/dev/null || true
-  printf "yes\n" | "$UNOPKG" add "$OXT_PATH"
-}
+"$UNOPKG" remove "fr.gouv.interieur.mirai" 2>/dev/null || true
+printf "yes\n" | "$UNOPKG" add "$OXT_PATH"
 ok "Extension installed"
 
 # ── 4. Create test document if needed ────────────────────────────────────────
