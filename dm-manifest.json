@@ -5,7 +5,7 @@
   "intent": "Assister les rédacteurs dans la production de documents professionnels en intégrant l'IA directement dans LibreOffice.",
   "device_type": "libreoffice",
   "category": "productivity",
-  "publisher": "Programme MIrAI — Ministère de l'Intérieur et des Outre-mer",
+  "publisher": "DTNUM",
   "visibility": "public",
   "homepage_url": "https://github.com/IA-Generative/AssistantMiraiLibreOffice",
   "support_email": "fabrique-numerique@interieur.gouv.fr",

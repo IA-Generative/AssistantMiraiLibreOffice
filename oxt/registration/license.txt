@@ -10,7 +10,7 @@ rédiger, reformuler, résumer, générer des formules et ajuster vos
 documents, directement depuis votre traitement de texte ou tableur.
 
 Ce logiciel est développé dans le cadre du programme MIrAI du
-ministère de l'Intérieur et des Outre-mer.
+ministère de l'Intérieur.
 
 
 Origine du projet
@@ -72,5 +72,5 @@ de vos documents.
 Version
 
 MIrAI IA'ssistant LibreOffice — version 0.2.0
-Programme MIrAI — Ministère de l'Intérieur et des Outre-mer
+Programme MIrAI — Ministère de l'Intérieur
 Mars 2026

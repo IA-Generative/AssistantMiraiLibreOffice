@@ -313,9 +313,6 @@
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Générer la suite</value>
           </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/plume.png</value>
-          </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
           </prop>
@@ -329,9 +326,6 @@
           </prop>
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Modifier la sélection</value>
-          </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/send.png</value>
           </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
@@ -347,9 +341,6 @@
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Ajuster la longueur</value>
           </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/mascot16.png</value>
-          </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
           </prop>
@@ -364,9 +355,6 @@
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Résumer</value>
           </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/mascot16.png</value>
-          </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
           </prop>
@@ -380,9 +368,6 @@
           </prop>
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Reformuler</value>
-          </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/mascot16.png</value>
           </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
@@ -400,9 +385,6 @@
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Transformer</value>
           </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/send.png</value>
-          </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
           </prop>
@@ -416,9 +398,6 @@
           </prop>
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Formule IA</value>
-          </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/mascot16.png</value>
           </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
@@ -434,9 +413,6 @@
           <prop oor:name="Title" oor:type="xs:string">
             <value xml:lang="en-US">Analyser</value>
           </prop>
-          <prop oor:name="ImageIdentifier" oor:type="xs:string">
-            <value>%origin%/icons/plume.png</value>
-          </prop>
           <prop oor:name="Target" oor:type="xs:string">
             <value>_self</value>
           </prop>
@@ -445,6 +421,117 @@
           </prop>
         </node>
 
+      </node>
+    </node>
+
+    <!-- ══════════════════════════════════════════════════════════════
+         Images — icônes pour les boutons de la toolbar
+         Matched by URL (must be identical to toolbar URL)
+         ══════════════════════════════════════════════════════════════ -->
+    <node oor:name="Images">
+      <node oor:name="fr.gouv.interieur.mirai.img.extend" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?ExtendSelection</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-extend_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-extend_26.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="fr.gouv.interieur.mirai.img.edit" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?EditSelection</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-edit_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-edit_26.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="fr.gouv.interieur.mirai.img.resize" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?ResizeSelection</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-resize_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-resize_26.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="fr.gouv.interieur.mirai.img.summarize" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?SummarizeSelection</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-summarize_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-summarize_26.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="fr.gouv.interieur.mirai.img.simplify" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?SimplifySelection</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-simplify_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-simplify_26.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="fr.gouv.interieur.mirai.img.transform" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?TransformToColumn</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-transform_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-transform_26.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="fr.gouv.interieur.mirai.img.formula" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?GenerateFormula</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-formula_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-formula_26.png</value>
+          </prop>
+        </node>
+      </node>
+      <node oor:name="fr.gouv.interieur.mirai.img.analyze" oor:op="replace">
+        <prop oor:name="URL" oor:type="xs:string">
+          <value>service:fr.gouv.interieur.mirai.do?AnalyzeRange</value>
+        </prop>
+        <node oor:name="UserDefinedImages">
+          <prop oor:name="ImageSmallURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-analyze_16.png</value>
+          </prop>
+          <prop oor:name="ImageBigURL" oor:type="xs:string">
+            <value>%origin%/icons/toolbar-analyze_26.png</value>
+          </prop>
+        </node>
       </node>
     </node>
 
