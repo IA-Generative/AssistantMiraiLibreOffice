@@ -1181,12 +1181,31 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         self._pending_install_script = install_script
                     else:
                         # macOS / Linux
+                        # Capture current document path to reopen after update
+                        _doc_path = ""
+                        try:
+                            _desktop = self.ctx.getServiceManager().createInstanceWithContext(
+                                "com.sun.star.frame.Desktop", self.ctx
+                            )
+                            _doc = _desktop.getCurrentComponent() if _desktop else None
+                            if _doc and hasattr(_doc, "getURL") and _doc.getURL():
+                                from urllib.parse import unquote, urlparse
+                                _parsed = urlparse(_doc.getURL())
+                                if _parsed.scheme == "file":
+                                    _doc_path = unquote(_parsed.path)
+                        except Exception:
+                            pass
+                        soffice_bin = os.path.join(os.path.dirname(unopkg), "soffice")
                         if sys_name == "Darwin":
-                            relaunch_cmd = "open -a LibreOffice"
-                            wait_cmd = "while pgrep -x soffice >/dev/null 2>&1; do sleep 1; done"
+                            if _doc_path:
+                                relaunch_cmd = f'"{soffice_bin}" "{_doc_path}" &'
+                            else:
+                                relaunch_cmd = f'"{soffice_bin}" --writer &'
+                            wait_cmd = "while pgrep -x soffice >/dev/null 2>&1 || pgrep -x oosplash >/dev/null 2>&1; do sleep 1; done"
                         else:
-                            soffice = os.path.join(os.path.dirname(unopkg), "soffice")
-                            relaunch_cmd = f'"{soffice}" &' if os.path.isfile(soffice) else "libreoffice &"
+                            relaunch_cmd = f'"{soffice_bin}" &' if os.path.isfile(soffice_bin) else "libreoffice &"
+                            if _doc_path:
+                                relaunch_cmd = f'"{soffice_bin}" "{_doc_path}" &' if os.path.isfile(soffice_bin) else f'libreoffice "{_doc_path}" &'
                             wait_cmd = "while pgrep -x soffice >/dev/null 2>&1; do sleep 1; done"
                         install_script = os.path.join(stable_dir, "mirai_update.sh")
                         with open(install_script, "w") as sf:
@@ -1195,7 +1214,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             sf.write(f'echo "$({_ts}) - [UPDATE] script started" >> "$LOG"\n')
                             sf.write(f'{wait_cmd}\n')
                             sf.write(f'echo "$({_ts}) - [UPDATE] LO quit detected" >> "$LOG"\n')
-                            sf.write("sleep 2\n")
+                            sf.write("sleep 5\n")
                             sf.write(f'"{unopkg}" remove fr.gouv.interieur.mirai 2>/dev/null || true\n')
                             sf.write(f'echo "$({_ts}) - [UPDATE] old extension removed" >> "$LOG"\n')
                             sf.write(f'"{unopkg}" add --force --suppress-license "{stable_oxt}"\n')
@@ -1205,6 +1224,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             sf.write(f'else\n')
                             sf.write(f'  echo "$({_ts}) - [UPDATE] unopkg add FAILED rc=$RC" >> "$LOG"\n')
                             sf.write(f'fi\n')
+                            sf.write("sync\n")
+                            sf.write("sleep 3\n")
                             sf.write(f'echo "$({_ts}) - [UPDATE] launching LibreOffice" >> "$LOG"\n')
                             sf.write(f'{relaunch_cmd}\n')
                             sf.write(f'rm -f "{stable_oxt}" "{install_script}"\n')
