@@ -349,6 +349,13 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
 # The MainJob is a UNO component derived from unohelper.Base class
 # and also the XJobExecutor, the implemented interface
 class MainJob(unohelper.Base, XJobExecutor, XJob):
+    # Class-level flags shared across all instances to prevent duplicate wizards/updates
+    _enrollment_dismissed_cls = False
+    _enrollment_wizard_active_cls = False
+    _enrollment_wizard_lock_cls = threading.Lock()
+    _update_in_progress_cls = False
+    _update_lock_cls = threading.Lock()
+
     def __init__(self, ctx):
         log_to_file("=== MainJob.__init__ called ===")
         self.ctx = ctx
@@ -377,17 +384,15 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._secure_flow = None
         self._secure_flow_lock = threading.RLock()
         self._secure_flow_init_error = None
-        self._enrollment_dismissed = False
-        self._enrollment_wizard_active = False
-        self._enrollment_wizard_lock = threading.Lock()
+        # enrollment flags are class-level (shared across instances)
         self._secure_legacy_fallback_logged = False
         self._last_loaded_ca_bundle = None
         self._last_ca_bundle_error = None
         self._last_logged_ca_bundle_error = None
         # Update & feature toggling (schema_version 2)
         self._features_cache = {}
-        self._update_in_progress = False
-        self._update_lock = threading.Lock()
+        # Use class-level flags (shared across instances)
+        # update flags are class-level (shared across instances)
         # handling different situations (inside LibreOffice or other process)
         try:
             self.sm = ctx.getServiceManager()
@@ -1004,11 +1009,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         """Start a background daemon thread to perform the plugin update if not already running."""
         urgency = directive.get("urgency", "normal")
 
-        with self._update_lock:
-            if self._update_in_progress:
+        with MainJob._update_lock_cls:
+            if MainJob._update_in_progress_cls:
                 log_to_file("Update already in progress, skipping duplicate schedule")
                 return
-            self._update_in_progress = True
+            MainJob._update_in_progress_cls = True
 
         if urgency == "deferred":
             log_to_file(f"Deferred update scheduled: target={directive.get('target_version')} — download only, install on next restart")
@@ -1020,8 +1025,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             try:
                 self._perform_update(directive)
             finally:
-                with self._update_lock:
-                    self._update_in_progress = False
+                with MainJob._update_lock_cls:
+                    MainJob._update_in_progress_cls = False
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
@@ -1246,8 +1251,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             _wait_start = time.time()
             _max_wait = 120  # max 2 min
             while time.time() - _wait_start < _max_wait:
-                with self._enrollment_wizard_lock:
-                    if not self._enrollment_wizard_active:
+                with MainJob._enrollment_wizard_lock_cls:
+                    if not MainJob._enrollment_wizard_active_cls:
                         break
                 time.sleep(1)
             # Extra grace period so the user isn't interrupted immediately
@@ -1307,7 +1312,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                                 subprocess.Popen(["cmd", "/c", install_script])
                         else:
                             subprocess.Popen(["bash", install_script], start_new_session=True)
-                        desktop.terminate()
+                        # terminate() must run on the main thread to avoid
+                        # macOS autolayout crashes — schedule it via UNO timer
+                        self._terminate_on_main_thread()
                     else:
                         log_to_file("_perform_update: install script not found, skipping")
                 except Exception as launch_err:
@@ -1355,9 +1362,44 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         ["bash", "-c", f"sleep 2 && open -a LibreOffice"],
                         start_new_session=True,
                     )
-                desktop.terminate()
+                self._terminate_on_main_thread()
         except Exception as e:
             log_to_file(f"_restart_libreoffice error: {e}")
+
+    def _terminate_on_main_thread(self):
+        """Quit LibreOffice without calling desktop.terminate() from a background thread.
+
+        desktop.terminate() from a non-main thread corrupts the macOS
+        autolayout engine (NSISEngine assertion).  Instead, we send SIGTERM
+        to the soffice process — macOS delivers the signal on the main thread,
+        which triggers a clean shutdown identical to Cmd+Q.
+        On Windows we fall back to desktop.terminate() (no autolayout issue).
+        """
+        import platform as _pf
+        if _pf.system() in ("Darwin", "Linux"):
+            try:
+                import signal
+                os.kill(os.getpid(), signal.SIGTERM)
+                log_to_file("_terminate_on_main_thread: SIGTERM sent to self")
+            except Exception as e:
+                log_to_file(f"_terminate_on_main_thread: SIGTERM failed ({e}), falling back to terminate()")
+                try:
+                    desktop = self.ctx.getServiceManager().createInstanceWithContext(
+                        "com.sun.star.frame.Desktop", self.ctx)
+                    if desktop:
+                        desktop.terminate()
+                except Exception:
+                    pass
+        else:
+            # Windows: no autolayout issue, direct terminate is fine
+            try:
+                desktop = self.ctx.getServiceManager().createInstanceWithContext(
+                    "com.sun.star.frame.Desktop", self.ctx)
+                if desktop:
+                    desktop.terminate()
+                log_to_file("_terminate_on_main_thread: terminate() called (Windows)")
+            except Exception as e:
+                log_to_file(f"_terminate_on_main_thread: terminate error: {e}")
 
     def _report_update_status(self, campaign_id, status, version_before, version_after, error_detail=""):
         """Report update status back to device-management server."""
@@ -3270,25 +3312,25 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         """Deferred enrollment check — fires ~3s after init to let UI start."""
         def _deferred_enrollment():
             try:
-                if self._enrollment_dismissed:
+                if MainJob._enrollment_dismissed_cls:
                     return
                 if not self._needs_first_enrollment():
                     log_to_file("[ENROLL] Auto-check: already enrolled, skipping wizard")
                     return
-                with self._enrollment_wizard_lock:
-                    if self._enrollment_wizard_active:
+                with MainJob._enrollment_wizard_lock_cls:
+                    if MainJob._enrollment_wizard_active_cls:
                         log_to_file("[ENROLL] Auto-check: wizard already running, skipping")
                         return
-                    self._enrollment_wizard_active = True
+                    MainJob._enrollment_wizard_active_cls = True
                 try:
                     log_to_file("[ENROLL] Auto-check: first enrollment needed, launching wizard")
                     if not self._run_first_enrollment():
-                        self._enrollment_dismissed = True
+                        MainJob._enrollment_dismissed_cls = True
                         log_to_file("[ENROLL] Auto-check: wizard cancelled by user")
                     else:
                         log_to_file("[ENROLL] Auto-check: enrollment succeeded")
                 finally:
-                    self._enrollment_wizard_active = False
+                    MainJob._enrollment_wizard_active_cls = False
             except Exception as e:
                 log_to_file(f"[ENROLL] Auto-check failed: {str(e)}")
 
@@ -5418,9 +5460,9 @@ EDITED VERSION:
                                 # Wait for update to finish (max 60s)
                                 for _ in range(120):
                                     time.sleep(0.5)
-                                    if not about_self._update_in_progress:
+                                    if not MainJob._update_in_progress_cls:
                                         break
-                                if about_self._update_in_progress:
+                                if MainJob._update_in_progress_cls:
                                     update_status.getModel().Label = f"Téléchargement de la v{target} en cours..."
                                     update_status.getModel().TextColor = _UI["info"]
                                 else:
@@ -8755,21 +8797,33 @@ EDITED VERSION:
         except Exception:
             pass
 
+        # Wait for any in-progress config fetch to finish (e.g. from __init__)
+        # so the trigger has access to config/token for LLM calls
+        if self._fetching_config and not self.config_cache:
+            log_to_file(f"trigger: waiting for config fetch to complete before {action}")
+            _t0 = time.time()
+            while self._fetching_config and time.time() - _t0 < 15:
+                time.sleep(0.3)
+            if self.config_cache:
+                log_to_file("trigger: config now available")
+            else:
+                log_to_file("trigger: config still unavailable after wait")
+
         # First-time enrollment: intercept before any action
         # Informational/navigation actions bypass enrollment check
         _enrollment_bypass = {"Documentation", "OpenmiraiWebsite", "settings", "proxy_settings", "AboutDialog"}
-        if action not in _enrollment_bypass and not self._enrollment_dismissed and self._needs_first_enrollment():
-            with self._enrollment_wizard_lock:
-                if self._enrollment_wizard_active:
+        if action not in _enrollment_bypass and not MainJob._enrollment_dismissed_cls and self._needs_first_enrollment():
+            with MainJob._enrollment_wizard_lock_cls:
+                if MainJob._enrollment_wizard_active_cls:
                     log_to_file("[ENROLL] Trigger: wizard already running, skipping")
                     return
-                self._enrollment_wizard_active = True
+                MainJob._enrollment_wizard_active_cls = True
             try:
                 if not self._run_first_enrollment():
-                    self._enrollment_dismissed = True
+                    MainJob._enrollment_dismissed_cls = True
                     return
             finally:
-                self._enrollment_wizard_active = False
+                MainJob._enrollment_wizard_active_cls = False
 
         desktop = self.ctx.ServiceManager.createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.ctx)
