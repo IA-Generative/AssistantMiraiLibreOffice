@@ -1242,6 +1242,18 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             # Report success
             self._report_update_status(campaign_id, "installed", version_before, target_version)
 
+            # Wait for enrollment wizard to finish and let user settle in
+            _wait_start = time.time()
+            _max_wait = 120  # max 2 min
+            while time.time() - _wait_start < _max_wait:
+                with self._enrollment_wizard_lock:
+                    if not self._enrollment_wizard_active:
+                        break
+                time.sleep(1)
+            # Extra grace period so the user isn't interrupted immediately
+            time.sleep(30)
+            log_to_file("_perform_update: showing update dialog to user")
+
             # Ask user BEFORE launching the install script
             user_wants_restart = False
             try:
@@ -1255,13 +1267,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     msg_text = (
                         f"MIrAI {target_version} est prêt.\n\n"
                         "Pour en profiter, LibreOffice doit redémarrer.\n\n"
-                        "Redémarrer maintenant ?"
+                        "Redémarrer maintenant ?\n\n"
+                        "(Si vous choisissez Non, la mise à jour sera\n"
+                        "reproposée plus tard. Vous pouvez aussi la\n"
+                        "lancer depuis le menu MIrAI → À propos…)"
                     )
                     if urgency == "critical":
                         msg_text = (
                             f"Une nouvelle version de MIrAI ({target_version})\n"
                             "avec des améliorations importantes est prête.\n\n"
-                            "Redémarrer LibreOffice maintenant ?"
+                            "Redémarrer LibreOffice maintenant ?\n\n"
+                            "(Si vous choisissez Non, la mise à jour sera\n"
+                            "reproposée plus tard. Vous pouvez aussi la\n"
+                            "lancer depuis le menu MIrAI → À propos…)"
                         )
                     msgbox = toolkit.createMessageBox(
                         parent,
