@@ -2247,11 +2247,28 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 f"redirect_uri={data.get('redirect_uri','')}"
             )
             encoded = urllib.parse.urlencode(data).encode("utf-8")
-            request = urllib.request.Request(
-                token_endpoint,
-                data=encoded,
-                headers=_with_user_agent({"Content-Type": "application/x-www-form-urlencoded"})
-            )
+
+            # WAF-safe mode: if token_endpoint is the /auth/token proxy,
+            # wrap the form payload in a JSON envelope with base64 encoding.
+            # This avoids the WAF blocking POST to URLs containing
+            # /openid-connect/token.
+            if token_endpoint.rstrip("/").endswith("/auth/token"):
+                envelope = json.dumps({
+                    "p": base64.b64encode(encoded).decode("ascii")
+                }).encode("utf-8")
+                request = urllib.request.Request(
+                    token_endpoint,
+                    data=envelope,
+                    headers=_with_user_agent({"Content-Type": "application/json"})
+                )
+                log_to_file("Using WAF-safe /auth/token envelope")
+            else:
+                request = urllib.request.Request(
+                    token_endpoint,
+                    data=encoded,
+                    headers=_with_user_agent({"Content-Type": "application/x-www-form-urlencoded"})
+                )
+
             with self._urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
                 payload = response.read().decode("utf-8")
             return json.loads(payload)
