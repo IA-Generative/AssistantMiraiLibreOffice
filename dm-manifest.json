@@ -26,6 +26,16 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.6",
+      "date": "2026-04-13",
+      "changes": [
+        "Fix : enrollment PKCE — correction JWT clock-skew (leeway 600s) pour DGX",
+        "Fix : upload version admin WAF-safe (chunked upload + JSON submit)",
+        "Fix : suppression plugin avec campagnes associées (FK cascade)",
+        "Fix : form.action collision avec input name='action' dans l'admin"
+      ]
+    },
+    {
       "version": "0.0.1.0.4",
       "date": "2026-03-29",
       "changes": [
