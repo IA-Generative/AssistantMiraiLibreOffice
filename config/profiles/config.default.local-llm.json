@@ -1,8 +1,9 @@
 {
+    "_note": "Tier LOCAL offline : aucun DM (enabled:false). Le LLM est local (Ollama) ; comme il n'y a pas de DM pour servir la config, le LLM est exceptionnellement baké ici.",
     "configVersion": 1,
     "enabled": false,
-    "bootstrap_url": "",
-    "config_path": "/config/mirai-libreoffice/config.json?profile=prod",
+    "bootstrap_urls": [],
+    "config_path": "/config/mirai-libreoffice/config.json?profile=dev",
     "llm_base_urls": "http://localhost:11434/v1",
     "llm_api_tokens": "",
     "llm_default_models": "llama3.2:latest",

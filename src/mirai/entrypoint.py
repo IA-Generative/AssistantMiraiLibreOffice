@@ -364,6 +364,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self.config_ttl = 300
         self._config_last_failure_at = 0
         self._config_failure_backoff = 30
+        # Bootstrap DM base URL that last answered (failover winner across bootstrap_urls)
+        self._resolved_bootstrap_url = ""
         self._models_cache = None
         self._models_cache_key = None
         self._models_cache_loaded_at = 0
@@ -529,7 +531,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 return self._secure_flow
             if self._secure_flow_init_error:
                 return None
-            bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            bootstrap_url = str(self._active_bootstrap_url() or "").strip()
             if not bootstrap_url:
                 return None
             plugin_uuid = self._ensure_plugin_uuid()
@@ -578,7 +580,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     def _secure_send_telemetry_payload(self, payload, _span_name=None):
         flow = self._get_secure_flow()
         if not flow:
-            bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            bootstrap_url = str(self._active_bootstrap_url() or "").strip()
             if bootstrap_url:
                 if not self._secure_legacy_fallback_logged:
                     self._secure_legacy_fallback_logged = True
@@ -803,6 +805,36 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         threading.Thread(target=_worker, daemon=True).start()
         return True
 
+    def _bootstrap_urls(self):
+        """Ordered list of DM bootstrap base URLs (failover).
+
+        Reads the `bootstrap_urls` list when present; otherwise falls back to the
+        legacy single `bootstrap_url` string. Empty entries are dropped.
+        """
+        result = []
+        urls = self._get_config_from_file("bootstrap_urls", None)
+        if isinstance(urls, (list, tuple)):
+            for item in urls:
+                value = str(item or "").strip()
+                if value and value not in result:
+                    result.append(value)
+        if not result:
+            legacy = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            if legacy:
+                result.append(legacy)
+        return result
+
+    def _active_bootstrap_url(self):
+        """The DM base URL that last answered (failover winner), else the first
+        configured one. Telemetry / enroll / update must target the same DM that
+        served the config, so they read this rather than the raw key.
+        """
+        resolved = str(getattr(self, "_resolved_bootstrap_url", "") or "").strip()
+        if resolved:
+            return resolved
+        urls = self._bootstrap_urls()
+        return urls[0] if urls else ""
+
     def _fetch_config(self, force=False):
         if not force and not self._device_management_enabled():
             log_to_file("DM config fetch skipped: device management disabled")
@@ -824,13 +856,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("DM config fetch skipped: backoff active after recent failure")
             return None
 
-        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
-        if not base_url:
-            log_to_file("DM config fetch skipped: bootstrap_url is empty")
+        base_urls = self._bootstrap_urls()
+        if not base_urls:
+            log_to_file("DM config fetch skipped: no bootstrap_url(s) configured")
             return None
         config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
-        url = base_url.rstrip("/") + "/" + config_path.lstrip("/")
-        log_to_file(f"DM bootstrap URL: {url}")
+        log_to_file(f"DM bootstrap URLs (failover order): {base_urls}")
 
         self._fetching_config = True
         try:
@@ -842,7 +873,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file("DM config fetch: proxy disabled, skipping proxy retry")
 
             last_error = "unknown"
-            for mode, use_proxy in attempts:
+            combos = [
+                (base, mode, use_proxy)
+                for base in base_urls
+                for (mode, use_proxy) in attempts
+            ]
+            for base_url, mode, use_proxy in combos:
+                url = base_url.rstrip("/") + "/" + config_path.lstrip("/")
                 try:
                     log_to_file(f"DM config fetch attempt: mode={mode} url={url}")
                     headers = {"Accept": "application/json"}
@@ -885,6 +922,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         self.config_cache = config_data
                         self.config_loaded_at = now
                         self._config_last_failure_at = 0
+                        self._resolved_bootstrap_url = base_url
                         self._persist_bootstrap_config(config_data)
                         return config_data
                     last_error = f"Invalid JSON root type: {type(config_data).__name__}"
@@ -1042,7 +1080,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         campaign_id = directive.get("campaign_id")
         version_before = self._get_extension_version()
 
-        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip().rstrip("/")
+        base_url = str(self._active_bootstrap_url() or "").strip().rstrip("/")
         if not base_url or not artifact_url:
             log_to_file("_perform_update: missing base_url or artifact_url")
             return
@@ -1403,7 +1441,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
     def _report_update_status(self, campaign_id, status, version_before, version_after, error_detail=""):
         """Report update status back to device-management server."""
-        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip().rstrip("/")
+        base_url = str(self._active_bootstrap_url() or "").strip().rstrip("/")
         if not base_url:
             return
         endpoint = base_url + "/update/status"
@@ -2231,8 +2269,23 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         if auth_endpoint and token_endpoint:
             return auth_endpoint, token_endpoint
 
-        base_url = self._get_config_from_file("keycloakIssuerUrl", "") or self._get_config_from_file("keycloak_base_url", "")
-        realm = self._get_config_from_file("keycloakRealm", "") or self._get_config_from_file("keycloak_realm", "")
+        # F1 — Le SSO servi par le DM (config_data) est autoritatif : on dérive
+        # issuer/realm du bloc keycloak du DM en priorité, et seulement à défaut du
+        # fichier local (qui peut contenir un placeholder baké).
+        base_url = (
+            self._keycloak_endpoint(
+                keycloak,
+                "issuerUrl", "issuerURL", "keycloakIssuerUrl", "issuer_url",
+                "issuer", "keycloak_base_url", "baseUrl", "base_url", "url",
+            )
+            or self._get_config_from_file("keycloakIssuerUrl", "")
+            or self._get_config_from_file("keycloak_base_url", "")
+        )
+        realm = (
+            self._keycloak_endpoint(keycloak, "realm", "keycloakRealm", "keycloak_realm")
+            or self._get_config_from_file("keycloakRealm", "")
+            or self._get_config_from_file("keycloak_realm", "")
+        )
         realm_base = self._normalize_keycloak_realm_base(base_url, realm)
         if realm_base:
             auth_endpoint = f"{realm_base}/protocol/openid-connect/auth"
@@ -2950,7 +3003,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("Device management token email verification failed")
             return
 
-        bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip().rstrip("/")
+        bootstrap_url = str(self._active_bootstrap_url() or "").strip().rstrip("/")
         settings = self._select_settings(config_data) if isinstance(config_data, dict) else {}
 
         enroll_endpoint = ""
@@ -3723,7 +3776,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         except Exception:
             pass
         config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
-        bootstrap_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
+        bootstrap_url = str(self._active_bootstrap_url() or "").strip()
         normalized_url = f"{bootstrap_url.rstrip('/')}/{config_path.lstrip('/')}"
         log_to_file(f"Reload config URL computed: {normalized_url}")
         log_to_file(f"Reload config: url={normalized_url} keys={list(settings.keys())}")
@@ -3925,15 +3978,20 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             text = str(value).strip()
             if not text:
                 continue
+            # F1 — Le DM est autoritatif sur le SSO : on écrase systématiquement la
+            # valeur locale (potentiellement un placeholder baké) avec celle servie par
+            # le DM, sinon un placeholder non vide gagnerait à jamais (bug `mysso`).
             try:
                 current = str(self._get_config_from_file(target_key, "") or "").strip()
             except Exception:
                 current = ""
-            if not current:
-                try:
-                    self.set_config(target_key, text)
-                except Exception:
-                    pass
+            if text == current:
+                continue
+            try:
+                self.set_config(target_key, text)
+                log_to_file(f"[keycloak-sync] {target_key} updated from DM")
+            except Exception:
+                pass
 
     def _sync_keycloak_from_config(self, config_data):
         settings = None
@@ -7822,7 +7880,7 @@ EDITED VERSION:
                 f"telemetryEndpoint={self._get_config_from_file('telemetryEndpoint','')} "
                 f"telemetryAuthorizationType={self._get_config_from_file('telemetryAuthorizationType','')} "
                 f"telemetryKey={_mask_value(self._get_config_from_file('telemetryKey',''))} "
-                f"bootstrap_url={self._get_config_from_file('bootstrap_url','')} "
+                f"bootstrap_url={self._active_bootstrap_url()} "
                 f"config_path={self._get_config_from_file('config_path','')} "
                 f"enabled={self._get_config_from_file('enabled', False)} "
                 f"llm_default_models={self._get_config_from_file('llm_default_models','')}"
