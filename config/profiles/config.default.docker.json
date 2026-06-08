@@ -1,6 +1,9 @@
 {
+    "_note": "Alias DEV : DM en docker local (port host 8089 ; 3001 = port container). Transport seul.",
     "configVersion": 1,
     "enabled": true,
-    "bootstrap_url": "http://localhost:3001",
+    "bootstrap_urls": [
+        "http://localhost:8089"
+    ],
     "config_path": "/config/mirai-libreoffice/config.json?profile=dev"
 }

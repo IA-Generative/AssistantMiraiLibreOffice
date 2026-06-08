@@ -105,6 +105,12 @@ while [ "$#" -gt 0 ]; do
     --output)
       OUTPUT_PATH="${2:-}"
       [ -n "$OUTPUT_PATH" ] || { err "Missing value for --output"; exit 1; }
+      # Normalize to absolute: the zip step runs after `cd "$STAGE_DIR"`, so a
+      # relative path would land in the temp dir and be lost on cleanup.
+      case "$OUTPUT_PATH" in
+        /*) : ;;
+        *)  OUTPUT_PATH="$PWD/$OUTPUT_PATH" ;;
+      esac
       shift 2
       ;;
     -h|--help)
@@ -140,6 +146,23 @@ cp -R "$ROOT_DIR/oxt/." "$STAGE_DIR/"
 cp "$ROOT_DIR/main.py" "$STAGE_DIR/main.py"
 cp -R "$ROOT_DIR/src" "$STAGE_DIR/src"
 cp "$CONFIG_IN_USE" "$STAGE_DIR/config.default.json"
+# ── Anti-fuite : la config embarquée d'un profil ONLINE doit être transport-only ──
+# (bootstrap_urls/config_path/enabled). Aucun SSO/keycloak/LLM baké : ils sont servis
+# par le DM au runtime. Un profil offline (enabled:false) est exempté (pas de DM).
+python3 - "$STAGE_DIR/config.default.json" <<'PY' || { err "Embedded config.default.json leaks non-transport keys (see above)"; exit 1; }
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+allowed = {"configVersion", "enabled", "bootstrap_urls", "bootstrap_url", "config_path", "_note", "_description"}
+if cfg.get("enabled") is False:
+    sys.exit(0)  # offline tier: baking local config is legitimate
+leaked = sorted(k for k in cfg if k not in allowed)
+if leaked:
+    sys.stderr.write("LEAK: clés non-transport bakées dans config.default.json: %s\n" % ", ".join(leaked))
+    sys.exit(1)
+print("✓ embedded config.default.json: transport-only (no SSO/keycloak/LLM leak)")
+PY
 # Calc functions reference for formula generation
 mkdir -p "$STAGE_DIR/config"
 if [ -f "$ROOT_DIR/config/calc-functions.json" ]; then
