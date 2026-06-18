@@ -12,6 +12,8 @@ try:
     from com.sun.star.awt import XActionListener, XItemListener, XMouseListener, XWindowListener, XTopWindowListener
     from com.sun.star.beans import PropertyValue
     from com.sun.star.container import XNamed
+    from com.sun.star.ui import XContextMenuInterceptor
+    from com.sun.star.ui.ContextMenuInterceptorAction import IGNORED, CONTINUE_MODIFIED
 except ImportError:
     # Running outside LibreOffice (e.g. unopkg install) — provide safe stubs
     class _S1: pass
@@ -348,6 +350,42 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
 
 # The MainJob is a UNO component derived from unohelper.Base class
 # and also the XJobExecutor, the implemented interface
+class MiraiContextMenuInterceptor(unohelper.Base, XContextMenuInterceptor):
+    WRITER_ACTIONS = [
+        ("🖊️ Modifier la sélection",  "EditSelection"),
+        ("📏 Ajuster la longueur",     "ResizeSelection"),
+        ("📝 Résumer la sélection",    "SummarizeSelection"),
+        ("💬 Reformuler la sélection", "SimplifySelection"),
+    ]
+    def __init__(self, job):
+        self._job = job
+    def notifyContextMenuExecute(self, event):
+        try:
+            ctx = uno.getComponentContext()
+            sm = ctx.getServiceManager()
+            menu_container = event.ActionTriggerContainer
+            if menu_container is None:
+                return IGNORED
+            submenu = sm.createInstanceWithContext("com.sun.star.ui.ActionTriggerContainer", ctx)
+            for label, url in self.WRITER_ACTIONS:
+                item = sm.createInstanceWithContext("com.sun.star.ui.ActionTrigger", ctx)
+                item.Text = label
+                item.CommandURL = f"service:fr.gouv.interieur.mirai.do?{url}&src=contextmenu"
+                submenu.insertByIndex(submenu.getCount(), item)
+            parent = sm.createInstanceWithContext("com.sun.star.ui.ActionTrigger", ctx)
+            parent.Text = "🤖 MIrAI"
+            parent.SubContainer = submenu
+            sep = sm.createInstanceWithContext("com.sun.star.ui.ActionTriggerSeparator", ctx)
+            sep.SeparatorType = 0
+            count = menu_container.getCount()
+            menu_container.insertByIndex(count, sep)
+            menu_container.insertByIndex(count + 1, parent)
+            return CONTINUE_MODIFIED
+        except Exception as e:
+            log_to_file(f"ContextMenuInterceptor error: {e}")
+            return IGNORED
+    def disposing(self, event):
+        pass
 class MainJob(unohelper.Base, XJobExecutor, XJob):
     # Class-level flags shared across all instances to prevent duplicate wizards/updates
     _enrollment_dismissed_cls = False
@@ -444,10 +482,35 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         # bootstrap or the Settings dialog, no startup prompt needed.
 
         # Auto-launch enrollment wizard on first use (deferred to let UI init)
+                # Auto-launch enrollment wizard on first use (deferred to let UI init)
         try:
             self._schedule_enrollment_check()
         except Exception as e:
             log_to_file(f"Failed to schedule enrollment check: {str(e)}")
+        try:
+            self._context_menu_interceptor = MiraiContextMenuInterceptor(self)
+            
+            # Essayer d'obtenir le frame du document actif via le modèle (XSCRIPTCONTEXT)
+            # ou via le Desktop
+            desktop = self.ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", self.ctx)
+            frame = desktop.getCurrentFrame()
+            
+            # Si le frame n'est pas trouvé, on peut tenter de le chercher via le contrôleur
+            if not frame and hasattr(self, 'document') and self.document:
+                frame = self.document.getCurrentController().getFrame()
+
+            if frame:
+                frame.registerContextMenuInterceptor(self._context_menu_interceptor)
+                log_to_file("ContextMenuInterceptor enregistré avec succès sur le frame.")
+            else:
+                log_to_file("Impossible d'enregistrer l'intercepteur : aucun frame actif trouvé.")
+                
+        except Exception as e:
+            log_to_file(f"Erreur fatale lors de l'enregistrement du menu: {str(e)}")
+
+        except Exception as e:
+            log_to_file(
+                f"ContextMenuInterceptor registration failed: {str(e)}")
     
     def _log(self, message):
         log_to_file(message)

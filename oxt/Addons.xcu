@@ -3,7 +3,7 @@
     <node oor:name="OfficeMenuBar">
       <node oor:name="fr.gouv.interieur.mirai.menubar" oor:op="replace">
         <prop oor:name="Title" oor:type="xs:string">
-          <value xml:lang="en-US">🤖 MIrAI 🤖</value>
+          <value xml:lang="en-US">MIrAI</value>
         </prop>
         <prop oor:name="Context" oor:type="xs:string">
           <value>com.sun.star.sheet.SpreadsheetDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.TextDocument,com.sun.star.text.WebDocument</value>
@@ -19,7 +19,7 @@
           <!-- ── Commun (M0-M1) ────────────────────────────────────────── -->
           <node oor:name="M0" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">🤖 MIrAI IA'ssistant</value>
+              <value xml:lang="en-US">🫐 MIrAI IA'ssistant</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?MenuSeparator&amp;src=menu</value>
@@ -37,7 +37,7 @@
           <!-- ── Bloc Writer (MA*) — masqué en Calc ───────────────────── -->
           <node oor:name="MA2" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">🖊️ Modifier la sélection (⌘E)</value>
+              <value xml:lang="en-US">🖊️ Modifier la sélection (ctrl+E)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?EditSelection&amp;src=menu</value>
@@ -51,7 +51,7 @@
           </node>
           <node oor:name="MA3" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">📏 Ajuster la longueur (⌘J)</value>
+              <value xml:lang="en-US">📏 Ajuster la longueur (ctrl+J)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?ResizeSelection&amp;src=menu</value>
@@ -65,7 +65,7 @@
           </node>
           <node oor:name="MA4" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">📝 Résumer la sélection (⌘R)</value>
+              <value xml:lang="en-US">📝 Résumer la sélection (ctrl+R)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?SummarizeSelection&amp;src=menu</value>
@@ -79,7 +79,7 @@
           </node>
           <node oor:name="MA5" oor:op="replace">
             <prop oor:name="Title">
-              <value xml:lang="en-US">💬 Reformuler la sélection (⌘L)</value>
+              <value xml:lang="en-US">💬 Reformuler la sélection (ctrl+L)</value>
             </prop>
             <prop oor:name="URL">
               <value>service:fr.gouv.interieur.mirai.do?SimplifySelection&amp;src=menu</value>
@@ -149,7 +149,6 @@
               <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
             </prop>
           </node>
-
           <node oor:name="MAb" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">ℹ️ À propos de l'IA'ssistant...</value>
@@ -266,7 +265,6 @@
               <value>com.sun.star.sheet.SpreadsheetDocument</value>
             </prop>
           </node>
-
           <node oor:name="MB9" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">ℹ️ À propos de l'IA'ssistant...</value>
@@ -285,6 +283,156 @@
         </node>
       </node>
     </node>
+
+    <!-- ══════════════════════════════════════════════════════════════
+         Menu contextuel — clic droit Writer
+         ══════════════════════════════════════════════════════════════ -->
+    <node oor:name="OfficeContextMenus">
+
+      <node oor:name="fr.gouv.interieur.mirai.contextmenu.writer" oor:op="replace">
+        <prop oor:name="Context" oor:type="xs:string">
+          <value>com.sun.star.text.TextDocument,com.sun.star.text.GlobalDocument,com.sun.star.text.WebDocument</value>
+        </prop>
+        <node oor:name="Submenu">
+
+          <node oor:name="CM_SEP_BEFORE" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+          </node>
+
+          <node oor:name="CM0" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🤖 MIrAI</value>
+            </prop>
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+            <node oor:name="Submenu">
+              <node oor:name="CM1" oor:op="replace">
+                <prop oor:name="Title">
+                  <value xml:lang="en-US">🖊️ Modifier la sélection</value>
+                </prop>
+                <prop oor:name="URL">
+                  <value>service:fr.gouv.interieur.mirai.do?EditSelection&amp;src=contextmenu</value>
+                </prop>
+                <prop oor:name="Target" oor:type="xs:string">
+                  <value>_self</value>
+                </prop>
+              </node>
+              <node oor:name="CM2" oor:op="replace">
+                <prop oor:name="Title">
+                  <value xml:lang="en-US">📏 Ajuster la longueur</value>
+                </prop>
+                <prop oor:name="URL">
+                  <value>service:fr.gouv.interieur.mirai.do?ResizeSelection&amp;src=contextmenu</value>
+                </prop>
+                <prop oor:name="Target" oor:type="xs:string">
+                  <value>_self</value>
+                </prop>
+              </node>
+              <node oor:name="CM3" oor:op="replace">
+                <prop oor:name="Title">
+                  <value xml:lang="en-US">📝 Résumer la sélection</value>
+                </prop>
+                <prop oor:name="URL">
+                  <value>service:fr.gouv.interieur.mirai.do?SummarizeSelection&amp;src=contextmenu</value>
+                </prop>
+                <prop oor:name="Target" oor:type="xs:string">
+                  <value>_self</value>
+                </prop>
+              </node>
+              <node oor:name="CM4" oor:op="replace">
+                <prop oor:name="Title">
+                  <value xml:lang="en-US">💬 Reformuler la sélection</value>
+                </prop>
+                <prop oor:name="URL">
+                  <value>service:fr.gouv.interieur.mirai.do?SimplifySelection&amp;src=contextmenu</value>
+                </prop>
+                <prop oor:name="Target" oor:type="xs:string">
+                  <value>_self</value>
+                </prop>
+              </node>
+            </node>
+          </node>
+
+          <node oor:name="CM_SEP_AFTER" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+          </node>
+
+        </node>
+      </node>
+
+      <!-- ── Menu contextuel Calc ──────────────────────────────────── -->
+      <node oor:name="fr.gouv.interieur.mirai.contextmenu.calc" oor:op="replace">
+        <prop oor:name="Context" oor:type="xs:string">
+          <value>com.sun.star.sheet.SpreadsheetDocument</value>
+        </prop>
+        <node oor:name="Submenu">
+
+          <node oor:name="CC_SEP_BEFORE" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+          </node>
+
+          <node oor:name="CC0" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🤖 MIrAI</value>
+            </prop>
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+            <node oor:name="Submenu">
+              <node oor:name="CC1" oor:op="replace">
+                <prop oor:name="Title">
+                  <value xml:lang="en-US">🔄 Transformer → colonne résultat</value>
+                </prop>
+                <prop oor:name="URL">
+                  <value>service:fr.gouv.interieur.mirai.do?TransformToColumn&amp;src=contextmenu</value>
+                </prop>
+                <prop oor:name="Target" oor:type="xs:string">
+                  <value>_self</value>
+                </prop>
+              </node>
+              <node oor:name="CC2" oor:op="replace">
+                <prop oor:name="Title">
+                  <value xml:lang="en-US">🧮 Générer une formule</value>
+                </prop>
+                <prop oor:name="URL">
+                  <value>service:fr.gouv.interieur.mirai.do?GenerateFormula&amp;src=contextmenu</value>
+                </prop>
+                <prop oor:name="Target" oor:type="xs:string">
+                  <value>_self</value>
+                </prop>
+              </node>
+              <node oor:name="CC3" oor:op="replace">
+                <prop oor:name="Title">
+                  <value xml:lang="en-US">📊 Analyser la plage</value>
+                </prop>
+                <prop oor:name="URL">
+                  <value>service:fr.gouv.interieur.mirai.do?AnalyzeRange&amp;src=contextmenu</value>
+                </prop>
+                <prop oor:name="Target" oor:type="xs:string">
+                  <value>_self</value>
+                </prop>
+              </node>
+            </node>
+          </node>
+
+          <node oor:name="CC_SEP_AFTER" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+          </node>
+
+        </node>
+      </node>
+
+    </node>
+
     <!-- ══════════════════════════════════════════════════════════════
          Toolbar — boutons d'accès rapide dans la barre d'outils
          ══════════════════════════════════════════════════════════════ -->
@@ -495,4 +643,67 @@
     </node>
 
   </node>
+
+  <!-- ══════════════════════════════════════════════════════════════════
+       OfficeCommands — DOIT être au même niveau que AddonUI (sous la
+       racine oor:component-data), PAS à l'intérieur de AddonUI.
+       C'est ce qui permet aux commandes d'apparaître dans le Customize.
+       ══════════════════════════════════════════════════════════════════ -->
+  <node oor:name="OfficeCommands">
+    <node oor:name="fr.gouv.interieur.mirai.commands" oor:op="replace">
+      <node oor:name="UserInterface">
+        <node oor:name="Commands">
+
+          <!-- Writer -->
+          <node oor:name="EditSelection" oor:op="replace">
+            <prop oor:name="Label" oor:type="xs:string">
+              <value xml:lang="fr">🖊️ MIrAI : Modifier la sélection</value>
+            </prop>
+            <prop oor:name="ContextLabel" oor:type="xs:string">
+              <value xml:lang="fr">🖊️ Modifier la sélection</value>
+            </prop>
+          </node>
+
+          <node oor:name="ResizeSelection" oor:op="replace">
+            <prop oor:name="Label" oor:type="xs:string">
+              <value xml:lang="fr">📏 MIrAI : Ajuster la longueur</value>
+            </prop>
+          </node>
+
+          <node oor:name="SummarizeSelection" oor:op="replace">
+            <prop oor:name="Label" oor:type="xs:string">
+              <value xml:lang="fr">📝 MIrAI : Résumer la sélection</value>
+            </prop>
+          </node>
+
+          <node oor:name="SimplifySelection" oor:op="replace">
+            <prop oor:name="Label" oor:type="xs:string">
+              <value xml:lang="fr">💬 MIrAI : Reformuler la sélection</value>
+            </prop>
+          </node>
+
+          <!-- Calc -->
+          <node oor:name="TransformToColumn" oor:op="replace">
+            <prop oor:name="Label" oor:type="xs:string">
+              <value xml:lang="fr">🔄 MIrAI : Transformer → colonne résultat</value>
+            </prop>
+          </node>
+
+          <node oor:name="GenerateFormula" oor:op="replace">
+            <prop oor:name="Label" oor:type="xs:string">
+              <value xml:lang="fr">🧮 MIrAI : Générer une formule</value>
+            </prop>
+          </node>
+
+          <node oor:name="AnalyzeRange" oor:op="replace">
+            <prop oor:name="Label" oor:type="xs:string">
+              <value xml:lang="fr">📊 MIrAI : Analyser la plage</value>
+            </prop>
+          </node>
+
+        </node>
+      </node>
+    </node>
+  </node>
+
 </oor:component-data>

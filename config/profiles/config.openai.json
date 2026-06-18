@@ -1,0 +1,25 @@
+
+{
+
+    "configVersion": 1,
+
+    "enabled": true,
+
+    "bootstrap_url": "",
+
+    "llm_base_urls": "https://api.openai.com/v1",
+
+    "llm_api_tokens": "REDACTED-OPENAI-KEY",
+
+    "llm_default_models": "gpt-4o",
+
+    "keycloakIssuerUrl": "",
+
+    "keycloakRealm": "",
+
+    "keycloakClientId": "",
+
+    "telemetryEnabled": false
+
+}
+
