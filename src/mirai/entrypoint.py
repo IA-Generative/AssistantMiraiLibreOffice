@@ -52,11 +52,20 @@ except ImportError:
     XNamed = _S9
 try:
     from com.sun.star.ui import XContextMenuInterceptor
+    from com.sun.star.ui import XContextMenuInterception as _XContextMenuInterception
     _HAS_CONTEXT_MENU_INTERFACE = True
 except ImportError:
     class _S10: pass
     XContextMenuInterceptor = _S10
+    _XContextMenuInterception = None
     _HAS_CONTEXT_MENU_INTERFACE = False
+try:
+    from com.sun.star.document import XEventListener as XDocumentEventListener
+    _HAS_DOC_EVENT_LISTENER = True
+except ImportError:
+    class _S11: pass
+    XDocumentEventListener = _S11
+    _HAS_DOC_EVENT_LISTENER = False
 import uno
 import os
 import logging
@@ -149,6 +158,42 @@ class MirAIContextMenuInterceptor(unohelper.Base, XContextMenuInterceptor):
         )
         container.insertByIndex(0, root_entry)
 
+
+
+class MirAIDocumentEventListener(unohelper.Base, XDocumentEventListener):
+    """Listens to global document events to register the context menu interceptor."""
+
+    def __init__(self, ctx, register_fn):
+        self.ctx = ctx
+        self._register_fn = register_fn
+
+    def notifyEvent(self, event):  # noqa: N802
+        event_name = getattr(event, 'EventName', '') or ''
+        if event_name not in ('OnLoad', 'OnNew', 'OnCreate'):
+            return
+        try:
+            model = event.Source
+            if model is not None and hasattr(model, 'Text'):
+                controller = model.CurrentController
+                self._register_fn(controller, f"docEvent:{event_name}")
+        except Exception as e:
+            log_to_file(f"[doc-event] {event_name} handler failed: {type(e).__name__}: {e}")
+
+    def disposing(self, source):  # noqa: N802
+        pass
+
+
+def _extract_frame_from_job_args(args):
+    """Return the XFrame from XJob.execute args (present for onLoad/onNew events)."""
+    try:
+        for nv in (args or []):
+            if getattr(nv, 'Name', None) == 'Environment':
+                for env_nv in (getattr(nv, 'Value', None) or []):
+                    if getattr(env_nv, 'Name', None) == 'Frame':
+                        return env_nv.Value
+    except Exception:
+        pass
+    return None
 
 
 def build_user_agent(plugin_version="", lo_version=""):
@@ -453,6 +498,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     _update_lock_cls = threading.Lock()
     _context_menu_refs_cls = []
     _context_menu_controller_ids_cls = set()
+    _context_menu_schedule_started_cls = False
+    _doc_event_listener_cls = None
+    _doc_event_broadcaster_cls = None
 
     def __init__(self, ctx):
         log_to_file("=== MainJob.__init__ called ===")
@@ -548,39 +596,236 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             self._schedule_enrollment_check()
         except Exception as e:
             log_to_file(f"Failed to schedule enrollment check: {str(e)}")
+
+        try:
+            self._schedule_context_menu_registration("startup")
+        except Exception as e:
+            log_to_file(f"[context-menu] failed to schedule registration: {str(e)}")
+
+        # Register a global document event listener so the context menu interceptor
+        # is installed automatically on every document open (OnLoad, OnNew).
+        try:
+            if _HAS_DOC_EVENT_LISTENER and MainJob._doc_event_listener_cls is None:
+                broadcaster = self.ctx.ServiceManager.createInstanceWithContext(
+                    "com.sun.star.frame.GlobalEventBroadcaster", self.ctx
+                )
+                listener = MirAIDocumentEventListener(self.ctx, self._register_writer_context_menu_on)
+                broadcaster.addEventListener(listener)
+                MainJob._doc_event_listener_cls = listener
+                MainJob._doc_event_broadcaster_cls = broadcaster
+                log_to_file("[doc-event] global document event listener registered")
+        except Exception as e:
+            log_to_file(f"[doc-event] listener registration failed: {type(e).__name__}: {e}")
     
     def _log(self, message):
         log_to_file(message)
 
+    # In LibreOffice 25.x the API was renamed:
+    #   addContextMenuInterceptor    → registerContextMenuInterceptor
+    #   removeContextMenuInterceptor → releaseContextMenuInterceptor
+    # We probe both so the extension works on LO 7.x and LO 24+/25+.
+    _REGISTER_METHOD = None   # resolved once at runtime
+    _RELEASE_METHOD = None
+
+    def _resolve_context_menu_method_names(self, obj):
+        """Detect the correct method name for the current LibreOffice version."""
+        if MainJob._REGISTER_METHOD is not None:
+            return MainJob._REGISTER_METHOD
+        for new, old in (
+            ("registerContextMenuInterceptor", "addContextMenuInterceptor"),
+        ):
+            if hasattr(obj, new):
+                MainJob._REGISTER_METHOD = new
+                MainJob._RELEASE_METHOD = "releaseContextMenuInterceptor"
+                self._log(f"[ctx-qi] resolved register method: {new} (LO 25.x API)")
+                return new
+            if hasattr(obj, old):
+                MainJob._REGISTER_METHOD = old
+                MainJob._RELEASE_METHOD = "removeContextMenuInterceptor"
+                self._log(f"[ctx-qi] resolved register method: {old} (LO 7.x API)")
+                return old
+        return None
+
+    def _get_context_menu_interception_iface(self, controller):
+        """Return (obj, obj_id) where obj exposes registerContextMenuInterceptor (or the old name).
+
+        The controller itself exposes XContextMenuInterception directly when its getTypes()
+        includes that interface — no queryInterface needed.
+        """
+        frame = getattr(controller, 'Frame', None)
+        for obj_label, obj in (("controller", controller), ("frame", frame)):
+            if obj is None:
+                continue
+            method_name = self._resolve_context_menu_method_names(obj)
+            if method_name is not None:
+                self._log(f"[ctx-qi] {obj_label} has {method_name} directly")
+                return obj, id(obj)
+        self._log("[ctx-qi] neither controller nor frame exposes context menu interception")
+        return None, None
+
+    def _invoke_via_core_reflection(self, target_obj, method_name, invoke_args):
+        """Invoke a method on a UNO object via CoreReflection, bypassing Python-UNO proxy limits.
+
+        This is a fallback for when queryInterface returns a cached proxy that doesn't
+        expose the method via Python-UNO's __getattr__.
+        """
+        interface_name = "com.sun.star.ui.XContextMenuInterception"
+        try:
+            refl = self.ctx.ServiceManager.createInstanceWithContext(
+                "com.sun.star.reflection.CoreReflection", self.ctx
+            )
+            idl_class = refl.forName(interface_name)
+            if idl_class is None:
+                self._log(f"[core-refl] {interface_name} not found in CoreReflection")
+                return False
+            methods = idl_class.getMethods()
+            self._log(f"[core-refl] found {len(methods)} methods in {interface_name}")
+            for m in methods:
+                try:
+                    name = m.getName()
+                    self._log(f"[core-refl] method: {name}")
+                    if name == method_name:
+                        mutable_args = list(invoke_args)
+                        m.invoke(target_obj, mutable_args)
+                        self._log(f"[core-refl] {method_name} invoked via CoreReflection: OK")
+                        return True
+                except Exception as e:
+                    self._log(f"[core-refl] invoke {method_name} failed: {type(e).__name__}: {e}")
+            self._log(f"[core-refl] {method_name} not found in {interface_name}")
+            return False
+        except Exception as e:
+            self._log(f"[core-refl] setup failed: {type(e).__name__}: {e}")
+            return False
+
+    def _do_add_interceptor(self, obj, interceptor, obj_label):
+        """Call register(Context)MenuInterceptor on obj (name differs by LO version)."""
+        method_name = MainJob._REGISTER_METHOD or self._resolve_context_menu_method_names(obj)
+        if method_name and hasattr(obj, method_name):
+            getattr(obj, method_name)(interceptor)
+            self._log(f"[ctx-add] {obj_label}: {method_name} OK")
+            return True
+        # Last resort: CoreReflection invocation (bypasses Python-UNO proxy type limits)
+        self._log(f"[ctx-add] {obj_label}: direct call unavailable, trying CoreReflection")
+        for name in ("registerContextMenuInterceptor", "addContextMenuInterceptor"):
+            if self._invoke_via_core_reflection(obj, name, [interceptor]):
+                return True
+        return False
+
     def _register_current_writer_context_menu(self, reason="manual"):
         try:
             if not _HAS_CONTEXT_MENU_INTERFACE:
-                self._log(f"[context-menu] skip registration ({reason}): XContextMenuInterceptor unavailable")
+                self._log(f"[context-menu] skip ({reason}): XContextMenuInterceptor unavailable")
                 return False
             desktop = self.ctx.ServiceManager.createInstanceWithContext(
                 "com.sun.star.frame.Desktop", self.ctx
             )
             model = desktop.getCurrentComponent()
             if model is None or not hasattr(model, "Text"):
-                self._log(f"[context-menu] skip registration ({reason}): current component is not Writer")
+                self._log(f"[context-menu] skip ({reason}): not a Writer document")
                 return False
             controller = model.CurrentController
-            if not hasattr(controller, "addContextMenuInterceptor"):
-                self._log(f"[context-menu] skip registration ({reason}): controller has no context menu API")
-                return False
-            controller_id = id(controller)
-            if controller_id in MainJob._context_menu_controller_ids_cls:
-                self._log(f"[context-menu] already registered ({reason})")
-                return True
-            interceptor = MirAIContextMenuInterceptor(self.ctx, self)
-            controller.addContextMenuInterceptor(interceptor)
-            MainJob._context_menu_refs_cls.append((controller, interceptor))
-            MainJob._context_menu_controller_ids_cls.add(controller_id)
-            self._log(f"[context-menu] interceptor registered ({reason})")
-            return True
+            frame = getattr(controller, 'Frame', None)
+            # Try queryInterface strategies first (logs diagnostics internally)
+            iface, obj_id = self._get_context_menu_interception_iface(controller)
+            if iface is not None:
+                if obj_id in MainJob._context_menu_controller_ids_cls:
+                    self._log(f"[context-menu] already registered ({reason})")
+                    return True
+                interceptor = MirAIContextMenuInterceptor(self.ctx, self)
+                if self._do_add_interceptor(iface, interceptor, f"qi-iface({reason})"):
+                    MainJob._context_menu_refs_cls.append((iface, interceptor))
+                    MainJob._context_menu_controller_ids_cls.add(obj_id)
+                    self._log(f"[context-menu] interceptor registered via qi ({reason})")
+                    return True
+            # Fallback: try CoreReflection on controller and frame directly
+            for cand_label, cand in (("controller", controller), ("frame", frame)):
+                if cand is None:
+                    continue
+                cand_id = id(cand)
+                if cand_id in MainJob._context_menu_controller_ids_cls:
+                    self._log(f"[context-menu] already registered on {cand_label} ({reason})")
+                    return True
+                interceptor = MirAIContextMenuInterceptor(self.ctx, self)
+                if self._do_add_interceptor(cand, interceptor, f"{cand_label}({reason})"):
+                    MainJob._context_menu_refs_cls.append((cand, interceptor))
+                    MainJob._context_menu_controller_ids_cls.add(cand_id)
+                    self._log(f"[context-menu] interceptor registered on {cand_label} ({reason})")
+                    return True
+            self._log(f"[context-menu] all registration strategies failed ({reason})")
+            return False
         except Exception as e:
             self._log(f"[context-menu] registration failed ({reason}): {type(e).__name__}: {e}")
             return False
+
+    def _register_writer_context_menu_on(self, controller, reason="manual"):
+        """Register the MirAI context menu interceptor on the given controller."""
+        try:
+            if not _HAS_CONTEXT_MENU_INTERFACE:
+                self._log(f"[context-menu] skip ({reason}): XContextMenuInterceptor unavailable")
+                return False
+            if controller is None:
+                self._log(f"[context-menu] skip ({reason}): no controller")
+                return False
+            model = getattr(controller, 'Model', None)
+            if model is None or not hasattr(model, 'Text'):
+                self._log(f"[context-menu] skip ({reason}): not a Writer controller")
+                return False
+            frame = getattr(controller, 'Frame', None)
+            # Try queryInterface strategies first (logs diagnostics internally)
+            iface, obj_id = self._get_context_menu_interception_iface(controller)
+            if iface is not None:
+                if obj_id in MainJob._context_menu_controller_ids_cls:
+                    self._log(f"[context-menu] already registered ({reason})")
+                    return True
+                interceptor = MirAIContextMenuInterceptor(self.ctx, self)
+                if self._do_add_interceptor(iface, interceptor, f"qi-iface({reason})"):
+                    MainJob._context_menu_refs_cls.append((iface, interceptor))
+                    MainJob._context_menu_controller_ids_cls.add(obj_id)
+                    self._log(f"[context-menu] interceptor registered via qi ({reason})")
+                    return True
+            # Fallback: try CoreReflection on controller and frame directly
+            for cand_label, cand in (("controller", controller), ("frame", frame)):
+                if cand is None:
+                    continue
+                cand_id = id(cand)
+                if cand_id in MainJob._context_menu_controller_ids_cls:
+                    self._log(f"[context-menu] already registered on {cand_label} ({reason})")
+                    return True
+                interceptor = MirAIContextMenuInterceptor(self.ctx, self)
+                if self._do_add_interceptor(cand, interceptor, f"{cand_label}({reason})"):
+                    MainJob._context_menu_refs_cls.append((cand, interceptor))
+                    MainJob._context_menu_controller_ids_cls.add(cand_id)
+                    self._log(f"[context-menu] interceptor registered on {cand_label} ({reason})")
+                    return True
+            self._log(f"[context-menu] all registration strategies failed ({reason})")
+            return False
+        except Exception as e:
+            self._log(f"[context-menu] registration failed ({reason}): {type(e).__name__}: {e}")
+            return False
+
+    def _schedule_context_menu_registration(self, reason="startup", force=False):
+        if MainJob._context_menu_schedule_started_cls and not force:
+            self._log("[context-menu] deferred registration already scheduled")
+            return
+        MainJob._context_menu_schedule_started_cls = True
+        delays = (0.5, 1.5, 3.0, 6.0, 10.0)
+        self._log(f"[context-menu] scheduling deferred registrations ({reason})")
+
+        def _attempt(attempt_index):
+            try:
+                if self._register_current_writer_context_menu(f"deferred#{attempt_index + 1}"):
+                    self._log(f"[context-menu] deferred registration succeeded on attempt {attempt_index + 1}")
+                    return
+            except Exception as e:
+                self._log(f"[context-menu] deferred attempt {attempt_index + 1} failed: {e}")
+            if attempt_index + 1 >= len(delays):
+                self._log("[context-menu] deferred registration exhausted")
+                MainJob._context_menu_schedule_started_cls = False
+
+        for index, delay in enumerate(delays):
+            timer = threading.Timer(delay, _attempt, args=(index,))
+            timer.daemon = True
+            timer.start()
 
     # Condensed action names for telemetry — appears as plugin.action attribute
     _ACTION_NAMES = {
@@ -9534,12 +9779,26 @@ EDITED VERSION:
         return False
 
     def execute(self, args):
-        """XJob.execute — called automatically by Jobs framework on document open."""
-        log_to_file("=== XJob.execute called (document opened) ===")
+        """XJob.execute — called by Jobs framework on onFirstVisibleTask, onLoad, onNew."""
+        log_to_file("=== XJob.execute called ===")
         try:
-            self._register_current_writer_context_menu("jobExecute")
+            # For onLoad/onNew, args contain the document frame — register directly on it
+            frame = _extract_frame_from_job_args(args)
+            if frame is not None:
+                try:
+                    controller = getattr(frame, 'Controller', None)
+                    if controller is not None:
+                        self._register_writer_context_menu_on(controller, "onDocEvent")
+                    else:
+                        log_to_file("[context-menu] execute: no controller on frame")
+                except Exception as e:
+                    log_to_file(f"[context-menu] frame-based registration failed: {e}")
+            else:
+                # onFirstVisibleTask: no frame yet, try current component + deferred fallback
+                self._register_current_writer_context_menu("onStartup")
+                self._schedule_context_menu_registration("onStartup", force=True)
         except Exception as e:
-            log_to_file(f"[context-menu] job execute registration failed: {e}")
+            log_to_file(f"[context-menu] execute failed: {e}")
         return
 
     def trigger(self, args):
@@ -9550,6 +9809,12 @@ EDITED VERSION:
             action, source = args, "user"
         self._trigger_source = source
         self._log(f"=== trigger called: action={action} src={source} ===")
+        # Ensure the context menu interceptor is registered for this document.
+        # This runs on the main thread (guaranteed by trigger()), so it's safe.
+        try:
+            self._register_current_writer_context_menu("trigger")
+        except Exception:
+            pass
         try:
             self._schedule_config_refresh(force=True, reason=f"trigger:{action}")
         except Exception:
