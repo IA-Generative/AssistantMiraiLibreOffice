@@ -363,12 +363,21 @@ class MiraiContextMenuInterceptor(unohelper.Base, XContextMenuInterceptor):
         try:
             ctx = uno.getComponentContext()
             sm = ctx.getServiceManager()
-            menu_container = event.ActionTriggerContainer
+            try:
+                menu_container = event.ActionTriggerContainer
+            except Exception:
+                return IGNORED
             if menu_container is None:
+                return IGNORED
+            try:
+                menu_container.getCount()
+            except Exception:
                 return IGNORED
             submenu = sm.createInstanceWithContext("com.sun.star.ui.ActionTriggerContainer", ctx)
             for label, url in self.WRITER_ACTIONS:
                 item = sm.createInstanceWithContext("com.sun.star.ui.ActionTrigger", ctx)
+                if item is None:
+                    continue
                 item.Text = label
                 item.CommandURL = f"service:fr.gouv.interieur.mirai.do?{url}&src=contextmenu"
                 submenu.insertByIndex(submenu.getCount(), item)
@@ -489,28 +498,29 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file(f"Failed to schedule enrollment check: {str(e)}")
         try:
             self._context_menu_interceptor = MiraiContextMenuInterceptor(self)
-            
-            # Essayer d'obtenir le frame du document actif via le modèle (XSCRIPTCONTEXT)
-            # ou via le Desktop
-            desktop = self.ctx.ServiceManager.createInstanceWithContext("com.sun.star.frame.Desktop", self.ctx)
-            frame = desktop.getCurrentFrame()
-            
-            # Si le frame n'est pas trouvé, on peut tenter de le chercher via le contrôleur
-            if not frame and hasattr(self, 'document') and self.document:
-                frame = self.document.getCurrentController().getFrame()
-
-            if frame:
-                frame.registerContextMenuInterceptor(self._context_menu_interceptor)
-                log_to_file("ContextMenuInterceptor enregistré avec succès sur le frame.")
-            else:
-                log_to_file("Impossible d'enregistrer l'intercepteur : aucun frame actif trouvé.")
-                
+            def _register_interceptor():
+                import time
+                time.sleep(2)
+                try:
+                    desktop = self.ctx.ServiceManager.createInstanceWithContext(
+                        "com.sun.star.frame.Desktop", self.ctx)
+                    frame = desktop.getCurrentFrame()
+                    if not frame and hasattr(self, 'document') and self.document:
+                        frame = self.document.getCurrentController().getFrame()
+                    if frame:
+                        controller = frame.getController()
+                        if controller:
+                            controller.registerContextMenuInterceptor(self._context_menu_interceptor)
+                            log_to_file("ContextMenuInterceptor enregistré avec succès (différé).")
+                        else:
+                            log_to_file("ContextMenuInterceptor : pas de controller sur le frame.")
+                    else:
+                        log_to_file("ContextMenuInterceptor : toujours pas de frame après délai.")
+                except Exception as e:
+                    log_to_file(f"ContextMenuInterceptor registration failed (différé): {str(e)}")
+            threading.Thread(target=_register_interceptor, daemon=True).start()
         except Exception as e:
             log_to_file(f"Erreur fatale lors de l'enregistrement du menu: {str(e)}")
-
-        except Exception as e:
-            log_to_file(
-                f"ContextMenuInterceptor registration failed: {str(e)}")
     
     def _log(self, message):
         log_to_file(message)
