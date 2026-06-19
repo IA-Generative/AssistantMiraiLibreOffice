@@ -28,6 +28,8 @@ try:
     from com.sun.star.awt import XActionListener, XItemListener, XMouseListener, XWindowListener, XTopWindowListener
     from com.sun.star.beans import PropertyValue
     from com.sun.star.container import XNamed
+    from com.sun.star.frame import XDispatchProvider, XDispatch
+    from com.sun.star.ui import XContextMenuInterceptor
 except ImportError:
     # Running outside LibreOffice (e.g. unopkg install) — provide safe stubs
     class _S1: pass
@@ -39,6 +41,9 @@ except ImportError:
     class _S7: pass
     class _S8: pass
     class _S9: pass
+    class _S10: pass
+    class _S11: pass
+    class _S12: pass
     XJobExecutor = _S1
     XJob = _S2
     MSG_BUTTONS = None
@@ -49,6 +54,9 @@ except ImportError:
     XTopWindowListener = _S7
     PropertyValue = _S8
     XNamed = _S9
+    XDispatchProvider = _S10
+    XDispatch = _S11
+    XContextMenuInterceptor = _S12
 import uno
 import os
 import logging
@@ -73,6 +81,122 @@ from .security_flow import (
 PLUGIN_NAME = "MIrAI-LibreOffice"
 _DEFAULT_USER_AGENT = PLUGIN_NAME
 _current_user_agent = _DEFAULT_USER_AGENT
+CONTEXT_MENU_IGNORED = 0
+CONTEXT_MENU_EXECUTE_MODIFIED = 2
+
+MIRAI_UNO_ACTIONS = {
+    "MirAIResume": "SummarizeSelection",
+    "MirAIRewrite": "SimplifySelection",
+    "MirAICorrect": "CorrectSelection",
+    "MirAITranslate": "TranslateSelection",
+}
+
+MIRAI_CONTEXT_MENU_ITEMS = (
+    ("Résumer la sélection", ".uno:MirAIResume"),
+    ("Reformuler", ".uno:MirAIRewrite"),
+    ("Corriger", ".uno:MirAICorrect"),
+    ("Traduire", ".uno:MirAITranslate"),
+)
+
+
+def _uno_command_to_action(url):
+    complete = str(getattr(url, "Complete", "") or "")
+    protocol = str(getattr(url, "Protocol", "") or "")
+    path = str(getattr(url, "Path", "") or "")
+    command = complete or (protocol + path)
+    if command.startswith(".uno:"):
+        command = command[5:]
+    return MIRAI_UNO_ACTIONS.get(command)
+
+
+class MirAIContextMenuInterceptor(unohelper.Base, XContextMenuInterceptor):
+    """Adds the MirAI submenu to Writer contextual menus."""
+
+    def __init__(self, ctx, job):
+        self.ctx = ctx
+        self.job = job
+
+    def notifyContextMenuExecute(self, event):  # noqa: N802
+        try:
+            container = event.ActionTriggerContainer
+            if not self._is_writer_context(event):
+                self.job._log("[context-menu] ignored: not a Writer context")
+                return CONTEXT_MENU_IGNORED
+            self._insert_mirai_submenu(container)
+            self.job._log("[context-menu] MirAI submenu inserted")
+            return CONTEXT_MENU_EXECUTE_MODIFIED
+        except Exception as e:
+            self.job._log(f"[context-menu] insertion failed: {type(e).__name__}: {e}")
+            return CONTEXT_MENU_IGNORED
+
+    def _is_writer_context(self, event):
+        try:
+            controller = getattr(event, "Source", None)
+            model = getattr(controller, "Model", None)
+            if model is not None and hasattr(model, "Text"):
+                return True
+        except Exception:
+            pass
+        return True
+
+    def _create_menu_service(self, container, service_name):
+        try:
+            return container.createInstance(service_name)
+        except Exception:
+            sm = self.ctx.getServiceManager()
+            return sm.createInstanceWithContext(service_name, self.ctx)
+
+    def _create_action_trigger(self, container, text, command_url, sub_container=None):
+        action = self._create_menu_service(container, "com.sun.star.ui.ActionTrigger")
+        action.setPropertyValue("Text", text)
+        action.setPropertyValue("CommandURL", command_url)
+        if sub_container is not None:
+            action.setPropertyValue("SubContainer", sub_container)
+        return action
+
+    def _insert_mirai_submenu(self, container):
+        submenu = self._create_menu_service(container, "com.sun.star.ui.ActionTriggerContainer")
+        for index, (label, command_url) in enumerate(MIRAI_CONTEXT_MENU_ITEMS):
+            submenu.insertByIndex(index, self._create_action_trigger(submenu, label, command_url))
+        root_entry = self._create_action_trigger(
+            container,
+            "MirAI",
+            "service:fr.gouv.interieur.mirai.do?MenuSeparator&src=context",
+            submenu,
+        )
+        container.insertByIndex(0, root_entry)
+
+
+class MirAIContextMenuTopWindowListener(unohelper.Base, XTopWindowListener):
+    def __init__(self, job):
+        self.job = job
+
+    def windowActivated(self, event):  # noqa: N802
+        try:
+            self.job._register_current_writer_context_menu("windowActivated")
+        except Exception as e:
+            self.job._log(f"[context-menu] windowActivated registration failed: {e}")
+
+    def windowOpened(self, event):  # noqa: N802
+        self.windowActivated(event)
+
+    def windowClosing(self, event):  # noqa: N802
+        pass
+
+    def windowClosed(self, event):  # noqa: N802
+        pass
+
+    def windowMinimized(self, event):  # noqa: N802
+        pass
+
+    def windowNormalized(self, event):  # noqa: N802
+        pass
+
+    def windowDeactivated(self, event):  # noqa: N802
+        pass
+
+    def disposing(self, event):  # noqa: N802
+        pass
 
 
 def build_user_agent(plugin_version="", lo_version=""):
@@ -363,8 +487,8 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
 
 
 # The MainJob is a UNO component derived from unohelper.Base class
-# and also the XJobExecutor, the implemented interface
-class MainJob(unohelper.Base, XJobExecutor, XJob):
+# and also the XJobExecutor, XJob and ProtocolHandler dispatch interfaces.
+class MainJob(unohelper.Base, XJobExecutor, XJob, XDispatchProvider, XDispatch):
     # Class-level flags shared across all instances to prevent duplicate wizards/updates
     _enrollment_dismissed_cls = False
     _enrollment_wizard_active_cls = False
@@ -375,6 +499,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     # re-downloading / re-prompting the same update in a loop.
     _update_launch_blocked_cls = set()
     _update_lock_cls = threading.Lock()
+    _context_menu_refs_cls = []
+    _context_menu_controller_ids_cls = set()
+    _context_menu_top_listener_cls = None
 
     def __init__(self, ctx):
         log_to_file("=== MainJob.__init__ called ===")
@@ -462,6 +589,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         except Exception as e:
             log_to_file(f"Failed to initialize device management: {str(e)}")
 
+        try:
+            self._install_writer_context_menu_support()
+        except Exception as e:
+            log_to_file(f"[context-menu] startup registration failed: {str(e)}")
+
         # Proxy consistency check removed — proxy is configured via
         # bootstrap or the Settings dialog, no startup prompt needed.
 
@@ -474,6 +606,81 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     def _log(self, message):
         log_to_file(message)
 
+    def _install_writer_context_menu_support(self):
+        self._register_current_writer_context_menu("startup")
+        if MainJob._context_menu_top_listener_cls is not None:
+            return
+        try:
+            toolkit = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.awt.Toolkit", self.ctx
+            )
+            listener = MirAIContextMenuTopWindowListener(self)
+            toolkit.addTopWindowListener(listener)
+            MainJob._context_menu_top_listener_cls = listener
+            self._log("[context-menu] top window listener registered")
+        except Exception as e:
+            self._log(f"[context-menu] top window listener unavailable: {e}")
+
+    def _register_current_writer_context_menu(self, reason="manual"):
+        try:
+            desktop = self.ctx.ServiceManager.createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.ctx
+            )
+            model = desktop.getCurrentComponent()
+            if model is None or not hasattr(model, "Text"):
+                self._log(f"[context-menu] skip registration ({reason}): current component is not Writer")
+                return False
+            controller = model.CurrentController
+            if not hasattr(controller, "addContextMenuInterceptor"):
+                self._log(f"[context-menu] skip registration ({reason}): controller has no context menu API")
+                return False
+            controller_id = id(controller)
+            if controller_id in MainJob._context_menu_controller_ids_cls:
+                self._log(f"[context-menu] already registered ({reason})")
+                return True
+            interceptor = MirAIContextMenuInterceptor(self.ctx, self)
+            controller.addContextMenuInterceptor(interceptor)
+            MainJob._context_menu_refs_cls.append((controller, interceptor))
+            MainJob._context_menu_controller_ids_cls.add(controller_id)
+            self._log(f"[context-menu] interceptor registered ({reason})")
+            return True
+        except Exception as e:
+            self._log(f"[context-menu] registration failed ({reason}): {type(e).__name__}: {e}")
+            return False
+
+    def _dispatch_uno_action(self, url, source="uno"):
+        action = _uno_command_to_action(url)
+        if not action:
+            return False
+        command = str(getattr(url, "Complete", "") or (getattr(url, "Protocol", "") + getattr(url, "Path", "")))
+        self._log(f"[uno-dispatch] command={command} mapped_action={action} src={source}")
+        self.trigger(f"{action}&src={source}")
+        return True
+
+    def queryDispatch(self, url, target_frame_name, search_flags):  # noqa: N802
+        action = _uno_command_to_action(url)
+        if action:
+            self._log(f"[uno-dispatch] queryDispatch accepted action={action}")
+            return self
+        self._log(f"[uno-dispatch] queryDispatch ignored url={getattr(url, 'Complete', url)}")
+        return None
+
+    def queryDispatches(self, requests):  # noqa: N802
+        dispatches = []
+        for request in requests:
+            dispatches.append(self.queryDispatch(request.FeatureURL, request.FrameName, request.SearchFlags))
+        return tuple(dispatches)
+
+    def dispatch(self, url, arguments):  # noqa: N802
+        if not self._dispatch_uno_action(url, source="context"):
+            self._log(f"[uno-dispatch] dispatch ignored url={getattr(url, 'Complete', url)}")
+
+    def addStatusListener(self, listener, url):  # noqa: N802
+        self._log(f"[uno-dispatch] addStatusListener url={getattr(url, 'Complete', url)}")
+
+    def removeStatusListener(self, listener, url):  # noqa: N802
+        self._log(f"[uno-dispatch] removeStatusListener url={getattr(url, 'Complete', url)}")
+
     # Condensed action names for telemetry — appears as plugin.action attribute
     _ACTION_NAMES = {
         "ExtensionLoaded": "launch",
@@ -483,6 +690,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         "ResizeSelection": "resize",
         "SummarizeSelection": "summarize",
         "SimplifySelection": "simplify",
+        "CorrectSelection": "correct",
+        "TranslateSelection": "translate",
         "TransformToColumn": "transform",
         "GenerateFormula": "formula",
         "AnalyzeRange": "analyze",
@@ -9426,8 +9635,10 @@ EDITED VERSION:
     def execute(self, args):
         """XJob.execute — called automatically by Jobs framework on document open."""
         log_to_file("=== XJob.execute called (document opened) ===")
-        # __init__ already scheduled the enrollment check via _schedule_enrollment_check
-        # Nothing else needed here — the timer handles the wizard auto-launch.
+        try:
+            self._register_current_writer_context_menu("jobExecute")
+        except Exception as e:
+            log_to_file(f"[context-menu] job execute registration failed: {e}")
         return
 
     def trigger(self, args):
@@ -9436,6 +9647,7 @@ EDITED VERSION:
             action, source = args.split("&src=", 1)
         else:
             action, source = args, "user"
+        action = MIRAI_UNO_ACTIONS.get(action.replace(".uno:", ""), action)
         self._trigger_source = source
         self._log(f"=== trigger called: action={action} src={source} ===")
         try:
@@ -9507,6 +9719,10 @@ g_ImplementationHelper = unohelper.ImplementationHelper()
 g_ImplementationHelper.addImplementation(
     MainJob,  # UNO object class
     "fr.gouv.interieur.mirai.do",  # implementation name
-    ("com.sun.star.task.JobExecutor", "com.sun.star.task.Job"), )  # implemented services
+    (
+        "com.sun.star.task.JobExecutor",
+        "com.sun.star.task.Job",
+        "com.sun.star.frame.ProtocolHandler",
+    ), )  # implemented services
 log_to_file("=== mirai extension registered successfully ===")
 # vim: set shiftwidth=4 softtabstop=4 expandtab:
