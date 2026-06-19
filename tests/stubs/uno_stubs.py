@@ -27,6 +27,9 @@ class _XSelectionChangeListener: pass
 class _XCommandEnvironment: pass
 class _XInteractionHandler: pass
 class _XCallback:        pass
+class _XDispatchProvider: pass
+class _XDispatch: pass
+class _XContextMenuInterceptor: pass
 
 
 def install():
@@ -83,6 +86,17 @@ def install():
     com_sun_star_view = MagicMock()
     com_sun_star_view.XSelectionChangeListener = _XSelectionChangeListener
 
+    # --- com.sun.star.frame / ui ---
+    com_sun_star_frame = MagicMock()
+    com_sun_star_frame.XDispatchProvider = _XDispatchProvider
+    com_sun_star_frame.XDispatch = _XDispatch
+
+    com_sun_star_ui = MagicMock()
+    com_sun_star_ui.XContextMenuInterceptor = _XContextMenuInterceptor
+    com_sun_star_ui.ContextMenuInterceptorAction = MagicMock()
+    com_sun_star_ui.ContextMenuInterceptorAction.EXECUTE_MODIFIED = 2
+    com_sun_star_ui.ContextMenuInterceptorAction.IGNORED = 0
+
     # --- register all modules ---
     sys.modules.update({
         "uno": uno,
@@ -98,7 +112,8 @@ def install():
         "com.sun.star.beans": com_sun_star_beans,
         "com.sun.star.container": com_sun_star_container,
         "com.sun.star.view": com_sun_star_view,
-        "com.sun.star.frame": MagicMock(),
+        "com.sun.star.frame": com_sun_star_frame,
+        "com.sun.star.ui": com_sun_star_ui,
         "com.sun.star.lang": MagicMock(),
         "com.sun.star.deployment": MagicMock(),
     })

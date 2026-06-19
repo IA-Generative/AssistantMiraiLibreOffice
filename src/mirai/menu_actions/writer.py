@@ -417,15 +417,81 @@ def _open_settings(job, selection):
         text_range.setString(text_range.getString() + ":error: " + str(e))
 
 
+def _get_writer_selection(job, model):
+    text = model.Text
+    ctrl = model.CurrentController
+    selection = ctrl.getSelection()
+    count = 0
+    try:
+        count = int(selection.getCount())
+    except Exception:
+        count = 1
+    if count <= 0:
+        job._log("[writer-selection] empty selection container")
+        return text, ctrl, selection, None, ""
+    text_range = selection.getByIndex(0)
+    selected_text = text_range.getString()
+    job._log(
+        "[writer-selection] ranges=%s selected_chars=%s empty=%s"
+        % (count, len(selected_text or ""), not bool((selected_text or "").strip()))
+    )
+    return text, ctrl, selection, text_range, selected_text
+
+
+def _correct_selection(job, text, selection, text_range, controller=None, model=None):
+    selected_text = text_range.getString()
+    job._log(f"[MirAICorrect] selected_chars={len(selected_text or '')}")
+    job._send_telemetry(
+        "CorrectSelection",
+        {
+            "action": "correct_selection",
+            "text_length": str(len(selected_text or "")),
+        },
+    )
+    if not (selected_text or "").strip():
+        job._log("[MirAICorrect] ignored: empty selection")
+        return
+    job._log("[MirAICorrect] API hook pending; selection captured successfully")
+    try:
+        job._show_message(
+            "MirAI - Corriger",
+            "Commande prête : le texte sélectionné a été récupéré. Branchez ici l'appel API de correction.",
+        )
+    except Exception as e:
+        job._log(f"[MirAICorrect] notification failed: {e}")
+
+
+def _translate_selection(job, text, selection, text_range, controller=None, model=None):
+    selected_text = text_range.getString()
+    job._log(f"[MirAITranslate] selected_chars={len(selected_text or '')}")
+    job._send_telemetry(
+        "TranslateSelection",
+        {
+            "action": "translate_selection",
+            "text_length": str(len(selected_text or "")),
+        },
+    )
+    if not (selected_text or "").strip():
+        job._log("[MirAITranslate] ignored: empty selection")
+        return
+    job._log("[MirAITranslate] API hook pending; selection captured successfully")
+    try:
+        job._show_message(
+            "MirAI - Traduire",
+            "Commande prête : le texte sélectionné a été récupéré. Branchez ici l'appel API de traduction.",
+        )
+    except Exception as e:
+        job._log(f"[MirAITranslate] notification failed: {e}")
+
+
 def handle_writer_action(job, args, model):
     if not hasattr(model, "Text"):
         return False
 
     job._log("Processing Writer document")
-    text = model.Text
-    ctrl = model.CurrentController
-    selection = ctrl.getSelection()
-    text_range = selection.getByIndex(0)
+    text, ctrl, selection, text_range, selected_text = _get_writer_selection(job, model)
+    if text_range is None:
+        return True
 
     if args == "ExtendSelection":
         _extend_selection(job, text, selection, text_range, controller=ctrl, model=model)
@@ -437,6 +503,10 @@ def handle_writer_action(job, args, model):
         _simplify_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "ResizeSelection":
         _resize_selection(job, text, selection, text_range, controller=ctrl, model=model)
+    elif args == "CorrectSelection":
+        _correct_selection(job, text, selection, text_range, controller=ctrl, model=model)
+    elif args == "TranslateSelection":
+        _translate_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "AboutDialog":
         try:
             job._show_about_dialog()
@@ -452,4 +522,3 @@ def handle_writer_action(job, args, model):
         _open_settings(job, selection)
 
     return True
-

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<oor:component-data xmlns:oor="http://openoffice.org/2001/registry"
+                    xmlns:xs="http://www.w3.org/2001/XMLSchema"
+                    oor:name="WriterCommands" oor:package="org.openoffice.Office.UI">
+  <node oor:name="UserInterface">
+    <node oor:name="Commands">
+      <node oor:name=".uno:MirAIResume" oor:op="replace">
+        <prop oor:name="Label" oor:type="xs:string">
+          <value xml:lang="en-US">Résumer la sélection</value>
+        </prop>
+      </node>
+      <node oor:name=".uno:MirAIRewrite" oor:op="replace">
+        <prop oor:name="Label" oor:type="xs:string">
+          <value xml:lang="en-US">Reformuler</value>
+        </prop>
+      </node>
+      <node oor:name=".uno:MirAICorrect" oor:op="replace">
+        <prop oor:name="Label" oor:type="xs:string">
+          <value xml:lang="en-US">Corriger</value>
+        </prop>
+      </node>
+      <node oor:name=".uno:MirAITranslate" oor:op="replace">
+        <prop oor:name="Label" oor:type="xs:string">
+          <value xml:lang="en-US">Traduire</value>
+        </prop>
+      </node>
+    </node>
+  </node>
+</oor:component-data>
