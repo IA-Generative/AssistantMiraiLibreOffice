@@ -20,6 +20,8 @@ import pytest
 from tests.stubs.uno_stubs import install, make_job
 install()
 
+from src.mirai.entrypoint import MainJob
+
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -200,7 +202,7 @@ def test_lo07_fetch_legacy_does_not_touch_features_cache():
 
 def test_lo08_update_not_retriggered_if_in_progress():
     job = make_job()
-    job._update_in_progress = True
+    MainJob._update_in_progress_cls = True
 
     called = []
 
@@ -243,7 +245,7 @@ def test_lo09_perform_update_checksum_ok_calls_install():
     job._perform_update(directive)
 
     mock_ext_manager.addExtension.assert_called_once()
-    assert job._update_in_progress is False
+    assert MainJob._update_in_progress_cls is False
 
 
 # ── TC-LO-10 : _perform_update checksum KO → pas d'install ──────────
@@ -285,7 +287,7 @@ def test_lo11_perform_update_releases_flag_on_exception():
     # _perform_update must not raise and must not leave _update_in_progress True
     job._perform_update(directive)
     # _schedule_update sets/clears the flag; here we test perform directly
-    assert job._update_in_progress is False  # perform_update doesn't touch the flag itself
+    assert MainJob._update_in_progress_cls is False  # perform_update doesn't touch the flag itself
 
 
 # ── TC-LO-12 : _get_extension_version retourne une version ───────────

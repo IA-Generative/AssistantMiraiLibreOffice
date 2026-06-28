@@ -483,7 +483,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
     def _get_user_config_dir(self):
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
-        user_config_path = getattr(path_settings, "UserConfig")
+        user_config_path = getattr(path_settings, "UserConfig", None)
+        # PathSettings indisponible (ex. contexte de test mocké, ou état LO
+        # dégradé) : pas de chemin exploitable -> on évite d'écrire dans un
+        # dossier fantôme (repr de mock) ou dans le cwd.
+        if not isinstance(user_config_path, str):
+            return ""
         if user_config_path.startswith('file://'):
             user_config_path = str(uno.fileUrlToSystemPath(user_config_path))
         return user_config_path
@@ -537,6 +542,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             plugin_uuid = self._ensure_plugin_uuid()
             device_name = str(self._get_config_from_file("device_name", "mirai-libreoffice") or "").strip() or "mirai-libreoffice"
             user_config_dir = self._get_user_config_dir()
+            if not user_config_dir:
+                # Pas de dossier de config exploitable -> flux sécurisé
+                # indisponible (évite d'écrire l'état dans un chemin fantôme).
+                return None
             state_path = os.path.join(user_config_dir, "secure_bootstrap_state.json")
             queue_path = os.path.join(user_config_dir, "telemetry_queue.json")
             try:

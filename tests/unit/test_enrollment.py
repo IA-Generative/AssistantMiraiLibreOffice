@@ -17,6 +17,8 @@ from tests.stubs.uno_stubs import install, make_job
 
 install()
 
+from src.mirai.entrypoint import MainJob
+
 
 def _make_jwt(payload: dict) -> str:
     """Craft a minimal JWT (unsigned) for testing."""
@@ -42,6 +44,9 @@ class TestNeedsFirstEnrollment(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
         self.job = make_job(config_dir=self.config_dir)
+        # DM activé : sinon _needs_first_enrollment court-circuite à False
+        # (pas d'enrôlement quand le device management est désactivé).
+        self.job._device_management_enabled = MagicMock(return_value=True)
 
     def test_no_config_file_returns_true(self):
         """No config.json at all → needs enrollment."""
@@ -87,10 +92,13 @@ class TestEnrollmentDismissedFlag(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
         self.job = make_job(config_dir=self.config_dir)
+        # DM activé : sinon _needs_first_enrollment court-circuite à False
+        # (pas d'enrôlement quand le device management est désactivé).
+        self.job._device_management_enabled = MagicMock(return_value=True)
 
     def test_initial_dismissed_is_false(self):
         """Flag should start as False."""
-        self.assertFalse(self.job._enrollment_dismissed)
+        self.assertFalse(MainJob._enrollment_dismissed_cls)
 
     def test_trigger_sets_dismissed_on_enrollment_cancel(self):
         """When enrollment is needed and _run_first_enrollment returns False,
@@ -103,12 +111,12 @@ class TestEnrollmentDismissedFlag(unittest.TestCase):
             with patch.object(self.job, '_schedule_config_refresh'):
                 self.job.trigger("test_action")
 
-        self.assertTrue(self.job._enrollment_dismissed)
+        self.assertTrue(MainJob._enrollment_dismissed_cls)
 
     def test_trigger_skips_enrollment_when_dismissed(self):
         """Once dismissed, trigger should NOT call _run_first_enrollment again."""
         _write_config(self.config_dir, {"enrolled": False, "access_token": ""})
-        self.job._enrollment_dismissed = True
+        MainJob._enrollment_dismissed_cls = True
 
         with patch.object(self.job, '_run_first_enrollment') as mock_enroll:
             with patch.object(self.job, '_schedule_config_refresh'):
@@ -134,6 +142,9 @@ class TestScheduleEnrollmentCheck(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
         self.job = make_job(config_dir=self.config_dir)
+        # DM activé : sinon _needs_first_enrollment court-circuite à False
+        # (pas d'enrôlement quand le device management est désactivé).
+        self.job._device_management_enabled = MagicMock(return_value=True)
 
     def test_timer_fires_and_calls_enrollment(self):
         """_schedule_enrollment_check should eventually call _run_first_enrollment
@@ -182,7 +193,7 @@ class TestScheduleEnrollmentCheck(unittest.TestCase):
     def test_timer_skips_when_dismissed(self):
         """Timer should NOT call _run_first_enrollment when dismissed."""
         _write_config(self.config_dir, {"enrolled": False, "access_token": ""})
-        self.job._enrollment_dismissed = True
+        MainJob._enrollment_dismissed_cls = True
 
         with patch.object(self.job, '_run_first_enrollment') as mock_enroll:
             import threading
@@ -217,7 +228,7 @@ class TestScheduleEnrollmentCheck(unittest.TestCase):
 
             time.sleep(0.1)
 
-        self.assertTrue(self.job._enrollment_dismissed)
+        self.assertTrue(MainJob._enrollment_dismissed_cls)
 
 
 class TestRunFirstEnrollment(unittest.TestCase):
@@ -226,6 +237,9 @@ class TestRunFirstEnrollment(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
         self.job = make_job(config_dir=self.config_dir)
+        # DM activé : sinon _needs_first_enrollment court-circuite à False
+        # (pas d'enrôlement quand le device management est désactivé).
+        self.job._device_management_enabled = MagicMock(return_value=True)
 
     def test_returns_false_when_config_fetch_fails(self):
         """If config fetch returns None, enrollment should fail."""
