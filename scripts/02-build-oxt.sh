@@ -249,12 +249,24 @@ fi
 UNOPKG_BIN="$(find_unopkg "$OS_NAME")"
 [ -n "$UNOPKG_BIN" ] || { err "unopkg not found"; exit 1; }
 
+# Lock résiduel : si aucun LibreOffice ne tourne mais qu'un .lock traîne
+# (session précédente crashée), unopkg refuse de démarrer. On le retire.
+for LOCK_FILE in \
+  "$HOME/Library/Application Support/LibreOffice/4/.lock" \
+  "$HOME/.config/libreoffice/4/.lock"; do
+  if [ -f "$LOCK_FILE" ] && ! pgrep -f "soffice" >/dev/null 2>&1; then
+    warn "stale LibreOffice lock removed: $LOCK_FILE"
+    rm -f "$LOCK_FILE"
+  fi
+done
+
 log "Installing extension via unopkg..."
-"$UNOPKG_BIN" add --replace "$OUTPUT_PATH" >/dev/null 2>&1 || {
-  warn "--replace not supported, fallback to remove + add"
+# NB: certaines versions d'unopkg ne connaissent pas --replace ; -f (force) écrase.
+if ! "$UNOPKG_BIN" add -f "$OUTPUT_PATH" >/dev/null 2>&1; then
+  warn "add -f failed, fallback to remove + add"
   "$UNOPKG_BIN" remove "fr.gouv.interieur.mirai" >/dev/null 2>&1 || true
   printf "yes\n" | "$UNOPKG_BIN" add "$OUTPUT_PATH"
-}
+fi
 
 log "OK: Extension installed"
 if [ "$RESTART_LIBREOFFICE" = true ] && [ "$OS_NAME" = "Darwin" ]; then
