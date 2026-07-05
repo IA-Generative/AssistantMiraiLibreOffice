@@ -67,3 +67,32 @@ def test_report_update_status_sends_relay_headers():
 
     assert "x-relay-client" in captured["headers"]
     assert "x-relay-key" in captured["headers"]
+
+
+# ── Option B : install in-process (fallback géré par l'appelant) ─────
+
+def test_in_process_install_guard_rejects_bad_path():
+    """Chemin vide / inexistant → False sans toucher UNO ni le restart."""
+    job = make_job()
+    job._terminate_on_main_thread = MagicMock()  # sécurité (ne pas SIGTERM le test)
+    assert job._install_and_restart_in_process("") is False
+    assert job._install_and_restart_in_process("/nope/does-not-exist.oxt") is False
+    job._terminate_on_main_thread.assert_not_called()
+
+
+def test_in_process_install_degrades_gracefully(tmp_path):
+    """Fichier réel mais service de déploiement absent → False, aucun restart
+    (l'appelant retombera sur le script puis le message manuel)."""
+    import os
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".oxt")
+    os.close(fd)
+    try:
+        job = make_job()
+        job._terminate_on_main_thread = MagicMock()  # sécurité
+        job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = None
+        assert job._install_and_restart_in_process(path) is False
+        job._terminate_on_main_thread.assert_not_called()
+    finally:
+        os.remove(path)
