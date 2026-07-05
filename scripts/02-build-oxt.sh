@@ -105,6 +105,12 @@ while [ "$#" -gt 0 ]; do
     --output)
       OUTPUT_PATH="${2:-}"
       [ -n "$OUTPUT_PATH" ] || { err "Missing value for --output"; exit 1; }
+      # Normalize to absolute: the zip step runs after `cd "$STAGE_DIR"`, so a
+      # relative path would land in the temp dir and be lost on cleanup.
+      case "$OUTPUT_PATH" in
+        /*) : ;;
+        *)  OUTPUT_PATH="$PWD/$OUTPUT_PATH" ;;
+      esac
       shift 2
       ;;
     -h|--help)
@@ -140,6 +146,23 @@ cp -R "$ROOT_DIR/oxt/." "$STAGE_DIR/"
 cp "$ROOT_DIR/main.py" "$STAGE_DIR/main.py"
 cp -R "$ROOT_DIR/src" "$STAGE_DIR/src"
 cp "$CONFIG_IN_USE" "$STAGE_DIR/config.default.json"
+# ── Anti-fuite : la config embarquée d'un profil ONLINE doit être transport-only ──
+# (bootstrap_urls/config_path/enabled). Aucun SSO/keycloak/LLM baké : ils sont servis
+# par le DM au runtime. Un profil offline (enabled:false) est exempté (pas de DM).
+python3 - "$STAGE_DIR/config.default.json" <<'PY' || { err "Embedded config.default.json leaks non-transport keys (see above)"; exit 1; }
+import json, sys
+path = sys.argv[1]
+with open(path) as f:
+    cfg = json.load(f)
+allowed = {"configVersion", "enabled", "bootstrap_urls", "bootstrap_url", "bootstrap_insecure_urls", "config_path", "_note", "_description"}
+if cfg.get("enabled") is False:
+    sys.exit(0)  # offline tier: baking local config is legitimate
+leaked = sorted(k for k in cfg if k not in allowed)
+if leaked:
+    sys.stderr.write("LEAK: clés non-transport bakées dans config.default.json: %s\n" % ", ".join(leaked))
+    sys.exit(1)
+print("✓ embedded config.default.json: transport-only (no SSO/keycloak/LLM leak)")
+PY
 # Calc functions reference for formula generation
 mkdir -p "$STAGE_DIR/config"
 if [ -f "$ROOT_DIR/config/calc-functions.json" ]; then
@@ -226,12 +249,24 @@ fi
 UNOPKG_BIN="$(find_unopkg "$OS_NAME")"
 [ -n "$UNOPKG_BIN" ] || { err "unopkg not found"; exit 1; }
 
+# Lock résiduel : si aucun LibreOffice ne tourne mais qu'un .lock traîne
+# (session précédente crashée), unopkg refuse de démarrer. On le retire.
+for LOCK_FILE in \
+  "$HOME/Library/Application Support/LibreOffice/4/.lock" \
+  "$HOME/.config/libreoffice/4/.lock"; do
+  if [ -f "$LOCK_FILE" ] && ! pgrep -f "soffice" >/dev/null 2>&1; then
+    warn "stale LibreOffice lock removed: $LOCK_FILE"
+    rm -f "$LOCK_FILE"
+  fi
+done
+
 log "Installing extension via unopkg..."
-"$UNOPKG_BIN" add --replace "$OUTPUT_PATH" >/dev/null 2>&1 || {
-  warn "--replace not supported, fallback to remove + add"
+# NB: certaines versions d'unopkg ne connaissent pas --replace ; -f (force) écrase.
+if ! "$UNOPKG_BIN" add -f "$OUTPUT_PATH" >/dev/null 2>&1; then
+  warn "add -f failed, fallback to remove + add"
   "$UNOPKG_BIN" remove "fr.gouv.interieur.mirai" >/dev/null 2>&1 || true
   printf "yes\n" | "$UNOPKG_BIN" add "$OUTPUT_PATH"
-}
+fi
 
 log "OK: Extension installed"
 if [ "$RESTART_LIBREOFFICE" = true ] && [ "$OS_NAME" = "Darwin" ]; then

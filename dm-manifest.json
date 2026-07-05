@@ -26,6 +26,15 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.13",
+      "date": "2026-07-05",
+      "changes": [
+        "Transport : TLS non vérifié par-URL (bootstrap_insecure_urls) pour DM à cert privé (OCP)",
+        "Config : profil int → SSO mirai (realm/issuer résolus par le DM)",
+        "Failover multi-DM : DGX → OCP → passerelle Scaleway"
+      ]
+    },
+    {
       "version": "0.0.1.0.6",
       "date": "2026-04-13",
       "changes": [

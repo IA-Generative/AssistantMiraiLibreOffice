@@ -1,6 +1,9 @@
 {
+    "_note": "Tier PROD on-premise (DGX, réseau MI uniquement). Transport seul : le SSO (mirai) et le reste sont servis par le DM.",
     "configVersion": 1,
     "enabled": true,
-    "bootstrap_url": "https://onyxia.gpu.minint.fr/bootstrap",
+    "bootstrap_urls": [
+        "https://onyxia.gpu.minint.fr/bootstrap"
+    ],
     "config_path": "/config/mirai-libreoffice/config.json?profile=prod"
 }

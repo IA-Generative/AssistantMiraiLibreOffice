@@ -19,7 +19,11 @@
     "enabled": true,
     "telemetryEnabled": true,
     "telemetrylogJson": true,
-    "telemetryAuthorizationType": "Bearer"
+    "telemetryAuthorizationType": "Bearer",
+    "proxy_allow_insecure_ssl": true,
+    "api_type": "chat",
+    "is_openwebui": true,
+    "openai_compatibility": false
   },
   "local": {
     "_description": "Dev autonome, sans DM, sans Keycloak",
@@ -42,7 +46,7 @@
     "keycloak_allowed_redirect_uri": "${{KEYCLOAK_ALLOWED_REDIRECT_URI}}"
   },
   "int": {
-    "_description": "Intégration / recette",
+    "_description": "Intégration / recette — SSO mirai (résolu par le DM, comme prod)",
     "llm_base_urls": "${{LLM_BASE_URL}}",
     "llm_default_models": "${{DEFAULT_MODEL_NAME}}",
     "llm_api_tokens": "${{LLM_API_TOKEN}}",

@@ -364,6 +364,8 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self.config_ttl = 300
         self._config_last_failure_at = 0
         self._config_failure_backoff = 30
+        # Bootstrap DM base URL that last answered (failover winner across bootstrap_urls)
+        self._resolved_bootstrap_url = ""
         self._models_cache = None
         self._models_cache_key = None
         self._models_cache_loaded_at = 0
@@ -481,7 +483,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
     def _get_user_config_dir(self):
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
-        user_config_path = getattr(path_settings, "UserConfig")
+        user_config_path = getattr(path_settings, "UserConfig", None)
+        # PathSettings indisponible (ex. contexte de test mocké, ou état LO
+        # dégradé) : pas de chemin exploitable -> on évite d'écrire dans un
+        # dossier fantôme (repr de mock) ou dans le cwd.
+        if not isinstance(user_config_path, str):
+            return ""
         if user_config_path.startswith('file://'):
             user_config_path = str(uno.fileUrlToSystemPath(user_config_path))
         return user_config_path
@@ -529,12 +536,16 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 return self._secure_flow
             if self._secure_flow_init_error:
                 return None
-            bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            bootstrap_url = str(self._active_bootstrap_url() or "").strip()
             if not bootstrap_url:
                 return None
             plugin_uuid = self._ensure_plugin_uuid()
             device_name = str(self._get_config_from_file("device_name", "mirai-libreoffice") or "").strip() or "mirai-libreoffice"
             user_config_dir = self._get_user_config_dir()
+            if not user_config_dir:
+                # Pas de dossier de config exploitable -> flux sécurisé
+                # indisponible (évite d'écrire l'état dans un chemin fantôme).
+                return None
             state_path = os.path.join(user_config_dir, "secure_bootstrap_state.json")
             queue_path = os.path.join(user_config_dir, "telemetry_queue.json")
             try:
@@ -578,7 +589,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     def _secure_send_telemetry_payload(self, payload, _span_name=None):
         flow = self._get_secure_flow()
         if not flow:
-            bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            bootstrap_url = str(self._active_bootstrap_url() or "").strip()
             if bootstrap_url:
                 if not self._secure_legacy_fallback_logged:
                     self._secure_legacy_fallback_logged = True
@@ -803,6 +814,69 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         threading.Thread(target=_worker, daemon=True).start()
         return True
 
+    def _bootstrap_urls(self):
+        """Ordered list of DM bootstrap base URLs (failover).
+
+        Reads the `bootstrap_urls` list when present; otherwise falls back to the
+        legacy single `bootstrap_url` string. Empty entries are dropped.
+        """
+        result = []
+        urls = self._get_config_from_file("bootstrap_urls", None)
+        if isinstance(urls, (list, tuple)):
+            for item in urls:
+                value = str(item or "").strip()
+                if value and value not in result:
+                    result.append(value)
+        if not result:
+            legacy = str(self._get_config_from_file("bootstrap_url", "") or "").strip()
+            if legacy:
+                result.append(legacy)
+        return result
+
+    def _active_bootstrap_url(self):
+        """The DM base URL that last answered (failover winner), else the first
+        configured one. Telemetry / enroll / update must target the same DM that
+        served the config, so they read this rather than the raw key.
+        """
+        resolved = str(getattr(self, "_resolved_bootstrap_url", "") or "").strip()
+        if resolved:
+            return resolved
+        urls = self._bootstrap_urls()
+        return urls[0] if urls else ""
+
+    def _is_insecure_bootstrap_url(self, url):
+        """True when `url`'s host is declared in `bootstrap_insecure_urls`.
+
+        This is the per-URL `-k` allowlist: an internal cluster route (e.g. an
+        OCP bootstrap behind a private CA) can skip cert verification while the
+        public DMs stay verified. Matching is by hostname so it holds whether we
+        pass a bare base URL or a full request URL (base + config_path).
+        """
+        patterns = self._get_config_from_file("bootstrap_insecure_urls", None)
+        if not isinstance(patterns, (list, tuple)):
+            return False
+        try:
+            target_host = (urllib.parse.urlsplit(str(url or "").strip()).hostname or "").lower()
+        except Exception:
+            target_host = ""
+        if not target_host:
+            return False
+        for item in patterns:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            host = ""
+            try:
+                host = urllib.parse.urlsplit(value).hostname or ""
+            except Exception:
+                host = ""
+            if not host:
+                # Tolerate bare host entries written without a scheme.
+                host = value.split("/")[0]
+            if host and host.lower() == target_host:
+                return True
+        return False
+
     def _fetch_config(self, force=False):
         if not force and not self._device_management_enabled():
             log_to_file("DM config fetch skipped: device management disabled")
@@ -824,13 +898,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("DM config fetch skipped: backoff active after recent failure")
             return None
 
-        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
-        if not base_url:
-            log_to_file("DM config fetch skipped: bootstrap_url is empty")
+        base_urls = self._bootstrap_urls()
+        if not base_urls:
+            log_to_file("DM config fetch skipped: no bootstrap_url(s) configured")
             return None
         config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
-        url = base_url.rstrip("/") + "/" + config_path.lstrip("/")
-        log_to_file(f"DM bootstrap URL: {url}")
+        log_to_file(f"DM bootstrap URLs (failover order): {base_urls}")
 
         self._fetching_config = True
         try:
@@ -842,7 +915,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file("DM config fetch: proxy disabled, skipping proxy retry")
 
             last_error = "unknown"
-            for mode, use_proxy in attempts:
+            combos = [
+                (base, mode, use_proxy)
+                for base in base_urls
+                for (mode, use_proxy) in attempts
+            ]
+            for base_url, mode, use_proxy in combos:
+                url = base_url.rstrip("/") + "/" + config_path.lstrip("/")
                 try:
                     log_to_file(f"DM config fetch attempt: mode={mode} url={url}")
                     headers = {"Accept": "application/json"}
@@ -860,7 +939,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     request = urllib.request.Request(url, headers=_with_user_agent(headers))
                     _relay_present = "X-Relay-Client" in headers
                     log_to_file(f"DM config fetch headers: relay={'yes' if _relay_present else 'no'} keys={list(headers.keys())}")
-                    with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=use_proxy) as response:
+                    with self._urlopen(request, context=self.get_ssl_context(base_url), timeout=10, use_proxy=use_proxy) as response:
                         payload = response.read().decode("utf-8")
                     log_to_file(f"DM bootstrap raw response ({mode}): {payload[:4000]}")
                     config_data = json.loads(payload)
@@ -885,6 +964,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         self.config_cache = config_data
                         self.config_loaded_at = now
                         self._config_last_failure_at = 0
+                        self._resolved_bootstrap_url = base_url
                         self._persist_bootstrap_config(config_data)
                         return config_data
                     last_error = f"Invalid JSON root type: {type(config_data).__name__}"
@@ -1042,7 +1122,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         campaign_id = directive.get("campaign_id")
         version_before = self._get_extension_version()
 
-        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip().rstrip("/")
+        base_url = str(self._active_bootstrap_url() or "").strip().rstrip("/")
         if not base_url or not artifact_url:
             log_to_file("_perform_update: missing base_url or artifact_url")
             return
@@ -1403,7 +1483,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
     def _report_update_status(self, campaign_id, status, version_before, version_after, error_detail=""):
         """Report update status back to device-management server."""
-        base_url = str(self._get_config_from_file("bootstrap_url", "")).strip().rstrip("/")
+        base_url = str(self._active_bootstrap_url() or "").strip().rstrip("/")
         if not base_url:
             return
         endpoint = base_url + "/update/status"
@@ -2963,7 +3043,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("Device management token email verification failed")
             return
 
-        bootstrap_url = str(self._get_config_from_file("bootstrap_url", "") or "").strip().rstrip("/")
+        bootstrap_url = str(self._active_bootstrap_url() or "").strip().rstrip("/")
         settings = self._select_settings(config_data) if isinstance(config_data, dict) else {}
 
         enroll_endpoint = ""
@@ -3736,7 +3816,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         except Exception:
             pass
         config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
-        bootstrap_url = str(self._get_config_from_file("bootstrap_url", "")).strip()
+        bootstrap_url = str(self._active_bootstrap_url() or "").strip()
         normalized_url = f"{bootstrap_url.rstrip('/')}/{config_path.lstrip('/')}"
         log_to_file(f"Reload config URL computed: {normalized_url}")
         log_to_file(f"Reload config: url={normalized_url} keys={list(settings.keys())}")
@@ -3938,15 +4018,20 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             text = str(value).strip()
             if not text:
                 continue
+            # F1 — Le DM est autoritatif sur le SSO : on écrase systématiquement la
+            # valeur locale (potentiellement un placeholder baké) avec celle servie par
+            # le DM, sinon un placeholder non vide gagnerait à jamais (bug `mysso`).
             try:
                 current = str(self._get_config_from_file(target_key, "") or "").strip()
             except Exception:
                 current = ""
-            if not current:
-                try:
-                    self.set_config(target_key, text)
-                except Exception:
-                    pass
+            if text == current:
+                continue
+            try:
+                self.set_config(target_key, text)
+                log_to_file(f"[keycloak-sync] {target_key} updated from DM")
+            except Exception:
+                pass
 
     def _sync_keycloak_from_config(self, config_data):
         settings = None
@@ -4269,12 +4354,22 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return delta.get("content", ""), chunk["choices"][0].get("finish_reason")
         return "", None
 
-    def get_ssl_context(self):
+    def get_ssl_context(self, target_url=None):
         """
         Create an SSL context for HTTP calls.
         If available, load the bundled CA chain used by bootstrap endpoints.
+
+        Cert verification is skipped when the global `proxy_allow_insecure_ssl`
+        flag is set, OR when the target URL's host is in `bootstrap_insecure_urls`
+        (per-URL `-k`). `target_url` defaults to the active bootstrap URL, so
+        enroll/telemetry/update inherit the per-URL decision from whichever DM
+        served the config.
         """
         allow_insecure = self._as_bool(self._get_config_from_file("proxy_allow_insecure_ssl", False))
+        if not allow_insecure:
+            check_url = str(target_url or self._active_bootstrap_url() or "").strip()
+            if check_url and self._is_insecure_bootstrap_url(check_url):
+                allow_insecure = True
         ssl_context = ssl.create_default_context()
         if allow_insecure:
             ssl_context.check_hostname = False
@@ -7835,7 +7930,7 @@ EDITED VERSION:
                 f"telemetryEndpoint={self._get_config_from_file('telemetryEndpoint','')} "
                 f"telemetryAuthorizationType={self._get_config_from_file('telemetryAuthorizationType','')} "
                 f"telemetryKey={_mask_value(self._get_config_from_file('telemetryKey',''))} "
-                f"bootstrap_url={self._get_config_from_file('bootstrap_url','')} "
+                f"bootstrap_url={self._active_bootstrap_url()} "
                 f"config_path={self._get_config_from_file('config_path','')} "
                 f"enabled={self._get_config_from_file('enabled', False)} "
                 f"llm_default_models={self._get_config_from_file('llm_default_models','')}"
