@@ -833,6 +833,30 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 result.append(legacy)
         return result
 
+    def _failover_ordered_urls(self):
+        """Bootstrap URLs with the DM that last answered tried first.
+
+        Perf: avoids re-hitting a dead earlier URL (e.g. an unreachable DGX from
+        an OCP-only host) and paying its full timeout on every config fetch. The
+        winner is remembered in-memory (_resolved_bootstrap_url) and persisted
+        (last_bootstrap_url) so it survives the per-action re-instantiation of
+        MainJob.
+        """
+        urls = self._bootstrap_urls()
+        if len(urls) < 2:
+            return urls
+        preferred = str(
+            getattr(self, "_resolved_bootstrap_url", "")
+            or self._get_config_from_file("last_bootstrap_url", "")
+            or ""
+        ).strip().rstrip("/")
+        if not preferred:
+            return urls
+        front = [u for u in urls if u.rstrip("/") == preferred]
+        if not front:
+            return urls
+        return front + [u for u in urls if u.rstrip("/") != preferred]
+
     def _active_bootstrap_url(self):
         """The DM base URL that last answered (failover winner), else the first
         configured one. Telemetry / enroll / update must target the same DM that
@@ -885,6 +909,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("DM config fetch skipped: recursion guard active")
             return None
         now = time.time()
+        self._hydrate_config_cache()
         if not force and self.config_cache and (now - self.config_loaded_at) < self.config_ttl:
             return self.config_cache
         if (
@@ -898,11 +923,17 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("DM config fetch skipped: backoff active after recent failure")
             return None
 
-        base_urls = self._bootstrap_urls()
+        base_urls = self._failover_ordered_urls()
         if not base_urls:
             log_to_file("DM config fetch skipped: no bootstrap_url(s) configured")
             return None
         config_path = str(self._get_config_from_file("config_path", "/config/config.json"))
+        try:
+            fetch_timeout = int(self._get_config_from_file("config_fetch_timeout_seconds", 4))
+        except Exception:
+            fetch_timeout = 4
+        if fetch_timeout <= 0:
+            fetch_timeout = 4
         log_to_file(f"DM bootstrap URLs (failover order): {base_urls}")
 
         self._fetching_config = True
@@ -939,7 +970,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     request = urllib.request.Request(url, headers=_with_user_agent(headers))
                     _relay_present = "X-Relay-Client" in headers
                     log_to_file(f"DM config fetch headers: relay={'yes' if _relay_present else 'no'} keys={list(headers.keys())}")
-                    with self._urlopen(request, context=self.get_ssl_context(base_url), timeout=10, use_proxy=use_proxy) as response:
+                    with self._urlopen(request, context=self.get_ssl_context(base_url), timeout=fetch_timeout, use_proxy=use_proxy) as response:
                         payload = response.read().decode("utf-8")
                     log_to_file(f"DM bootstrap raw response ({mode}): {payload[:4000]}")
                     config_data = json.loads(payload)
@@ -965,7 +996,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         self.config_loaded_at = now
                         self._config_last_failure_at = 0
                         self._resolved_bootstrap_url = base_url
+                        try:
+                            if self._get_config_from_file("last_bootstrap_url", "") != base_url:
+                                self.set_config("last_bootstrap_url", base_url)
+                        except Exception:
+                            pass
                         self._persist_bootstrap_config(config_data)
+                        self._persist_config_cache(config_data)
                         return config_data
                     last_error = f"Invalid JSON root type: {type(config_data).__name__}"
                     log_to_file(f"Failed to fetch device management config ({mode}): {last_error}")
@@ -1032,6 +1069,49 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file("Bootstrap config persisted to local file")
         except Exception as e:
             log_to_file(f"Failed to persist bootstrap config: {str(e)}")
+
+    def _config_cache_path(self):
+        """Path of the on-disk cache of the full enriched config_data."""
+        try:
+            base = self._get_user_config_dir()
+            return os.path.join(base, "config_cache.json") if base else ""
+        except Exception:
+            return ""
+
+    def _persist_config_cache(self, config_data):
+        """Persist the full enriched config_data + timestamp so a fresh MainJob
+        instance (LO re-instantiates the job per action) can reuse it without a
+        blocking network fetch."""
+        path = self._config_cache_path()
+        if not path or not isinstance(config_data, dict):
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"ts": time.time(), "config_data": config_data}, f)
+        except Exception as exc:
+            log_to_file(f"config cache persist failed: {str(exc)}")
+
+    def _hydrate_config_cache(self):
+        """Load the last persisted config_data into the in-memory cache when it
+        is still fresh (< config_ttl), so per-action instances don't block on a
+        network fetch. The background refresh keeps it up to date."""
+        if self.config_cache:
+            return
+        path = self._config_cache_path()
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                blob = json.load(f)
+            ts = float(blob.get("ts", 0))
+            data = blob.get("config_data")
+            age = time.time() - ts
+            if isinstance(data, dict) and 0 <= age < self.config_ttl:
+                self.config_cache = data
+                self.config_loaded_at = ts
+                log_to_file(f"config cache hydrated from disk (age {int(age)}s)")
+        except Exception as exc:
+            log_to_file(f"config cache hydrate failed: {str(exc)}")
 
     # ── Update & Feature Toggling (schema_version 2) ─────────────────
 
@@ -8904,6 +8984,11 @@ EDITED VERSION:
             self._schedule_config_refresh(force=True, reason=f"trigger:{action}")
         except Exception:
             pass
+
+        # Reuse a still-fresh persisted config so the action starts immediately
+        # instead of blocking on a network fetch (the async refresh above keeps
+        # it up to date). Only block when we have nothing cached at all.
+        self._hydrate_config_cache()
 
         # Wait for any in-progress config fetch to finish (e.g. from __init__)
         # so the trigger has access to config/token for LLM calls
