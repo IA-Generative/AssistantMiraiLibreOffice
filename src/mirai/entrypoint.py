@@ -2275,16 +2275,26 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
     def _keycloak_endpoints(self, config_data):
         keycloak = self._keycloak_config(config_data)
-        auth_endpoint = self._keycloak_endpoint(
-            keycloak,
-            "authorization_endpoint",
-            "authorizationEndpoint",
-            "auth_endpoint",
-            "authEndpoint",
-            "auth_url",
-            "authUrl",
-            "auth"
+
+        # ── Auth endpoint: always from keycloakIssuerUrl + realm ──────────
+        # The PKCE authorization step opens the browser — it must navigate
+        # to the real Keycloak SSO, never to the relay proxy.
+        auth_endpoint = ""
+        base_url = (
+            self._get_config_from_file("keycloakIssuerUrl", "")
+            or self._get_config_from_file("keycloak_base_url", "")
         )
+        realm = (
+            self._get_config_from_file("keycloakRealm", "")
+            or self._get_config_from_file("keycloak_realm", "")
+        )
+        realm_base = self._normalize_keycloak_realm_base(base_url, realm)
+        if realm_base:
+            auth_endpoint = f"{realm_base}/protocol/openid-connect/auth"
+
+        # ── Token endpoint: prefer explicit (may point to relay) ──────────
+        # Token exchange and refresh are programmatic HTTP calls from the
+        # plugin — they can go through the relay proxy when configured.
         token_endpoint = self._keycloak_endpoint(
             keycloak,
             "token_endpoint",
@@ -2293,45 +2303,16 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             "tokenUrl",
             "token"
         )
-        if auth_endpoint and token_endpoint:
-            return auth_endpoint, token_endpoint
-
-        auth_endpoint = (
-            self._get_config_from_file("keycloakAuthorizationEndpoint", "")
-            or self._get_config_from_file("keycloak_authorization_endpoint", "")
-            or self._get_config_from_file("authorization_endpoint", "")
-            or self._get_config_from_file("authorizationEndpoint", "")
-        )
-        token_endpoint = (
-            self._get_config_from_file("keycloakTokenEndpoint", "")
-            or self._get_config_from_file("keycloak_token_endpoint", "")
-            or self._get_config_from_file("token_endpoint", "")
-            or self._get_config_from_file("tokenEndpoint", "")
-        )
-        if auth_endpoint and token_endpoint:
-            return auth_endpoint, token_endpoint
-
-        # F1 — Le SSO servi par le DM (config_data) est autoritatif : on dérive
-        # issuer/realm du bloc keycloak du DM en priorité, et seulement à défaut du
-        # fichier local (qui peut contenir un placeholder baké).
-        base_url = (
-            self._keycloak_endpoint(
-                keycloak,
-                "issuerUrl", "issuerURL", "keycloakIssuerUrl", "issuer_url",
-                "issuer", "keycloak_base_url", "baseUrl", "base_url", "url",
+        if not token_endpoint:
+            token_endpoint = (
+                self._get_config_from_file("keycloakTokenEndpoint", "")
+                or self._get_config_from_file("keycloak_token_endpoint", "")
+                or self._get_config_from_file("token_endpoint", "")
+                or self._get_config_from_file("tokenEndpoint", "")
             )
-            or self._get_config_from_file("keycloakIssuerUrl", "")
-            or self._get_config_from_file("keycloak_base_url", "")
-        )
-        realm = (
-            self._keycloak_endpoint(keycloak, "realm", "keycloakRealm", "keycloak_realm")
-            or self._get_config_from_file("keycloakRealm", "")
-            or self._get_config_from_file("keycloak_realm", "")
-        )
-        realm_base = self._normalize_keycloak_realm_base(base_url, realm)
-        if realm_base:
-            auth_endpoint = f"{realm_base}/protocol/openid-connect/auth"
+        if not token_endpoint and realm_base:
             token_endpoint = f"{realm_base}/protocol/openid-connect/token"
+
         return auth_endpoint, token_endpoint
 
     def _request_token(self, token_endpoint, data):
@@ -2346,11 +2327,28 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 f"redirect_uri={data.get('redirect_uri','')}"
             )
             encoded = urllib.parse.urlencode(data).encode("utf-8")
-            request = urllib.request.Request(
-                token_endpoint,
-                data=encoded,
-                headers=_with_user_agent({"Content-Type": "application/x-www-form-urlencoded"})
-            )
+
+            # WAF-safe mode: if token_endpoint is the /auth/token proxy,
+            # wrap the form payload in a JSON envelope with base64 encoding.
+            # This avoids the WAF blocking POST to URLs containing
+            # /openid-connect/token.
+            if token_endpoint.rstrip("/").endswith("/auth/token"):
+                envelope = json.dumps({
+                    "p": base64.b64encode(encoded).decode("ascii")
+                }).encode("utf-8")
+                request = urllib.request.Request(
+                    token_endpoint,
+                    data=envelope,
+                    headers=_with_user_agent({"Content-Type": "application/json"})
+                )
+                log_to_file("Using WAF-safe /auth/token envelope")
+            else:
+                request = urllib.request.Request(
+                    token_endpoint,
+                    data=encoded,
+                    headers=_with_user_agent({"Content-Type": "application/x-www-form-urlencoded"})
+                )
+
             with self._urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
                 payload = response.read().decode("utf-8")
             return json.loads(payload)
