@@ -1,9 +1,9 @@
 {
+    "_note": "Tier DEV (DM en docker local sur le port host 8089 ; 3001 = port container, en collision avec agent-builder cf. owuicore docker-utilise.md §2.10). Transport seul : le SSO et le reste sont servis par le DM via ?profile=dev.",
     "configVersion": 1,
     "enabled": true,
-    "bootstrap_url": "http://localhost:8082",
-    "config_path": "/config/mirai-libreoffice/config.json?profile=dev",
-    "keycloakIssuerUrl": "http://localhost:8082/realms/openwebui",
-    "keycloakRealm": "openwebui",
-    "keycloakClientId": "bootstrap-iassistant"
+    "bootstrap_urls": [
+        "http://localhost:8089"
+    ],
+    "config_path": "/config/mirai-libreoffice/config.json?profile=dev"
 }

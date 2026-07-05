@@ -1,10 +1,9 @@
 {
-    "_note": "Copiez ce fichier en config.default.integration.json et renseignez les URLs réelles.",
+    "_note": "Copiez ce fichier en config.default.integration.json et renseignez les URLs réelles. Transport seul : ne PAS baker de keycloak/SSO ni de LLM ici, ils sont servis par le DM.",
     "configVersion": 1,
     "enabled": true,
-    "bootstrap_url": "https://bootstrap.change-me.example.com",
-    "config_path": "/config/mirai-libreoffice/config.json?profile=integration",
-    "keycloakIssuerUrl": "https://sso.change-me.example.com/realms/openwebui",
-    "keycloakRealm": "openwebui",
-    "keycloakClientId": "bootstrap-iassistant"
+    "bootstrap_urls": [
+        "https://bootstrap.change-me.example.com"
+    ],
+    "config_path": "/config/mirai-libreoffice/config.json?profile=int"
 }
