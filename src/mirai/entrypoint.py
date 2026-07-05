@@ -1632,9 +1632,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 buttons = MSG_BUTTONS.BUTTONS_YES_NO
             else:
                 buttons = MSG_BUTTONS.BUTTONS_OK
+            # IMPORTANT : un INFOBOX (type 1) n'affiche QU'UN bouton OK et ignore
+            # BUTTONS_YES_NO → le bouton « Oui » n'apparaissait pas. Pour un vrai
+            # Oui/Non il faut un QUERYBOX (type 4), comme le prompt de MAJ.
+            box_type = 4 if open_folder_offered else 1  # QUERYBOX sinon INFOBOX
             box = toolkit.createMessageBox(
                 parent,
-                1,  # MessageBoxType.INFOBOX
+                box_type,
                 buttons,
                 "MIrAI — Mise à jour bloquée",
                 msg,
