@@ -1660,6 +1660,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             try:
                 data = json.dumps(payload).encode("utf-8")
                 headers = {"Content-Type": "application/json"}
+                # /update/status requires relay credentials (DM VULN-007), same
+                # as /config and telemetry. Without these headers the DM returns
+                # 401 and the campaign never records this device's outcome.
+                headers.update(self._relay_headers())
                 access_token = str(self._get_config_from_file("access_token", "") or "")
                 if access_token:
                     headers["Authorization"] = f"Bearer {access_token}"

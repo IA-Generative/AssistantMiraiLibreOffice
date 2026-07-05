@@ -40,3 +40,30 @@ def test_notify_update_blocked_never_raises():
     job = make_job()
     # Ne lève pas, même si le toolkit/MSG_BUTTONS n'est pas pleinement stubbé.
     assert job._notify_update_blocked("0.0.1.0.14", r"C:\x\pending_update\mirai_update.bat") is None
+
+
+def test_report_update_status_sends_relay_headers():
+    """/update/status exige des relay-creds (DM VULN-007) : le POST doit porter
+    X-Relay-Client / X-Relay-Key, sinon 401 (bug observé sur log MI)."""
+    job = make_job()
+    job._active_bootstrap_url = MagicMock(return_value="https://dm")
+    job._ensure_plugin_uuid = MagicMock(return_value="uuid-1")
+    job._get_config_from_file = MagicMock(return_value="")   # pas d'access_token
+    job.get_ssl_context = MagicMock(return_value=None)
+    job._relay_headers = MagicMock(return_value={"X-Relay-Client": "rc_x", "X-Relay-Key": "k"})
+
+    captured = {}
+
+    def _fake_urlopen(req, **kw):
+        captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+        resp = MagicMock()
+        resp.read.return_value = b"{}"
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = MagicMock(return_value=False)
+        return resp
+
+    job._urlopen = _fake_urlopen
+    job._report_update_status(1, "installed", "0.0.1.0.13", "0.0.1.0.14")
+
+    assert "x-relay-client" in captured["headers"]
+    assert "x-relay-key" in captured["headers"]
