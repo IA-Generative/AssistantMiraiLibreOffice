@@ -39,7 +39,7 @@ FORBIDDEN_SUFFIXES = (".pyc", ".DS_Store")
 # Clés autorisées dans la config embarquée d'un profil ONLINE (cf. 02-build-oxt.sh).
 TRANSPORT_ONLY_KEYS = {
     "configVersion", "enabled", "bootstrap_urls", "bootstrap_url",
-    "config_path", "_note", "_description",
+    "bootstrap_insecure_urls", "config_path", "_note", "_description",
 }
 
 
