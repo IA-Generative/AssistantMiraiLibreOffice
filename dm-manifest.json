@@ -26,6 +26,15 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.14",
+      "date": "2026-07-05",
+      "changes": [
+        "Perf : failover — essaie en premier le DM qui a répondu en dernier (mémorisé + persisté)",
+        "Perf : timeout de fetch config 10s → 4s (configurable via config_fetch_timeout_seconds)",
+        "Perf : cache-first non bloquant — les fonctions LLM démarrent sans attendre le réseau"
+      ]
+    },
+    {
       "version": "0.0.1.0.13",
       "date": "2026-07-05",
       "changes": [
