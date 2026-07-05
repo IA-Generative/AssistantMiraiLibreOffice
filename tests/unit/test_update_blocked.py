@@ -96,3 +96,70 @@ def test_in_process_install_degrades_gracefully(tmp_path):
         job._terminate_on_main_thread.assert_not_called()
     finally:
         os.remove(path)
+
+
+# ── Bouton « Ouvrir le dossier » : ouverture native, sans cmd.exe ────
+
+def test_open_folder_native_uses_shell_execute():
+    """Ouvre le dossier via UNO SystemShellExecute (ShellExecute) — jamais un
+    subprocess/cmd.exe. On vérifie l'URL file:// et le flag NO_SYSTEM_ERROR_MESSAGE."""
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    shell = MagicMock()
+    job = make_job()
+    job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = shell
+
+    assert job._open_folder_native(d) is True
+    shell.execute.assert_called_once()
+    args = shell.execute.call_args.args
+    assert args[0].startswith("file://")          # URL du dossier
+    assert d in args[0]
+    assert args[2] == 1                            # NO_SYSTEM_ERROR_MESSAGE
+
+
+def test_open_folder_native_rejects_bad_path():
+    """Chemin vide / inexistant → False, sans instancier le service shell."""
+    job = make_job()
+    assert job._open_folder_native("") is False
+    assert job._open_folder_native("/nope/does-not-exist-xyz") is False
+
+
+def test_notify_update_blocked_opens_folder_on_yes():
+    """Quand le .oxt téléchargé existe et que l'utilisateur clique « Oui » (result==2),
+    la boîte déclenche l'ouverture native du dossier."""
+    import os
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "mirai_update.oxt"), "w").close()
+    script = os.path.join(d, "mirai_update.bat")
+
+    job = make_job()
+    job._open_folder_native = MagicMock()
+    # createMessageBox(...).execute() → 2 (MessageBoxResults.YES)
+    toolkit = job.ctx.getServiceManager.return_value.createInstance.return_value
+    toolkit.createMessageBox.return_value.execute.return_value = 2
+
+    job._notify_update_blocked("0.0.1.0.16", script)
+
+    job._open_folder_native.assert_called_once_with(d)
+
+
+def test_notify_update_blocked_no_open_on_no():
+    """« Non » (result==3) : aucune ouverture de dossier."""
+    import os
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "mirai_update.oxt"), "w").close()
+    script = os.path.join(d, "mirai_update.bat")
+
+    job = make_job()
+    job._open_folder_native = MagicMock()
+    toolkit = job.ctx.getServiceManager.return_value.createInstance.return_value
+    toolkit.createMessageBox.return_value.execute.return_value = 3
+
+    job._notify_update_blocked("0.0.1.0.16", script)
+
+    job._open_folder_native.assert_not_called()
