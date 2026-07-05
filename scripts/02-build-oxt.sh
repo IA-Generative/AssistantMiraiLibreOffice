@@ -154,7 +154,7 @@ import json, sys
 path = sys.argv[1]
 with open(path) as f:
     cfg = json.load(f)
-allowed = {"configVersion", "enabled", "bootstrap_urls", "bootstrap_url", "config_path", "_note", "_description"}
+allowed = {"configVersion", "enabled", "bootstrap_urls", "bootstrap_url", "bootstrap_insecure_urls", "config_path", "_note", "_description"}
 if cfg.get("enabled") is False:
     sys.exit(0)  # offline tier: baking local config is legitimate
 leaked = sorted(k for k in cfg if k not in allowed)

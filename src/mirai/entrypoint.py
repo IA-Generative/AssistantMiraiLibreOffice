@@ -844,6 +844,39 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         urls = self._bootstrap_urls()
         return urls[0] if urls else ""
 
+    def _is_insecure_bootstrap_url(self, url):
+        """True when `url`'s host is declared in `bootstrap_insecure_urls`.
+
+        This is the per-URL `-k` allowlist: an internal cluster route (e.g. an
+        OCP bootstrap behind a private CA) can skip cert verification while the
+        public DMs stay verified. Matching is by hostname so it holds whether we
+        pass a bare base URL or a full request URL (base + config_path).
+        """
+        patterns = self._get_config_from_file("bootstrap_insecure_urls", None)
+        if not isinstance(patterns, (list, tuple)):
+            return False
+        try:
+            target_host = (urllib.parse.urlsplit(str(url or "").strip()).hostname or "").lower()
+        except Exception:
+            target_host = ""
+        if not target_host:
+            return False
+        for item in patterns:
+            value = str(item or "").strip()
+            if not value:
+                continue
+            host = ""
+            try:
+                host = urllib.parse.urlsplit(value).hostname or ""
+            except Exception:
+                host = ""
+            if not host:
+                # Tolerate bare host entries written without a scheme.
+                host = value.split("/")[0]
+            if host and host.lower() == target_host:
+                return True
+        return False
+
     def _fetch_config(self, force=False):
         if not force and not self._device_management_enabled():
             log_to_file("DM config fetch skipped: device management disabled")
@@ -906,7 +939,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     request = urllib.request.Request(url, headers=_with_user_agent(headers))
                     _relay_present = "X-Relay-Client" in headers
                     log_to_file(f"DM config fetch headers: relay={'yes' if _relay_present else 'no'} keys={list(headers.keys())}")
-                    with self._urlopen(request, context=self.get_ssl_context(), timeout=10, use_proxy=use_proxy) as response:
+                    with self._urlopen(request, context=self.get_ssl_context(base_url), timeout=10, use_proxy=use_proxy) as response:
                         payload = response.read().decode("utf-8")
                     log_to_file(f"DM bootstrap raw response ({mode}): {payload[:4000]}")
                     config_data = json.loads(payload)
@@ -4323,12 +4356,22 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return delta.get("content", ""), chunk["choices"][0].get("finish_reason")
         return "", None
 
-    def get_ssl_context(self):
+    def get_ssl_context(self, target_url=None):
         """
         Create an SSL context for HTTP calls.
         If available, load the bundled CA chain used by bootstrap endpoints.
+
+        Cert verification is skipped when the global `proxy_allow_insecure_ssl`
+        flag is set, OR when the target URL's host is in `bootstrap_insecure_urls`
+        (per-URL `-k`). `target_url` defaults to the active bootstrap URL, so
+        enroll/telemetry/update inherit the per-URL decision from whichever DM
+        served the config.
         """
         allow_insecure = self._as_bool(self._get_config_from_file("proxy_allow_insecure_ssl", False))
+        if not allow_insecure:
+            check_url = str(target_url or self._active_bootstrap_url() or "").strip()
+            if check_url and self._is_insecure_bootstrap_url(check_url):
+                allow_insecure = True
         ssl_context = ssl.create_default_context()
         if allow_insecure:
             ssl_context.check_hostname = False
