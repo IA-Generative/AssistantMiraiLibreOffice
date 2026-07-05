@@ -26,6 +26,14 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.17",
+      "date": "2026-07-05",
+      "changes": [
+        "Mise à jour bloquée : bouton « Ouvrir le dossier » qui ouvre l'explorateur sur le fichier téléchargé, en natif (SystemShellExecute) — sans invite de commande, compatible postes durcis (GPO qui bloque cmd.exe)",
+        "Ajout d'un self-test interne (MIRAI_SELFTEST_UPDATE_BLOCKED) pour valider la boîte « mise à jour bloquée » sans déployer de MAJ"
+      ]
+    },
+    {
       "version": "0.0.1.0.15",
       "date": "2026-07-05",
       "changes": [
