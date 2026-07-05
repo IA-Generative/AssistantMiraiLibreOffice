@@ -1578,14 +1578,21 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 return
             toolkit = self.ctx.getServiceManager().createInstance("com.sun.star.awt.Toolkit")
             parent = active_frame.getContainerWindow()
+            oxt_line = oxt or "le dossier pending_update de votre profil LibreOffice"
             msg = (
                 f"La mise à jour MIrAI {target_version} a été téléchargée et\n"
-                "vérifiée, mais son installation automatique a été bloquée par la\n"
-                "politique de sécurité de ce poste.\n\n"
-                "Elle ne sera plus reproposée automatiquement.\n\n"
-                "Pour terminer : contactez votre support / administrateur, ou\n"
-                "installez l'extension manuellement depuis :\n"
-                f"{oxt or 'le dossier pending_update de votre profil LibreOffice'}"
+                "vérifiée, mais son installation automatique a été bloquée par\n"
+                "la politique de sécurité de ce poste.\n\n"
+                "Elle ne sera plus reproposée automatiquement — vous pouvez\n"
+                "l'installer vous-même en quelques clics :\n\n"
+                "── Installation manuelle ─────────────────────────\n"
+                "1. Menu  Outils ▸ Gestionnaire des extensions…\n"
+                "2. Cliquez sur « Ajouter »\n"
+                "3. Sélectionnez le fichier :\n"
+                f"      {oxt_line}\n"
+                "4. Acceptez la licence.\n"
+                "5. Fermez puis rouvrez LibreOffice.\n\n"
+                "En cas d'échec, contactez votre support / administrateur."
             )
             box = toolkit.createMessageBox(
                 parent,
