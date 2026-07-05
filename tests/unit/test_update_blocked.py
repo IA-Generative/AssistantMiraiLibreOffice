@@ -163,3 +163,39 @@ def test_notify_update_blocked_no_open_on_no():
     job._notify_update_blocked("0.0.1.0.16", script)
 
     job._open_folder_native.assert_not_called()
+
+
+def test_notify_update_blocked_uses_querybox_when_folder_offered():
+    """Régression : avec un dossier connu, la boîte doit être un QUERYBOX (type 4)
+    pour afficher Oui/Non. Un INFOBOX (type 1) n'affiche qu'OK → le bouton « Oui »
+    ne s'affichait pas (bug observé en test réel sur la 0.0.1.0.18)."""
+    import os
+    import tempfile
+
+    d = tempfile.mkdtemp()
+    open(os.path.join(d, "mirai_update.oxt"), "w").close()
+    script = os.path.join(d, "mirai_update.bat")
+
+    job = make_job()
+    job._open_folder_native = MagicMock()
+    toolkit = job.ctx.getServiceManager.return_value.createInstance.return_value
+    toolkit.createMessageBox.return_value.execute.return_value = 3
+
+    job._notify_update_blocked("0.0.1.0.18", script)
+
+    args = toolkit.createMessageBox.call_args.args
+    assert args[1] == 4, "doit être un QUERYBOX (4) pour afficher Oui/Non"
+
+
+def test_notify_update_blocked_uses_infobox_without_folder():
+    """Sans dossier connu : INFOBOX (type 1) + OK seul (rien à ouvrir)."""
+    import tempfile
+
+    job = make_job(config_dir=tempfile.mkdtemp())  # pas de sous-dossier pending_update
+    toolkit = job.ctx.getServiceManager.return_value.createInstance.return_value
+    toolkit.createMessageBox.return_value.execute.return_value = 1
+
+    job._notify_update_blocked("0.0.1.0.18", r"C:\nope\pending_update\mirai_update.bat")
+
+    args = toolkit.createMessageBox.call_args.args
+    assert args[1] == 1, "doit rester un INFOBOX (1) quand il n'y a pas de dossier à ouvrir"
