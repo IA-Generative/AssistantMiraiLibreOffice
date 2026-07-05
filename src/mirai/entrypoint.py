@@ -5889,6 +5889,17 @@ EDITED VERSION:
              "TextColor": _UI["text_secondary"],
              "BackgroundColor": _UI["bg_section"]})
 
+        # Diagnostic : ouvrir le dossier de mise à jour dans l'explorateur/Finder,
+        # en natif (SystemShellExecute, sans cmd.exe) — même mécanisme que le bouton
+        # de la boîte « mise à jour bloquée ». Utile pour tester localement (Mac inclus).
+        btn_open_folder = add("about_btn_open_folder", "Button",
+            (HORI_MARGIN + BTN_WIDTH + WIDTH - HORI_MARGIN - BTN_WIDTH) // 2 - 48,
+            btn_y, 96, BTN_HEIGHT,
+            {"Label": "Ouvrir dossier",
+             "FontHeight": _UI["font_small"],
+             "TextColor": _UI["text_secondary"],
+             "BackgroundColor": _UI["bg_section"]})
+
         # Status label for update check
         update_status = add("about_update_status", "FixedText",
             HORI_MARGIN, btn_y + BTN_HEIGHT + 4, WIDTH - HORI_MARGIN * 2, 14,
@@ -5976,6 +5987,25 @@ EDITED VERSION:
                                 except Exception:
                                     pass
                     threading.Thread(target=_check_update_bg, daemon=True).start()
+                elif source == btn_open_folder:
+                    # Ouvre le dossier de MAJ en natif (Finder/Explorer, sans cmd.exe).
+                    try:
+                        folder = os.path.join(
+                            about_self._get_user_config_dir(), "pending_update"
+                        )
+                        if not os.path.isdir(folder):
+                            folder = about_self._get_user_config_dir()
+                        ok = about_self._open_folder_native(folder)
+                        if update_status:
+                            update_status.getModel().Label = (
+                                "Dossier ouvert." if ok
+                                else "Impossible d'ouvrir le dossier."
+                            )
+                            update_status.getModel().TextColor = (
+                                _UI["success"] if ok else _UI["error"]
+                            )
+                    except Exception as _e:
+                        log_to_file(f"about open-folder: {str(_e)}")
             def disposing(self, event):
                 return
 
@@ -5988,6 +6018,11 @@ EDITED VERSION:
         if btn_close:
             try:
                 btn_close.addActionListener(listener)
+            except Exception:
+                pass
+        if btn_open_folder:
+            try:
+                btn_open_folder.addActionListener(listener)
             except Exception:
                 pass
 
