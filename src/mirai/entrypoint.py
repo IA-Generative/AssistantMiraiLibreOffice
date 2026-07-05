@@ -354,6 +354,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     _enrollment_wizard_active_cls = False
     _enrollment_wizard_lock_cls = threading.Lock()
     _update_in_progress_cls = False
+    # Target versions whose install-script launch was blocked by the workstation
+    # policy (e.g. WinError 5 from AppLocker / Defender ASR). Recorded so we stop
+    # re-downloading / re-prompting the same update in a loop.
+    _update_launch_blocked_cls = set()
     _update_lock_cls = threading.Lock()
 
     def __init__(self, ctx):
@@ -1169,6 +1173,14 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         """Start a background daemon thread to perform the plugin update if not already running."""
         urgency = directive.get("urgency", "normal")
 
+        target_version = str(directive.get("target_version") or "").strip()
+        if target_version and target_version in MainJob._update_launch_blocked_cls:
+            log_to_file(
+                f"Update skipped: install of {target_version} was blocked by the "
+                "workstation policy earlier — manual install required, not re-prompting"
+            )
+            return
+
         with MainJob._update_lock_cls:
             if MainJob._update_in_progress_cls:
                 log_to_file("Update already in progress, skipping duplicate schedule")
@@ -1479,6 +1491,21 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         log_to_file("_perform_update: install script not found, skipping")
                 except Exception as launch_err:
                     log_to_file(f"_perform_update: failed to launch install script: {launch_err}")
+                    # A locked-down workstation policy (AppLocker / Defender ASR
+                    # "block child process") can deny spawning the install script
+                    # (WinError 5 — Access Denied). Record the target so we stop
+                    # re-downloading / re-prompting in a loop, and tell the user
+                    # once how to finish the update.
+                    if target_version:
+                        MainJob._update_launch_blocked_cls.add(target_version)
+                    try:
+                        self._report_update_status(
+                            campaign_id, "failed", version_before, target_version,
+                            f"install launch blocked: {launch_err}"
+                        )
+                    except Exception:
+                        pass
+                    self._notify_update_blocked(target_version, getattr(self, "_pending_install_script", ""))
             else:
                 log_to_file("_perform_update: user postponed restart")
 
@@ -1525,6 +1552,55 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 self._terminate_on_main_thread()
         except Exception as e:
             log_to_file(f"_restart_libreoffice error: {e}")
+
+    def _notify_update_blocked(self, target_version, install_script):
+        """Inform the user once that the automatic update could not be launched.
+
+        On a locked-down workstation an AppLocker / Defender-ASR policy can deny
+        spawning the install script (WinError 5). We stop the re-prompt loop and
+        point to the ready-to-install package so an admin can finish manually.
+        Uses the same message-box path as the update prompt (known to work from
+        this worker thread).
+        """
+        try:
+            oxt = ""
+            try:
+                base = os.path.dirname(install_script or "")
+                if base:
+                    oxt = os.path.join(base, "mirai_update.oxt")
+            except Exception:
+                oxt = ""
+            desktop = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.ctx
+            )
+            active_frame = desktop.getCurrentFrame() if desktop else None
+            if not active_frame:
+                return
+            toolkit = self.ctx.getServiceManager().createInstance("com.sun.star.awt.Toolkit")
+            parent = active_frame.getContainerWindow()
+            msg = (
+                f"La mise à jour MIrAI {target_version} a été téléchargée et\n"
+                "vérifiée, mais son installation automatique a été bloquée par la\n"
+                "politique de sécurité de ce poste.\n\n"
+                "Elle ne sera plus reproposée automatiquement.\n\n"
+                "Pour terminer : contactez votre support / administrateur, ou\n"
+                "installez l'extension manuellement depuis :\n"
+                f"{oxt or 'le dossier pending_update de votre profil LibreOffice'}"
+            )
+            box = toolkit.createMessageBox(
+                parent,
+                1,  # MessageBoxType.INFOBOX
+                MSG_BUTTONS.BUTTONS_OK,
+                "MIrAI — Mise à jour bloquée",
+                msg,
+            )
+            box.execute()
+            try:
+                box.dispose()
+            except Exception:
+                pass
+        except Exception as exc:
+            log_to_file(f"_notify_update_blocked: {str(exc)}")
 
     def _terminate_on_main_thread(self):
         """Quit LibreOffice without calling desktop.terminate() from a background thread.
