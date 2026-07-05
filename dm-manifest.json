@@ -26,6 +26,14 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.19",
+      "date": "2026-07-06",
+      "changes": [
+        "Fix : bouton « Ouvrir le dossier » de la boîte « mise à jour bloquée » désormais affiché (MessageBox QUERYBOX au lieu d'INFOBOX qui masquait le bouton)",
+        "Version de test — revalide le mécanisme de mise à jour (install in-process + bouton « Ouvrir le dossier ») sur poste durci"
+      ]
+    },
+    {
       "version": "0.0.1.0.17",
       "date": "2026-07-05",
       "changes": [
