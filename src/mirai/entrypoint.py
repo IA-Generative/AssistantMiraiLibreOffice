@@ -354,6 +354,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     _enrollment_wizard_active_cls = False
     _enrollment_wizard_lock_cls = threading.Lock()
     _update_in_progress_cls = False
+    # Target versions whose install-script launch was blocked by the workstation
+    # policy (e.g. WinError 5 from AppLocker / Defender ASR). Recorded so we stop
+    # re-downloading / re-prompting the same update in a loop.
+    _update_launch_blocked_cls = set()
     _update_lock_cls = threading.Lock()
 
     def __init__(self, ctx):
@@ -1169,6 +1173,14 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         """Start a background daemon thread to perform the plugin update if not already running."""
         urgency = directive.get("urgency", "normal")
 
+        target_version = str(directive.get("target_version") or "").strip()
+        if target_version and target_version in MainJob._update_launch_blocked_cls:
+            log_to_file(
+                f"Update skipped: install of {target_version} was blocked by the "
+                "workstation policy earlier — manual install required, not re-prompting"
+            )
+            return
+
         with MainJob._update_lock_cls:
             if MainJob._update_in_progress_cls:
                 log_to_file("Update already in progress, skipping duplicate schedule")
@@ -1311,6 +1323,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     stable_oxt = os.path.join(stable_dir, "mirai_update.oxt")
                     import shutil
                     shutil.copy2(tmp_path, stable_oxt)
+                    self._pending_install_oxt = stable_oxt
                     log_to_file(f"_perform_update: OXT copied to {stable_oxt}")
 
                     # Stage the update: quit LO → wait → remove old → install new → relaunch
@@ -1459,8 +1472,15 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file(f"_perform_update: notification error (non-fatal): {notify_err}")
 
             if user_wants_restart:
-                # NOW launch the install script and quit LO
-                log_to_file("_perform_update: user accepted restart, launching install script")
+                log_to_file("_perform_update: user accepted restart")
+                # Prefer the in-process deployment API + native restart. It works
+                # on locked-down postes where spawning the install script is denied
+                # (WinError 5 — AppLocker / Defender ASR). Fall back to the install
+                # script, then to the manual-install message.
+                if self._install_and_restart_in_process(getattr(self, "_pending_install_oxt", "")):
+                    log_to_file("_perform_update: installed in-process, restarting natively")
+                    return
+                log_to_file("_perform_update: in-process install unavailable, using install script")
                 try:
                     install_script = self._pending_install_script
                     if install_script and os.path.isfile(install_script):
@@ -1479,6 +1499,21 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         log_to_file("_perform_update: install script not found, skipping")
                 except Exception as launch_err:
                     log_to_file(f"_perform_update: failed to launch install script: {launch_err}")
+                    # A locked-down workstation policy (AppLocker / Defender ASR
+                    # "block child process") can deny spawning the install script
+                    # (WinError 5 — Access Denied). Record the target so we stop
+                    # re-downloading / re-prompting in a loop, and tell the user
+                    # once how to finish the update.
+                    if target_version:
+                        MainJob._update_launch_blocked_cls.add(target_version)
+                    try:
+                        self._report_update_status(
+                            campaign_id, "failed", version_before, target_version,
+                            f"install launch blocked: {launch_err}"
+                        )
+                    except Exception:
+                        pass
+                    self._notify_update_blocked(target_version, getattr(self, "_pending_install_script", ""))
             else:
                 log_to_file("_perform_update: user postponed restart")
 
@@ -1525,6 +1560,156 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 self._terminate_on_main_thread()
         except Exception as e:
             log_to_file(f"_restart_libreoffice error: {e}")
+
+    def _notify_update_blocked(self, target_version, install_script):
+        """Inform the user once that the automatic update could not be launched.
+
+        On a locked-down workstation an AppLocker / Defender-ASR policy can deny
+        spawning the install script (WinError 5). We stop the re-prompt loop and
+        point to the ready-to-install package so an admin can finish manually.
+        Uses the same message-box path as the update prompt (known to work from
+        this worker thread).
+        """
+        try:
+            oxt = ""
+            try:
+                base = os.path.dirname(install_script or "")
+                if base:
+                    oxt = os.path.join(base, "mirai_update.oxt")
+            except Exception:
+                oxt = ""
+            desktop = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.ctx
+            )
+            active_frame = desktop.getCurrentFrame() if desktop else None
+            if not active_frame:
+                return
+            toolkit = self.ctx.getServiceManager().createInstance("com.sun.star.awt.Toolkit")
+            parent = active_frame.getContainerWindow()
+            oxt_line = oxt or "le dossier pending_update de votre profil LibreOffice"
+            msg = (
+                f"La mise à jour MIrAI {target_version} a été téléchargée et\n"
+                "vérifiée, mais son installation automatique a été bloquée par\n"
+                "la politique de sécurité de ce poste.\n\n"
+                "Elle ne sera plus reproposée automatiquement — vous pouvez\n"
+                "l'installer vous-même :\n\n"
+                "── Installation manuelle ─────────────────────────\n"
+                "1. Menu  Outils ▸ Gestionnaire des extensions…\n"
+                "2. Si « MIrAI » est déjà dans la liste : sélectionnez-le,\n"
+                "   puis cliquez sur « Supprimer ».\n"
+                "3. Cliquez sur « Ajouter » et sélectionnez le fichier :\n"
+                f"      {oxt_line}\n"
+                "4. Acceptez la licence.\n"
+                "5. Fermez puis rouvrez LibreOffice.\n\n"
+                "(La suppression/ajout se fait dans LibreOffice — pas besoin\n"
+                "de droits administrateur.)\n"
+                "En cas d'échec, contactez votre support / administrateur."
+            )
+            box = toolkit.createMessageBox(
+                parent,
+                1,  # MessageBoxType.INFOBOX
+                MSG_BUTTONS.BUTTONS_OK,
+                "MIrAI — Mise à jour bloquée",
+                msg,
+            )
+            box.execute()
+            try:
+                box.dispose()
+            except Exception:
+                pass
+        except Exception as exc:
+            log_to_file(f"_notify_update_blocked: {str(exc)}")
+
+    def _install_and_restart_in_process(self, oxt_path):
+        """Install the update via LibreOffice's own deployment API and restart via
+        the native OfficeRestartManager — all inside the soffice process.
+
+        This is the key path for locked-down postes: it spawns **no** child
+        process (no cmd.exe / soffice.exe), so it is not affected by the
+        AppLocker / Defender-ASR policy that denies the install script (WinError
+        5). Returns True on success; any failure returns False so the caller
+        falls back to the install script, then to the manual-install message.
+
+        UNO imports are lazy (interfaces only resolve inside LibreOffice), so the
+        module still imports cleanly under the test stubs.
+        """
+        try:
+            if not oxt_path or not os.path.isfile(oxt_path):
+                return False
+            import unohelper
+            from com.sun.star.ucb import XCommandEnvironment
+            from com.sun.star.task import XInteractionHandler
+
+            class _SilentHandler(unohelper.Base, XInteractionHandler):
+                # Auto-approve deployment interactions (license already suppressed,
+                # version-replace confirmation, …) by selecting a continuation.
+                def handle(self, request):
+                    try:
+                        conts = request.getContinuations()
+                    except Exception:
+                        conts = ()
+                    chosen = None
+                    for cont in conts or ():
+                        name = type(cont).__name__.lower()
+                        if "approve" in name or "retry" in name or "resolved" in name:
+                            chosen = cont
+                            break
+                    try:
+                        (chosen or (conts[0] if conts else None)).select()
+                    except Exception:
+                        pass
+
+            class _SilentEnv(unohelper.Base, XCommandEnvironment):
+                def __init__(self, handler):
+                    self._handler = handler
+
+                def getInteractionHandler(self):
+                    return self._handler
+
+                def getProgressHandler(self):
+                    return None
+
+            handler = _SilentHandler()
+            cmd_env = _SilentEnv(handler)
+            oxt_url = uno.systemPathToFileUrl(oxt_path)
+            smgr = self.ctx.getServiceManager()
+            ext_mgr = smgr.createInstanceWithContext(
+                "com.sun.star.deployment.ExtensionManager", self.ctx
+            )
+            if ext_mgr is None:
+                return False
+
+            props = ()
+            try:
+                nv = uno.createUnoStruct("com.sun.star.beans.NamedValue")
+                nv.Name = "SUPPRESS_LICENSE"
+                nv.Value = "1"
+                props = (nv,)
+            except Exception:
+                props = ()
+            try:
+                abort = ext_mgr.createAbortChannel()
+            except Exception:
+                abort = None
+
+            ext_mgr.addExtension(oxt_url, props, "user", abort, cmd_env)
+            log_to_file("_perform_update: in-process addExtension succeeded")
+
+            # Native restart: mark the restart, then quit — soffice re-execs
+            # itself (no child process spawned).
+            try:
+                rm = smgr.createInstanceWithContext(
+                    "com.sun.star.task.OfficeRestartManager", self.ctx
+                )
+                if rm is not None:
+                    rm.requestRestart(handler)
+            except Exception as rerr:
+                log_to_file(f"_perform_update: requestRestart failed (will still quit): {rerr}")
+            self._terminate_on_main_thread()
+            return True
+        except Exception as exc:
+            log_to_file(f"_perform_update: in-process install failed, falling back: {exc}")
+            return False
 
     def _terminate_on_main_thread(self):
         """Quit LibreOffice without calling desktop.terminate() from a background thread.
@@ -1584,6 +1769,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             try:
                 data = json.dumps(payload).encode("utf-8")
                 headers = {"Content-Type": "application/json"}
+                # /update/status requires relay credentials (DM VULN-007), same
+                # as /config and telemetry. Without these headers the DM returns
+                # 401 and the campaign never records this device's outcome.
+                headers.update(self._relay_headers())
                 access_token = str(self._get_config_from_file("access_token", "") or "")
                 if access_token:
                     headers["Authorization"] = f"Bearer {access_token}"
