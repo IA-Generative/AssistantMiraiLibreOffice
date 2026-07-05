@@ -26,6 +26,15 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.15",
+      "date": "2026-07-05",
+      "changes": [
+        "Update : install in-process via ExtensionManager + redémarrage natif — immunise la MAJ contre WinError 5 (postes durcis AppLocker / Defender ASR)",
+        "Update : dégradation propre + anti-boucle si l'install auto est bloquée, avec message de mode opératoire manuel (Gestionnaire d'extensions)",
+        "Fix : /update/status envoie désormais les relay-headers (X-Relay-Client/Key) — corrige le 401 sur le report de statut de MAJ"
+      ]
+    },
+    {
       "version": "0.0.1.0.14",
       "date": "2026-07-05",
       "changes": [
