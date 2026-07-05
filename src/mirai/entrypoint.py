@@ -1323,6 +1323,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     stable_oxt = os.path.join(stable_dir, "mirai_update.oxt")
                     import shutil
                     shutil.copy2(tmp_path, stable_oxt)
+                    self._pending_install_oxt = stable_oxt
                     log_to_file(f"_perform_update: OXT copied to {stable_oxt}")
 
                     # Stage the update: quit LO → wait → remove old → install new → relaunch
@@ -1471,8 +1472,15 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file(f"_perform_update: notification error (non-fatal): {notify_err}")
 
             if user_wants_restart:
-                # NOW launch the install script and quit LO
-                log_to_file("_perform_update: user accepted restart, launching install script")
+                log_to_file("_perform_update: user accepted restart")
+                # Prefer the in-process deployment API + native restart. It works
+                # on locked-down postes where spawning the install script is denied
+                # (WinError 5 — AppLocker / Defender ASR). Fall back to the install
+                # script, then to the manual-install message.
+                if self._install_and_restart_in_process(getattr(self, "_pending_install_oxt", "")):
+                    log_to_file("_perform_update: installed in-process, restarting natively")
+                    return
+                log_to_file("_perform_update: in-process install unavailable, using install script")
                 try:
                     install_script = self._pending_install_script
                     if install_script and os.path.isfile(install_script):
@@ -1611,6 +1619,97 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 pass
         except Exception as exc:
             log_to_file(f"_notify_update_blocked: {str(exc)}")
+
+    def _install_and_restart_in_process(self, oxt_path):
+        """Install the update via LibreOffice's own deployment API and restart via
+        the native OfficeRestartManager — all inside the soffice process.
+
+        This is the key path for locked-down postes: it spawns **no** child
+        process (no cmd.exe / soffice.exe), so it is not affected by the
+        AppLocker / Defender-ASR policy that denies the install script (WinError
+        5). Returns True on success; any failure returns False so the caller
+        falls back to the install script, then to the manual-install message.
+
+        UNO imports are lazy (interfaces only resolve inside LibreOffice), so the
+        module still imports cleanly under the test stubs.
+        """
+        try:
+            if not oxt_path or not os.path.isfile(oxt_path):
+                return False
+            import unohelper
+            from com.sun.star.ucb import XCommandEnvironment
+            from com.sun.star.task import XInteractionHandler
+
+            class _SilentHandler(unohelper.Base, XInteractionHandler):
+                # Auto-approve deployment interactions (license already suppressed,
+                # version-replace confirmation, …) by selecting a continuation.
+                def handle(self, request):
+                    try:
+                        conts = request.getContinuations()
+                    except Exception:
+                        conts = ()
+                    chosen = None
+                    for cont in conts or ():
+                        name = type(cont).__name__.lower()
+                        if "approve" in name or "retry" in name or "resolved" in name:
+                            chosen = cont
+                            break
+                    try:
+                        (chosen or (conts[0] if conts else None)).select()
+                    except Exception:
+                        pass
+
+            class _SilentEnv(unohelper.Base, XCommandEnvironment):
+                def __init__(self, handler):
+                    self._handler = handler
+
+                def getInteractionHandler(self):
+                    return self._handler
+
+                def getProgressHandler(self):
+                    return None
+
+            handler = _SilentHandler()
+            cmd_env = _SilentEnv(handler)
+            oxt_url = uno.systemPathToFileUrl(oxt_path)
+            smgr = self.ctx.getServiceManager()
+            ext_mgr = smgr.createInstanceWithContext(
+                "com.sun.star.deployment.ExtensionManager", self.ctx
+            )
+            if ext_mgr is None:
+                return False
+
+            props = ()
+            try:
+                nv = uno.createUnoStruct("com.sun.star.beans.NamedValue")
+                nv.Name = "SUPPRESS_LICENSE"
+                nv.Value = "1"
+                props = (nv,)
+            except Exception:
+                props = ()
+            try:
+                abort = ext_mgr.createAbortChannel()
+            except Exception:
+                abort = None
+
+            ext_mgr.addExtension(oxt_url, props, "user", abort, cmd_env)
+            log_to_file("_perform_update: in-process addExtension succeeded")
+
+            # Native restart: mark the restart, then quit — soffice re-execs
+            # itself (no child process spawned).
+            try:
+                rm = smgr.createInstanceWithContext(
+                    "com.sun.star.task.OfficeRestartManager", self.ctx
+                )
+                if rm is not None:
+                    rm.requestRestart(handler)
+            except Exception as rerr:
+                log_to_file(f"_perform_update: requestRestart failed (will still quit): {rerr}")
+            self._terminate_on_main_thread()
+            return True
+        except Exception as exc:
+            log_to_file(f"_perform_update: in-process install failed, falling back: {exc}")
+            return False
 
     def _terminate_on_main_thread(self):
         """Quit LibreOffice without calling desktop.terminate() from a background thread.
