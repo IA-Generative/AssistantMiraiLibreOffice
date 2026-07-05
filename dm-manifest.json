@@ -26,6 +26,13 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.18",
+      "date": "2026-07-05",
+      "changes": [
+        "Version de test — sert à valider le mécanisme de mise à jour depuis la version précédente (0.0.1.0.17) : install in-process et bouton « Ouvrir le dossier » en conditions réelles"
+      ]
+    },
+    {
       "version": "0.0.1.0.17",
       "date": "2026-07-05",
       "changes": [
