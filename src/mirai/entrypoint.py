@@ -1578,6 +1578,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     oxt = os.path.join(base, "mirai_update.oxt")
             except Exception:
                 oxt = ""
+            # Dossier à proposer à l'ouverture : celui du .oxt téléchargé, sinon
+            # le dossier pending_update du profil. Sert au bouton « Ouvrir le
+            # dossier » (ouverture native, sans cmd.exe — cf. _open_folder_native).
+            folder = ""
+            try:
+                if oxt and os.path.isfile(oxt):
+                    folder = os.path.dirname(oxt)
+                else:
+                    cand = os.path.join(self._get_user_config_dir(), "pending_update")
+                    if os.path.isdir(cand):
+                        folder = cand
+            except Exception:
+                folder = ""
             desktop = self.ctx.getServiceManager().createInstanceWithContext(
                 "com.sun.star.frame.Desktop", self.ctx
             )
@@ -1605,20 +1618,66 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 "de droits administrateur.)\n"
                 "En cas d'échec, contactez votre support / administrateur."
             )
+            # Quand on connaît le dossier du fichier téléchargé, on propose de
+            # l'ouvrir directement (Oui = ouvrir l'explorateur, sans cmd.exe).
+            open_folder_offered = bool(folder)
+            if open_folder_offered:
+                msg = msg + (
+                    "\n\n──────────────────────────────────────────────\n"
+                    "► Pour ouvrir le dossier contenant le fichier téléchargé,\n"
+                    "  cliquez sur « Oui » : l'explorateur de fichiers s'ouvre\n"
+                    "  directement (sans invite de commande). « Non » referme\n"
+                    "  simplement ce message."
+                )
+                buttons = MSG_BUTTONS.BUTTONS_YES_NO
+            else:
+                buttons = MSG_BUTTONS.BUTTONS_OK
             box = toolkit.createMessageBox(
                 parent,
                 1,  # MessageBoxType.INFOBOX
-                MSG_BUTTONS.BUTTONS_OK,
+                buttons,
                 "MIrAI — Mise à jour bloquée",
                 msg,
             )
-            box.execute()
+            result = box.execute()
             try:
                 box.dispose()
             except Exception:
                 pass
+            # MessageBoxResults.YES == 2 → ouvrir le dossier en natif (sans cmd.exe).
+            if open_folder_offered and result == 2:
+                self._open_folder_native(folder)
         except Exception as exc:
             log_to_file(f"_notify_update_blocked: {str(exc)}")
+
+    def _open_folder_native(self, folder_path):
+        """Ouvre un dossier dans l'explorateur de l'OS SANS lancer de processus
+        enfant (pas de cmd.exe / explorer.exe via subprocess).
+
+        Passe par le service UNO SystemShellExecute (ShellExecute sous le capot).
+        Sur un poste durci où la GPO « bloquer les processus enfants d'Office »
+        refuse cmd.exe (WinError 5), ShellExecute vers un Explorer déjà lancé est
+        le moyen « sans invite de commande » de révéler le paquet téléchargé.
+        Best-effort : renvoie True si l'ouverture a été demandée, False sinon
+        (ne lève jamais).
+        """
+        try:
+            if not folder_path or not os.path.isdir(folder_path):
+                return False
+            url = uno.systemPathToFileUrl(folder_path)
+            shell = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.system.SystemShellExecute", self.ctx
+            )
+            if shell is None:
+                return False
+            # NO_SYSTEM_ERROR_MESSAGE = 1 : pas de popup système bloquante en cas
+            # d'échec (on est en best-effort, éventuellement sur un thread de fond).
+            shell.execute(url, "", 1)
+            log_to_file(f"_open_folder_native: opened {folder_path}")
+            return True
+        except Exception as exc:
+            log_to_file(f"_open_folder_native: {str(exc)}")
+            return False
 
     def _install_and_restart_in_process(self, oxt_path):
         """Install the update via LibreOffice's own deployment API and restart via
@@ -5824,6 +5883,28 @@ EDITED VERSION:
                             pass
                     def _check_update_bg():
                         try:
+                            # Self-test (dev) : forcer la boîte « mise à jour bloquée »
+                            # pour valider le bouton d'ouverture du dossier — sans
+                            # déployer de vraie MAJ. Activer via l'env
+                            # MIRAI_SELFTEST_UPDATE_BLOCKED=1 (inerte en production).
+                            if os.environ.get("MIRAI_SELFTEST_UPDATE_BLOCKED"):
+                                try:
+                                    pend = os.path.join(
+                                        about_self._get_user_config_dir(), "pending_update"
+                                    )
+                                    os.makedirs(pend, exist_ok=True)
+                                    open(os.path.join(pend, "mirai_update.oxt"), "a").close()
+                                    if update_status:
+                                        update_status.getModel().Label = (
+                                            "Self-test : boîte « mise à jour bloquée »"
+                                        )
+                                        update_status.getModel().TextColor = _UI["info"]
+                                    about_self._notify_update_blocked(
+                                        "SELFTEST", os.path.join(pend, "mirai_update.bat")
+                                    )
+                                except Exception as _e:
+                                    log_to_file(f"selftest update-blocked: {str(_e)}")
+                                return
                             config_data = about_self._fetch_config(force=True)
                             update_dir = None
                             if isinstance(config_data, dict):
