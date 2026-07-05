@@ -160,11 +160,17 @@ Le pourcentage est calculé par un hash du `client_uuid` — c'est déterministe
 2. Le DM compare la version du plugin avec la campagne active
 3. Si une mise à jour est disponible, le plugin télécharge l'artefact via `/catalog/{slug}/download`
 4. Vérifie le checksum SHA-256
-5. Crée un script d'installation : quit LO → `unopkg remove` → `unopkg add` → relaunch
-6. Propose à l'utilisateur de redémarrer (Oui / Non)
-7. Le script logge chaque étape dans `~/log.txt` avec le préfixe `[UPDATE]`
+5. **Installe la mise à jour**, avec repli en cascade :
+   1. **In-process** — `com.sun.star.deployment.ExtensionManager` + redémarrage natif (`OfficeRestartManager`). **Aucun processus enfant** → immunisé à la GPO « block Office child process » des postes durcis qui bloque `cmd.exe` (`[WinError 5]`). Chemin principal, garde le pilotage DM (cohortes / canary). _(#4)_
+   2. Sinon, **script d'install** (`unopkg remove` → `unopkg add` via `.bat`, log `~/log.txt` préfixe `[UPDATE]`) — bloqué sur postes durcis.
+   3. Sinon, **boîte « mise à jour bloquée »** : mode opératoire manuel (Gestionnaire d'extensions) + bouton **« Ouvrir le dossier »** qui ouvre l'explorateur sur le fichier téléchargé en **natif** (`SystemShellExecute`, **sans `cmd.exe`** — validé sur poste durci). _(#7)_
+6. Report du statut au DM via `/update/status` (relay-headers requis)
 
-Protection anti-boucle : le plugin compare `target_version` avec sa version courante et ignore les directives identiques.
+**Protection anti-boucle** : `target_version` comparée à la version courante (directives identiques ignorées) ; un target dont l'install a été bloquée n'est plus reproposé.
+
+**Test** : `MIRAI_SELFTEST_UPDATE_BLOCKED=1` force la boîte « mise à jour bloquée » via *À propos ▸ Vérifier les mises à jour*, sans déployer de MAJ. _(#7)_
+
+> **Suivi du mécanisme de MAJ** : issue-parapluie **#9** · install in-process **#4** · bouton « Ouvrir le dossier » + self-test **#7** · option native `<update-information>` **#5** (dépend d'un flux au format LibreOffice côté DM : IA-Generative/device-management#23).
 
 ### Suivi et contrôle
 
