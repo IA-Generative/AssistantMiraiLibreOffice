@@ -228,11 +228,8 @@ def test_lo09_perform_update_checksum_ok_calls_install():
     }.get(k, d))
 
     mock_ext_manager = MagicMock()
-    job.ctx.getServiceManager.return_value.createInstanceWithContext.side_effect = (
-        lambda svc, ctx: mock_ext_manager
-        if "ExtensionManager" in svc
-        else MagicMock()
-    )
+    # ExtensionManager est un singleton → obtenu via getValueByName (_get_extension_manager)
+    job.ctx.getValueByName.return_value = mock_ext_manager
 
     directive = _make_update_directive(
         action="update",
@@ -260,11 +257,7 @@ def test_lo10_perform_update_checksum_mismatch_no_install():
     }.get(k, d))
 
     mock_ext_manager = MagicMock()
-    job.ctx.getServiceManager.return_value.createInstanceWithContext.side_effect = (
-        lambda svc, ctx: mock_ext_manager
-        if "ExtensionManager" in svc
-        else MagicMock()
-    )
+    job.ctx.getValueByName.return_value = mock_ext_manager
 
     directive = _make_update_directive(checksum=wrong_checksum)
     job._urlopen = MagicMock(return_value=_response(fake_binary))

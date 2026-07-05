@@ -91,11 +91,39 @@ def test_in_process_install_degrades_gracefully(tmp_path):
     try:
         job = make_job()
         job._terminate_on_main_thread = MagicMock()  # sécurité
+        # Ni le singleton, ni le fallback createInstance ne fournissent le manager.
+        job.ctx.getValueByName.return_value = None
         job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = None
         assert job._install_and_restart_in_process(path) is False
         job._terminate_on_main_thread.assert_not_called()
     finally:
         os.remove(path)
+
+
+# ── ExtensionManager est un SINGLETON (bug de la .17 : createInstance → None) ──
+
+def test_get_extension_manager_prefers_singleton():
+    """Régression : le manager doit être lu via /singletons/...theExtensionManager,
+    PAS via createInstance (qui renvoie None pour ce singleton — cause du « in-process
+    install unavailable » observé dans les logs .16/.17/.18)."""
+    job = make_job()
+    sentinel = MagicMock(name="theExtensionManager")
+    job.ctx.getValueByName.return_value = sentinel
+
+    assert job._get_extension_manager() is sentinel
+    job.ctx.getValueByName.assert_called_with(
+        "/singletons/com.sun.star.deployment.theExtensionManager"
+    )
+
+
+def test_get_extension_manager_falls_back_to_service():
+    """Si le singleton est indisponible (None), on tente le service en repli."""
+    job = make_job()
+    job.ctx.getValueByName.return_value = None
+    fallback = MagicMock(name="fallback-mgr")
+    job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = fallback
+
+    assert job._get_extension_manager() is fallback
 
 
 # ── Bouton « Ouvrir le dossier » : ouverture native, sans cmd.exe ────
