@@ -26,6 +26,15 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.22",
+      "date": "2026-07-06",
+      "changes": [
+        "Fix : install in-process — ExtensionManager obtenu via le singleton .get(ctx) (createInstance/getValueByName renvoyaient None) ; addExtension est enfin réellement appelé sur poste durci",
+        "Fix : téléchargement de la MAJ avec failover multi-bootstrap (ne reste plus figé sur la 1re URL injoignable) + last_bootstrap_url préféré",
+        "Fix : bouton « Ouvrir le dossier » de la boîte « mise à jour bloquée » (MessageBox QUERYBOX)"
+      ]
+    },
+    {
       "version": "0.0.1.0.19",
       "date": "2026-07-06",
       "changes": [
