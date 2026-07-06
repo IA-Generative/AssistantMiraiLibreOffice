@@ -26,6 +26,15 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.26",
+      "date": "2026-07-06",
+      "changes": [
+        "Fix : install in-process via thePackageManagerFactory (getValueByName, sans import) \u2014 fonctionne depuis le thread worker (corrige 'No module named com')",
+        "Fix : remove-before-add \u2014 retire l'ancienne registration avant addPackage (\u00e9vite le doublon 'duplicate implementation name' qui bloquait l'activation)",
+        "Fix : red\u00e9marrage natif \u2014 Desktop.terminate() sur le thread principal (AsyncCallback) pour que soffice se relance vraiment (le SIGTERM ne relan\u00e7ait pas)"
+      ]
+    },
+    {
       "version": "0.0.1.0.22",
       "date": "2026-07-06",
       "changes": [
