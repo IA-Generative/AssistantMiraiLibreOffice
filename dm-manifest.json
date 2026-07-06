@@ -26,6 +26,14 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.24",
+      "date": "2026-07-06",
+      "changes": [
+        "Fix : install in-process via thePackageManagerFactory (getValueByName, sans import) \u2014 corrige l'\u00e9chec 'No module named com' du thread worker ; addPackage remplace addExtension",
+        "Update : le staging ne fait plus l'install imm\u00e9diate ; install unique au red\u00e9marrage (\u00e9vite double-install / clobber de l'instance en cours)"
+      ]
+    },
+    {
       "version": "0.0.1.0.22",
       "date": "2026-07-06",
       "changes": [
