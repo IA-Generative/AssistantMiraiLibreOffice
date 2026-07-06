@@ -158,19 +158,21 @@ Le pourcentage est calculé par un hash du `client_uuid` — c'est déterministe
 
 1. Le plugin appelle `/config/{slug}/config.json` au démarrage et à chaque action
 2. Le DM compare la version du plugin avec la campagne active
-3. Si une mise à jour est disponible, le plugin télécharge l'artefact via `/catalog/{slug}/download`
+3. Si une mise à jour est disponible, le plugin télécharge l'artefact via `/catalog/{slug}/download` — avec **failover multi-bootstrap** (chaque DM essayé en ordre *last-good d'abord*, TLS par-URL) pour ne pas rester bloqué sur une URL injoignable _(#16)_
 4. Vérifie le checksum SHA-256
 5. **Installe la mise à jour**, avec repli en cascade :
-   1. **In-process** — `com.sun.star.deployment.ExtensionManager` + redémarrage natif (`OfficeRestartManager`). **Aucun processus enfant** → immunisé à la GPO « block Office child process » des postes durcis qui bloque `cmd.exe` (`[WinError 5]`). Chemin principal, garde le pilotage DM (cohortes / canary). _(#4)_
+   1. **In-process** — `ExtensionManager.get(ctx)` (le **singleton** ; `createInstance` et `getValueByName` renvoient `None`) → `addExtension`, puis redémarrage natif (`OfficeRestartManager`). **Aucun processus enfant** → immunisé à la GPO « block Office child process » des postes durcis qui bloque `cmd.exe` (`[WinError 5]`). Chemin principal, garde le pilotage DM (cohortes / canary). _(#4, #15)_
    2. Sinon, **script d'install** (`unopkg remove` → `unopkg add` via `.bat`, log `~/log.txt` préfixe `[UPDATE]`) — bloqué sur postes durcis.
-   3. Sinon, **boîte « mise à jour bloquée »** : mode opératoire manuel (Gestionnaire d'extensions) + bouton **« Ouvrir le dossier »** qui ouvre l'explorateur sur le fichier téléchargé en **natif** (`SystemShellExecute`, **sans `cmd.exe`** — validé sur poste durci). _(#7)_
+   3. Sinon, **boîte « mise à jour bloquée »** : mode opératoire manuel (Gestionnaire d'extensions) + bouton **« Ouvrir le dossier »** qui ouvre l'explorateur sur le fichier téléchargé en **natif** (`SystemShellExecute`, **sans `cmd.exe`** — validé sur poste durci). _(#7, #12)_
 6. Report du statut au DM via `/update/status` (relay-headers requis)
 
 **Protection anti-boucle** : `target_version` comparée à la version courante (directives identiques ignorées) ; un target dont l'install a été bloquée n'est plus reproposé.
 
-**Test** : `MIRAI_SELFTEST_UPDATE_BLOCKED=1` force la boîte « mise à jour bloquée » via *À propos ▸ Vérifier les mises à jour*, sans déployer de MAJ. _(#7)_
+**Diagnostic / test** :
+- `MIRAI_SELFTEST_UPDATE_BLOCKED=1` force la boîte « mise à jour bloquée » via *À propos ▸ Vérifier les mises à jour*, sans déployer de MAJ _(#7)_.
+- Le dialogue *À propos* expose aussi un bouton **« Ouvrir dossier »** (même ouverture native que ci-dessus) pour tester localement, Mac inclus.
 
-> **Suivi du mécanisme de MAJ** : issue-parapluie **#9** · install in-process **#4** · bouton « Ouvrir le dossier » + self-test **#7** · option native `<update-information>` **#5** (dépend d'un flux au format LibreOffice côté DM : IA-Generative/device-management#23).
+> **Suivi du mécanisme de MAJ** : issue-parapluie **#9** · install in-process **#4** (singleton `.get` **#15**) · download failover **#16** · bouton « Ouvrir le dossier » **#7**/**#12** · option native `<update-information>` **#5** (flux format LibreOffice côté DM : IA-Generative/device-management#23) · cache binaire DM : IA-Generative/device-management#24.
 
 ### Suivi et contrôle
 
