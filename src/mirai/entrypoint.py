@@ -1684,34 +1684,36 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return False
 
     def _get_extension_manager(self):
-        """Return the ExtensionManager singleton (`theExtensionManager`).
+        """Return the ExtensionManager (`XExtensionManager`) for in-process install.
 
-        `com.sun.star.deployment.ExtensionManager` is a UNO **singleton** — it is
-        NOT creatable by service name, so `createInstance()` /
-        `createInstanceWithContext()` return **None**. It must be read from the
-        component-context singleton map
-        (`/singletons/com.sun.star.deployment.theExtensionManager`).
+        `com.sun.star.deployment.ExtensionManager` is a **new-style singleton**.
+        Empirically (LO 25.8, confirmed by a probe macro):
+          - `createInstance(...)`                                    → None
+          - `getValueByName("/singletons/…theExtensionManager")`     → None
+          - `theExtensionManager.get(ctx)`  /  `ExtensionManager.get(ctx)`  → **works**
+        So the only reliable accessor is the singleton's `.get(ctx)` method. Earlier
+        attempts used the two that return None, which is why the in-process install
+        silently bailed (`ext_mgr is None`) and never reached `addExtension` — the
+        workstation policy was therefore never actually exercised.
 
-        Getting this wrong is exactly why the in-process install silently returned
-        False (it bailed on `ext_mgr is None` and never reached `addExtension`,
-        so the workstation policy was never even exercised). Falls back to the
-        service name for safety; returns None only if genuinely unavailable.
+        Returns the manager, or None if genuinely unavailable (caller falls back to
+        the install script, then the manual-install message).
         """
         try:
-            mgr = self.ctx.getValueByName(
-                "/singletons/com.sun.star.deployment.theExtensionManager"
-            )
+            from com.sun.star.deployment import theExtensionManager
+            mgr = theExtensionManager.get(self.ctx)
             if mgr is not None:
                 return mgr
         except Exception as exc:
-            log_to_file(f"_get_extension_manager: singleton lookup failed: {exc}")
+            log_to_file(f"_get_extension_manager: theExtensionManager.get failed: {exc}")
         try:
-            return self.ctx.getServiceManager().createInstanceWithContext(
-                "com.sun.star.deployment.ExtensionManager", self.ctx
-            )
+            from com.sun.star.deployment import ExtensionManager
+            mgr = ExtensionManager.get(self.ctx)
+            if mgr is not None:
+                return mgr
         except Exception as exc:
-            log_to_file(f"_get_extension_manager: fallback createInstance failed: {exc}")
-            return None
+            log_to_file(f"_get_extension_manager: ExtensionManager.get failed: {exc}")
+        return None
 
     def _install_and_restart_in_process(self, oxt_path):
         """Install the update via LibreOffice's own deployment API and restart via
