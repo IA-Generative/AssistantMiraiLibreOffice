@@ -104,17 +104,40 @@ def test_in_process_install_degrades_gracefully(tmp_path):
 
 def test_install_oxt_inprocess_uses_package_manager_factory():
     """Chemin principal : thePackageManagerFactory (getValueByName, pas d'import)
-    → getPackageManager('user').addPackage(...)."""
+    → getPackageManager('user') → removePackage PUIS addPackage (remove-avant-add,
+    évite le doublon 'Insert duplicate implementation name …')."""
     job = make_job()
     factory = MagicMock(name="thePackageManagerFactory")
     job.ctx.getValueByName.return_value = factory
+    pkg = factory.getPackageManager.return_value
 
     assert job._install_oxt_inprocess("file:///x.oxt", (), None, None) is True
     job.ctx.getValueByName.assert_called_with(
         "/singletons/com.sun.star.deployment.thePackageManagerFactory"
     )
     factory.getPackageManager.assert_called_with("user")
-    factory.getPackageManager.return_value.addPackage.assert_called_once()
+    pkg.removePackage.assert_called_once()
+    pkg.addPackage.assert_called_once()
+    names = [c[0] for c in pkg.mock_calls]
+    assert names.index("removePackage") < names.index("addPackage"), \
+        "remove doit précéder add"
+
+
+def test_install_and_restart_requests_native_restart_on_success():
+    """Install in-process OK → _request_native_restart() est appelé, retourne True."""
+    import os
+    import tempfile
+
+    fd, path = tempfile.mkstemp(suffix=".oxt")
+    os.close(fd)
+    try:
+        job = make_job()
+        job._install_oxt_inprocess = MagicMock(return_value=True)
+        job._request_native_restart = MagicMock()  # évite le vrai terminate/SIGTERM
+        assert job._install_and_restart_in_process(path) is True
+        job._request_native_restart.assert_called_once()
+    finally:
+        os.remove(path)
 
 
 def test_install_oxt_inprocess_false_when_no_api():

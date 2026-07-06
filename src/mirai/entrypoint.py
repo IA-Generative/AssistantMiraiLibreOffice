@@ -18,6 +18,10 @@ try:
 except Exception:
     _EXT_MGR_SINGLETON = None
 
+# Extension identifier (matches oxt/description.xml <identifier>). Used to remove a
+# prior registration before re-installing in-process (avoids duplicate components).
+_EXTENSION_IDENTIFIER = "fr.gouv.interieur.mirai"
+
 try:
     from com.sun.star.task import XJobExecutor, XJob
     from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
@@ -1742,6 +1746,15 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file(f"_install_oxt_inprocess: PackageManagerFactory lookup failed: {exc}")
         if factory is not None:
             pkg_mgr = factory.getPackageManager("user")
+            # Remove-before-add: drop any existing registration of this identifier
+            # first. Re-installing over an ACTIVE extension can otherwise leave a
+            # stale duplicate component ("Insert duplicate implementation name
+            # fr.gouv.interieur.mirai.PromptFunction") that blocks activation.
+            try:
+                pkg_mgr.removePackage(_EXTENSION_IDENTIFIER, "", abort, cmd_env)
+                log_to_file("_install_oxt_inprocess: removed prior package before add")
+            except Exception as rm_exc:
+                log_to_file(f"_install_oxt_inprocess: removePackage (ignored): {rm_exc}")
             pkg_mgr.addPackage(oxt_url, props, "", abort, cmd_env)
             log_to_file("_install_oxt_inprocess: installed via thePackageManagerFactory")
             return True
@@ -1753,6 +1766,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             except Exception as exc:
                 log_to_file(f"_install_oxt_inprocess: theExtensionManager.get failed: {exc}")
             if mgr is not None:
+                try:
+                    mgr.removeExtension(_EXTENSION_IDENTIFIER, "", "user", abort, cmd_env)
+                    log_to_file("_install_oxt_inprocess: removed prior extension before add")
+                except Exception as rm_exc:
+                    log_to_file(f"_install_oxt_inprocess: removeExtension (ignored): {rm_exc}")
                 mgr.addExtension(oxt_url, props, "user", abort, cmd_env)
                 log_to_file("_install_oxt_inprocess: installed via ExtensionManager singleton")
                 return True
@@ -1827,21 +1845,64 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 return False
             log_to_file("_perform_update: in-process install succeeded")
 
-            # Native restart: mark the restart, then quit — soffice re-execs
-            # itself (no child process spawned).
-            try:
-                rm = smgr.createInstanceWithContext(
-                    "com.sun.star.task.OfficeRestartManager", self.ctx
-                )
-                if rm is not None:
-                    rm.requestRestart(handler)
-            except Exception as rerr:
-                log_to_file(f"_perform_update: requestRestart failed (will still quit): {rerr}")
-            self._terminate_on_main_thread()
+            # Native restart: request restart, then terminate on the MAIN thread so
+            # soffice actually re-execs itself (no child process spawned).
+            self._request_native_restart(handler)
             return True
         except Exception as exc:
             log_to_file(f"_perform_update: in-process install failed, falling back: {exc}")
             return False
+
+    def _request_native_restart(self, handler):
+        """Restart LibreOffice natively — soffice re-execs itself, **no child process**.
+
+        Needs `OfficeRestartManager.requestRestart()` THEN a clean
+        `Desktop.terminate()`. terminate() must run on the **main thread**: from
+        this update-worker thread it corrupts the macOS layout engine, and a raw
+        SIGTERM (our previous approach) does NOT honour the restart flag — LO quits
+        without re-launching (observed on Mac). We marshal terminate() onto the main
+        thread via `com.sun.star.awt.AsyncCallback`. If that path is unavailable we
+        fall back to the previous quit-only behaviour so the update still applies on
+        the next manual open.
+        """
+        smgr = self.ctx.getServiceManager()
+        try:
+            rm = smgr.createInstanceWithContext(
+                "com.sun.star.task.OfficeRestartManager", self.ctx
+            )
+            if rm is not None:
+                rm.requestRestart(handler)
+        except Exception as rerr:
+            log_to_file(f"_request_native_restart: requestRestart failed: {rerr}")
+
+        ctx = self.ctx
+        try:
+            from com.sun.star.awt import XCallback
+
+            class _TerminateOnMain(unohelper.Base, XCallback):
+                def notify(self, _data):
+                    try:
+                        desktop = smgr.createInstanceWithContext(
+                            "com.sun.star.frame.Desktop", ctx
+                        )
+                        if desktop is not None:
+                            log_to_file("_request_native_restart: terminate on main thread (re-exec)")
+                            desktop.terminate()
+                    except Exception as term_err:
+                        log_to_file(f"_request_native_restart: main-thread terminate failed: {term_err}")
+
+            async_cb = smgr.createInstanceWithContext(
+                "com.sun.star.awt.AsyncCallback", ctx
+            )
+            if async_cb is not None:
+                async_cb.addCallback(_TerminateOnMain(), None)
+                log_to_file("_request_native_restart: terminate scheduled on main thread")
+                return
+            log_to_file("_request_native_restart: AsyncCallback unavailable, quitting only")
+        except Exception as cb_err:
+            log_to_file(f"_request_native_restart: AsyncCallback path failed ({cb_err}), quitting only")
+        # Fallback: quit only (SIGTERM). The update still applies on next open.
+        self._terminate_on_main_thread()
 
     def _terminate_on_main_thread(self):
         """Quit LibreOffice without calling desktop.terminate() from a background thread.
