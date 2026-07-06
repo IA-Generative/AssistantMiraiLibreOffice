@@ -862,13 +862,18 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         return front + [u for u in urls if u.rstrip("/") != preferred]
 
     def _active_bootstrap_url(self):
-        """The DM base URL that last answered (failover winner), else the first
-        configured one. Telemetry / enroll / update must target the same DM that
-        served the config, so they read this rather than the raw key.
+        """The DM base URL that last answered (failover winner), else the last-good
+        persisted one, else the first configured. Telemetry / enroll / update must
+        target the same DM that served the config, so they read this rather than the
+        raw key — otherwise a fresh MainJob (or a config read from cache) would fall
+        back to `urls[0]`, which may be an internal-only DM unreachable from here.
         """
         resolved = str(getattr(self, "_resolved_bootstrap_url", "") or "").strip()
         if resolved:
             return resolved
+        persisted = str(self._get_config_from_file("last_bootstrap_url", "") or "").strip()
+        if persisted:
+            return persisted
         urls = self._bootstrap_urls()
         return urls[0] if urls else ""
 
@@ -1214,30 +1219,50 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         campaign_id = directive.get("campaign_id")
         version_before = self._get_extension_version()
 
-        base_url = str(self._active_bootstrap_url() or "").strip().rstrip("/")
-        if not base_url or not artifact_url:
-            log_to_file("_perform_update: missing base_url or artifact_url")
+        if not artifact_url:
+            log_to_file("_perform_update: missing artifact_url")
             return
 
-        full_url = base_url + artifact_url if artifact_url.startswith("/") else artifact_url
-        log_to_file(f"_perform_update: downloading {full_url} (action={action} target={target_version} urgency={urgency})")
+        # Resolve a RELATIVE artifact_url against every bootstrap base in failover
+        # order (last-good first). Otherwise the download is pinned to a single base
+        # — often urls[0], an internal-only DGX — and a host that can't reach it
+        # (e.g. off-network) fails the whole update instead of falling over to a DM
+        # that does answer. An absolute artifact_url is used as-is.
+        if artifact_url.startswith("/"):
+            bases = [b.rstrip("/") for b in (self._failover_ordered_urls() or []) if b]
+            if not bases:
+                one = str(self._active_bootstrap_url() or "").strip().rstrip("/")
+                bases = [one] if one else []
+            candidate_urls = [b + artifact_url for b in bases]
+        else:
+            candidate_urls = [artifact_url]
+        if not candidate_urls:
+            log_to_file("_perform_update: no download URL (no bootstrap base configured)")
+            return
 
         tmp_path = None
         try:
-            # Download with retry (3 attempts with exponential backoff)
+            # Download with failover across bootstrap DMs (2 passes), per-URL TLS.
             binary = None
-            for dl_attempt in range(3):
-                try:
-                    request = urllib.request.Request(full_url, headers=_with_user_agent({}))
-                    with self._urlopen(request, context=self.get_ssl_context(), timeout=60) as response:
-                        binary = response.read()
+            full_url = candidate_urls[0]
+            last_err = ""
+            for dl_pass in range(2):
+                for full_url in candidate_urls:
+                    log_to_file(f"_perform_update: downloading {full_url} (action={action} target={target_version} urgency={urgency})")
+                    try:
+                        request = urllib.request.Request(full_url, headers=_with_user_agent({}))
+                        with self._urlopen(request, context=self.get_ssl_context(full_url), timeout=60) as response:
+                            binary = response.read()
+                        break
+                    except Exception as dl_err:
+                        last_err = str(dl_err)
+                        log_to_file(f"_perform_update: download from {full_url} failed: {dl_err}")
+                if binary is not None:
                     break
-                except Exception as dl_err:
-                    log_to_file(f"_perform_update: download attempt {dl_attempt+1}/3 failed: {dl_err}")
-                    if dl_attempt < 2:
-                        time.sleep(2 ** (dl_attempt + 1))
+                if dl_pass == 0:
+                    time.sleep(2)
             if binary is None:
-                self._report_update_status(campaign_id, "download_error", version_before, "", "all download attempts failed")
+                self._report_update_status(campaign_id, "download_error", version_before, "", f"all download attempts failed: {last_err}")
                 return
 
             # Verify checksum
