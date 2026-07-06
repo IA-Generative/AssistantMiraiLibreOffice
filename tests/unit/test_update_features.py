@@ -245,6 +245,56 @@ def test_lo09_perform_update_checksum_ok_calls_install():
     assert MainJob._update_in_progress_cls is False
 
 
+# ── TC-LO-09b : download failover multi-bootstrap ───────────────────
+
+def test_lo09b_download_fails_over_to_next_bootstrap():
+    """Si la 1re base bootstrap est injoignable (DGX hors réseau : Errno 8), le
+    download bascule sur la suivante au lieu d'abandonner (bug observé : figé sur
+    onyxia.gpu.minint.fr)."""
+    job = make_job()
+    fake_binary = b"oxt bytes for failover test"
+    checksum = "sha256:" + hashlib.sha256(fake_binary).hexdigest()
+
+    job._get_config_from_file = MagicMock(side_effect=lambda k, d=None, **kw: {
+        "bootstrap_urls": ["https://onyxia.unreachable/bootstrap", "https://scaleway.ok"],
+    }.get(k, d))
+    job._get_extension_manager = MagicMock(return_value=MagicMock())
+
+    tried = []
+
+    def _fake_urlopen(req, **kw):
+        url = req.full_url
+        tried.append(url)
+        if "onyxia" in url:
+            raise OSError("nodename nor servname provided, or not known")
+        return _response(fake_binary)
+
+    job._urlopen = _fake_urlopen
+
+    directive = _make_update_directive(
+        action="update", target="0.0.1.0.23", checksum=checksum,
+        artifact_url="/catalog/mirai-libreoffice/download",
+    )
+    job._perform_update(directive)
+
+    assert any("onyxia" in u for u in tried), "doit d'abord tenter la 1re base"
+    assert "https://scaleway.ok/catalog/mirai-libreoffice/download" in tried, \
+        "doit basculer (failover) sur la base suivante"
+    assert MainJob._update_in_progress_cls is False
+
+
+def test_active_bootstrap_url_prefers_persisted_last_good():
+    """_active_bootstrap_url() doit préférer last_bootstrap_url persisté à urls[0]
+    (sinon une instance fraîche retombe sur le DGX injoignable)."""
+    job = make_job()
+    job._resolved_bootstrap_url = ""
+    job._get_config_from_file = MagicMock(side_effect=lambda k, d=None, **kw: {
+        "bootstrap_urls": ["https://onyxia.unreachable/bootstrap", "https://scaleway.ok"],
+        "last_bootstrap_url": "https://scaleway.ok",
+    }.get(k, d))
+    assert job._active_bootstrap_url() == "https://scaleway.ok"
+
+
 # ── TC-LO-10 : _perform_update checksum KO → pas d'install ──────────
 
 def test_lo10_perform_update_checksum_mismatch_no_install():
