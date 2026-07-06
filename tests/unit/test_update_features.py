@@ -218,7 +218,10 @@ def test_lo08_update_not_retriggered_if_in_progress():
 
 # ── TC-LO-09 : _perform_update checksum OK → install ────────────────
 
-def test_lo09_perform_update_checksum_ok_calls_install():
+def test_lo09_perform_update_checksum_ok_stages():
+    """checksum OK → l'artefact est stagé (statut 'installed' rapporté). L'install
+    réelle est différée au restart-accept — PAS exécutée au staging (sinon on
+    double-installerait et clobbererait l'instance en cours)."""
     job = make_job()
     fake_binary = b"fake oxt content"
     expected_checksum = "sha256:" + hashlib.sha256(fake_binary).hexdigest()
@@ -226,10 +229,8 @@ def test_lo09_perform_update_checksum_ok_calls_install():
     job._get_config_from_file = MagicMock(side_effect=lambda k, d=None, **kw: {
         "bootstrap_url": "http://localhost:9999",
     }.get(k, d))
-
-    mock_ext_manager = MagicMock()
-    # ExtensionManager = singleton new-style → obtenu via .get(ctx) (_get_extension_manager)
-    job._get_extension_manager = MagicMock(return_value=mock_ext_manager)
+    job._report_update_status = MagicMock()
+    job._install_oxt_inprocess = MagicMock()  # ne doit PAS être appelé au staging
 
     directive = _make_update_directive(
         action="update",
@@ -239,9 +240,12 @@ def test_lo09_perform_update_checksum_ok_calls_install():
     )
     job._urlopen = MagicMock(return_value=_response(fake_binary))
 
-    job._perform_update(directive)
+    with patch("src.mirai.entrypoint.time.sleep"):
+        job._perform_update(directive)
 
-    mock_ext_manager.addExtension.assert_called_once()
+    statuses = [c.args[1] for c in job._report_update_status.call_args_list if len(c.args) > 1]
+    assert "installed" in statuses                 # stagé
+    job._install_oxt_inprocess.assert_not_called()  # pas d'install au staging
     assert MainJob._update_in_progress_cls is False
 
 
@@ -258,7 +262,7 @@ def test_lo09b_download_fails_over_to_next_bootstrap():
     job._get_config_from_file = MagicMock(side_effect=lambda k, d=None, **kw: {
         "bootstrap_urls": ["https://onyxia.unreachable/bootstrap", "https://scaleway.ok"],
     }.get(k, d))
-    job._get_extension_manager = MagicMock(return_value=MagicMock())
+    job._install_oxt_inprocess = MagicMock()
 
     tried = []
 
@@ -275,7 +279,8 @@ def test_lo09b_download_fails_over_to_next_bootstrap():
         action="update", target="0.0.1.0.23", checksum=checksum,
         artifact_url="/catalog/mirai-libreoffice/download",
     )
-    job._perform_update(directive)
+    with patch("src.mirai.entrypoint.time.sleep"):
+        job._perform_update(directive)
 
     assert any("onyxia" in u for u in tried), "doit d'abord tenter la 1re base"
     assert "https://scaleway.ok/catalog/mirai-libreoffice/download" in tried, \
@@ -306,15 +311,15 @@ def test_lo10_perform_update_checksum_mismatch_no_install():
         "bootstrap_url": "http://localhost:9999",
     }.get(k, d))
 
-    mock_ext_manager = MagicMock()
-    job._get_extension_manager = MagicMock(return_value=mock_ext_manager)
+    job._install_oxt_inprocess = MagicMock()
 
     directive = _make_update_directive(checksum=wrong_checksum)
     job._urlopen = MagicMock(return_value=_response(fake_binary))
 
     job._perform_update(directive)
 
-    mock_ext_manager.addExtension.assert_not_called()
+    # checksum KO → retour avant tout staging/install
+    job._install_oxt_inprocess.assert_not_called()
 
 
 # ── TC-LO-11 : _perform_update libère flag sur exception ─────────────

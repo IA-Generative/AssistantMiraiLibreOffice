@@ -6,6 +6,18 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
+
+# Pre-bind the ExtensionManager singleton on the MAIN thread (module load =
+# extension registration). pyuno's `from com.sun.star… import …` hook is NOT
+# available on background threads ("No module named 'com'"), so the update worker
+# thread cannot import it itself — it reuses this reference. See
+# _install_oxt_inprocess (which prefers the import-free PackageManagerFactory and
+# uses this only as a fallback).
+try:
+    from com.sun.star.deployment import theExtensionManager as _EXT_MGR_SINGLETON
+except Exception:
+    _EXT_MGR_SINGLETON = None
+
 try:
     from com.sun.star.task import XJobExecutor, XJob
     from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
@@ -1288,19 +1300,12 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 self._report_update_status(campaign_id, "deferred", version_before, "", "")
                 return
 
-            # Install via ExtensionManager (UNO) or unopkg fallback
+            # Stage the artifact only: copy it to a stable path and prepare the
+            # fallback install script. The real install happens ONCE, in-process,
+            # when the user accepts the restart (see _install_and_restart_in_process).
+            # Installing here (from the update worker thread) AND at restart would
+            # double-install and can clobber the running instance.
             installed = False
-            try:
-                ext_manager = self._get_extension_manager()
-                if ext_manager:
-                    tmp_url = uno.systemPathToFileUrl(tmp_path)
-                    ext_manager.addExtension(tmp_url, None, "user", None, None)
-                    installed = True
-                    log_to_file(f"_perform_update: installed via ExtensionManager version={target_version}")
-                else:
-                    log_to_file("_perform_update: ExtensionManager singleton unavailable, trying unopkg")
-            except Exception as uno_err:
-                log_to_file(f"_perform_update: ExtensionManager failed ({uno_err}), trying unopkg")
             if not installed:
                 try:
                     import subprocess, platform
@@ -1708,37 +1713,51 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file(f"_open_folder_native: {str(exc)}")
             return False
 
-    def _get_extension_manager(self):
-        """Return the ExtensionManager (`XExtensionManager`) for in-process install.
+    def _install_oxt_inprocess(self, oxt_url, props, abort, cmd_env):
+        """Install an OXT for the current user, in-process (no child process).
 
-        `com.sun.star.deployment.ExtensionManager` is a **new-style singleton**.
-        Empirically (LO 25.8, confirmed by a probe macro):
-          - `createInstance(...)`                                    → None
-          - `getValueByName("/singletons/…theExtensionManager")`     → None
-          - `theExtensionManager.get(ctx)`  /  `ExtensionManager.get(ctx)`  → **works**
-        So the only reliable accessor is the singleton's `.get(ctx)` method. Earlier
-        attempts used the two that return None, which is why the in-process install
-        silently bailed (`ext_mgr is None`) and never reached `addExtension` — the
-        workstation policy was therefore never actually exercised.
+        Runs from the update WORKER thread, where pyuno's `from com.sun.star…
+        import …` hook is NOT available ("No module named 'com'") — confirmed in
+        the field. So we must **not** import here. Order of attempts:
 
-        Returns the manager, or None if genuinely unavailable (caller falls back to
-        the install script, then the manual-install message).
+          1. **thePackageManagerFactory** obtained via `ctx.getValueByName` — a plain
+             UNO method call, **no import** → works off the main thread. Its
+             `getPackageManager("user").addPackage(...)` deploys the OXT. (The probe
+             showed this singleton resolves where `theExtensionManager` does not.)
+          2. The **ExtensionManager singleton pre-bound on the MAIN thread** at module
+             load (`_EXT_MGR_SINGLETON`) → `addExtension`, as a fallback.
+
+        Returns True on success. Any install exception (e.g. a policy denial) is
+        propagated so the caller can log it and fall back; returns False only when
+        **no** deployment API is reachable.
         """
+        props = props or ()
+        # 1) PackageManagerFactory — import-free, worker-thread safe.
+        factory = None
         try:
-            from com.sun.star.deployment import theExtensionManager
-            mgr = theExtensionManager.get(self.ctx)
-            if mgr is not None:
-                return mgr
+            factory = self.ctx.getValueByName(
+                "/singletons/com.sun.star.deployment.thePackageManagerFactory"
+            )
         except Exception as exc:
-            log_to_file(f"_get_extension_manager: theExtensionManager.get failed: {exc}")
-        try:
-            from com.sun.star.deployment import ExtensionManager
-            mgr = ExtensionManager.get(self.ctx)
+            log_to_file(f"_install_oxt_inprocess: PackageManagerFactory lookup failed: {exc}")
+        if factory is not None:
+            pkg_mgr = factory.getPackageManager("user")
+            pkg_mgr.addPackage(oxt_url, props, "", abort, cmd_env)
+            log_to_file("_install_oxt_inprocess: installed via thePackageManagerFactory")
+            return True
+        # 2) ExtensionManager singleton pre-bound on the main thread (see module top).
+        if _EXT_MGR_SINGLETON is not None:
+            mgr = None
+            try:
+                mgr = _EXT_MGR_SINGLETON.get(self.ctx)
+            except Exception as exc:
+                log_to_file(f"_install_oxt_inprocess: theExtensionManager.get failed: {exc}")
             if mgr is not None:
-                return mgr
-        except Exception as exc:
-            log_to_file(f"_get_extension_manager: ExtensionManager.get failed: {exc}")
-        return None
+                mgr.addExtension(oxt_url, props, "user", abort, cmd_env)
+                log_to_file("_install_oxt_inprocess: installed via ExtensionManager singleton")
+                return True
+        log_to_file("_install_oxt_inprocess: no in-process deployment API available")
+        return False
 
     def _install_and_restart_in_process(self, oxt_path):
         """Install the update via LibreOffice's own deployment API and restart via
@@ -1793,10 +1812,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             cmd_env = _SilentEnv(handler)
             oxt_url = uno.systemPathToFileUrl(oxt_path)
             smgr = self.ctx.getServiceManager()
-            ext_mgr = self._get_extension_manager()
-            if ext_mgr is None:
-                log_to_file("_perform_update: in-process ExtensionManager singleton unavailable")
-                return False
 
             props = ()
             try:
@@ -1806,13 +1821,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 props = (nv,)
             except Exception:
                 props = ()
-            try:
-                abort = ext_mgr.createAbortChannel()
-            except Exception:
-                abort = None
 
-            ext_mgr.addExtension(oxt_url, props, "user", abort, cmd_env)
-            log_to_file("_perform_update: in-process addExtension succeeded")
+            if not self._install_oxt_inprocess(oxt_url, props, None, cmd_env):
+                log_to_file("_perform_update: in-process deployment API unavailable")
+                return False
+            log_to_file("_perform_update: in-process install succeeded")
 
             # Native restart: mark the restart, then quit — soffice re-execs
             # itself (no child process spawned).
