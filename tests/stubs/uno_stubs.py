@@ -24,6 +24,9 @@ class _XWindowListener:  pass
 class _XTopWindowListener: pass
 class _XNamed:           pass
 class _XSelectionChangeListener: pass
+class _XCommandEnvironment: pass
+class _XInteractionHandler: pass
+class _XCallback:        pass
 
 
 def install():
@@ -49,6 +52,11 @@ def install():
     com_sun_star_task = MagicMock()
     com_sun_star_task.XJobExecutor = _XJobExecutor
     com_sun_star_task.XJob = _XJob
+    com_sun_star_task.XInteractionHandler = _XInteractionHandler
+
+    # --- com.sun.star.ucb ---
+    com_sun_star_ucb = MagicMock()
+    com_sun_star_ucb.XCommandEnvironment = _XCommandEnvironment
 
     # --- com.sun.star.awt ---
     com_sun_star_awt = MagicMock()
@@ -59,6 +67,7 @@ def install():
     com_sun_star_awt.XMouseListener   = _XMouseListener
     com_sun_star_awt.XWindowListener  = _XWindowListener
     com_sun_star_awt.XTopWindowListener = _XTopWindowListener
+    com_sun_star_awt.XCallback         = _XCallback
 
     com_sun_star_awt_msgtype = MagicMock()
     com_sun_star_awt_msgtype.MESSAGEBOX = 0
@@ -83,6 +92,7 @@ def install():
         "com.sun": MagicMock(),
         "com.sun.star": MagicMock(),
         "com.sun.star.task": com_sun_star_task,
+        "com.sun.star.ucb": com_sun_star_ucb,
         "com.sun.star.awt": com_sun_star_awt,
         "com.sun.star.awt.MessageBoxType": com_sun_star_awt_msgtype,
         "com.sun.star.beans": com_sun_star_beans,
