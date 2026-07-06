@@ -1478,8 +1478,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     parent = active_frame.getContainerWindow()
                     msg_text = (
                         f"MIrAI {target_version} est prêt.\n\n"
-                        "Pour en profiter, LibreOffice doit redémarrer.\n\n"
-                        "Redémarrer maintenant ?\n\n"
+                        "Pour l'installer, LibreOffice va se fermer —\n"
+                        "vous le rouvrirez ensuite pour l'activer.\n\n"
+                        "Installer et fermer maintenant ?\n\n"
                         "(Si vous choisissez Non, la mise à jour sera\n"
                         "reproposée plus tard. Vous pouvez aussi la\n"
                         "lancer depuis le menu MIrAI → À propos…)"
@@ -1488,10 +1489,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         msg_text = (
                             f"Une nouvelle version de MIrAI ({target_version})\n"
                             "avec des améliorations importantes est prête.\n\n"
-                            "Redémarrer LibreOffice maintenant ?\n\n"
+                            "Pour l'installer, LibreOffice va se fermer —\n"
+                            "rouvrez-le ensuite pour l'activer.\n\n"
+                            "Installer et fermer maintenant ?\n\n"
                             "(Si vous choisissez Non, la mise à jour sera\n"
-                            "reproposée plus tard. Vous pouvez aussi la\n"
-                            "lancer depuis le menu MIrAI → À propos…)"
+                            "reproposée plus tard.)"
                         )
                     msgbox = toolkit.createMessageBox(
                         parent,
@@ -1845,63 +1847,80 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 return False
             log_to_file("_perform_update: in-process install succeeded")
 
-            # Native restart: request restart, then terminate on the MAIN thread so
-            # soffice actually re-execs itself (no child process spawned).
-            self._request_native_restart(handler)
+            # Close LibreOffice cleanly so the user reopens it with the new version
+            # active. We deliberately do NOT re-exec.
+            self._close_after_inprocess_update()
             return True
         except Exception as exc:
             log_to_file(f"_perform_update: in-process install failed, falling back: {exc}")
             return False
 
-    def _request_native_restart(self, handler):
-        """Restart LibreOffice natively — soffice re-execs itself, **no child process**.
+    def _close_after_inprocess_update(self):
+        """After an in-process install, CLOSE LibreOffice cleanly so the user reopens
+        it with the new version active.
 
-        Needs `OfficeRestartManager.requestRestart()` THEN a clean
-        `Desktop.terminate()`. terminate() must run on the **main thread**: from
-        this update-worker thread it corrupts the macOS layout engine, and a raw
-        SIGTERM (our previous approach) does NOT honour the restart flag — LO quits
-        without re-launching (observed on Mac). We marshal terminate() onto the main
-        thread via `com.sun.star.awt.AsyncCallback`. If that path is unavailable we
-        fall back to the previous quit-only behaviour so the update still applies on
-        the next manual open.
+        We deliberately do **not** re-exec (OfficeRestartManager.requestRestart): on
+        macOS that relaunches soffice into a windowless zombie, and relaunching *with*
+        a window would need a child process (`open -a` / `soffice.exe`) which the
+        locked-down-poste GPO denies (WinError 5). Closing + manual reopen is reliable
+        on every platform and spawns nothing.
+
+        `Desktop.terminate()` must run on the **main thread** (from this update-worker
+        thread it corrupts the macOS layout engine); we marshal it via
+        `com.sun.star.awt.AsyncCallback`, falling back to SIGTERM.
         """
-        smgr = self.ctx.getServiceManager()
+        # Best-effort: tell the user before closing.
         try:
-            rm = smgr.createInstanceWithContext(
-                "com.sun.star.task.OfficeRestartManager", self.ctx
+            desktop0 = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.ctx
             )
-            if rm is not None:
-                rm.requestRestart(handler)
-        except Exception as rerr:
-            log_to_file(f"_request_native_restart: requestRestart failed: {rerr}")
+            active_frame = desktop0.getCurrentFrame() if desktop0 else None
+            if active_frame:
+                toolkit = self.ctx.getServiceManager().createInstance("com.sun.star.awt.Toolkit")
+                parent = active_frame.getContainerWindow()
+                box = toolkit.createMessageBox(
+                    parent, 1, MSG_BUTTONS.BUTTONS_OK, "MIrAI — Mise à jour",
+                    "La mise à jour a été installée.\n\n"
+                    "LibreOffice va se fermer : rouvrez-le pour\n"
+                    "utiliser la nouvelle version."
+                )
+                box.execute()
+                try:
+                    box.dispose()
+                except Exception:
+                    pass
+        except Exception as msg_err:
+            log_to_file(f"_close_after_inprocess_update: message failed: {msg_err}")
 
+        # Clean shutdown on the MAIN thread — NO requestRestart (no windowless re-exec).
         ctx = self.ctx
+        smgr = self.ctx.getServiceManager()
         try:
             from com.sun.star.awt import XCallback
 
-            class _TerminateOnMain(unohelper.Base, XCallback):
+            class _CloseOnMain(unohelper.Base, XCallback):
                 def notify(self, _data):
                     try:
                         desktop = smgr.createInstanceWithContext(
                             "com.sun.star.frame.Desktop", ctx
                         )
                         if desktop is not None:
-                            log_to_file("_request_native_restart: terminate on main thread (re-exec)")
+                            log_to_file("_close_after_inprocess_update: terminating on main thread")
                             desktop.terminate()
                     except Exception as term_err:
-                        log_to_file(f"_request_native_restart: main-thread terminate failed: {term_err}")
+                        log_to_file(f"_close_after_inprocess_update: main-thread terminate failed: {term_err}")
 
             async_cb = smgr.createInstanceWithContext(
                 "com.sun.star.awt.AsyncCallback", ctx
             )
             if async_cb is not None:
-                async_cb.addCallback(_TerminateOnMain(), None)
-                log_to_file("_request_native_restart: terminate scheduled on main thread")
+                async_cb.addCallback(_CloseOnMain(), None)
+                log_to_file("_close_after_inprocess_update: close scheduled on main thread")
                 return
-            log_to_file("_request_native_restart: AsyncCallback unavailable, quitting only")
+            log_to_file("_close_after_inprocess_update: AsyncCallback unavailable, SIGTERM fallback")
         except Exception as cb_err:
-            log_to_file(f"_request_native_restart: AsyncCallback path failed ({cb_err}), quitting only")
-        # Fallback: quit only (SIGTERM). The update still applies on next open.
+            log_to_file(f"_close_after_inprocess_update: AsyncCallback path failed ({cb_err}), SIGTERM fallback")
+        # Fallback: quit (SIGTERM). The update still applies on next open.
         self._terminate_on_main_thread()
 
     def _terminate_on_main_thread(self):

@@ -123,8 +123,9 @@ def test_install_oxt_inprocess_uses_package_manager_factory():
         "remove doit précéder add"
 
 
-def test_install_and_restart_requests_native_restart_on_success():
-    """Install in-process OK → _request_native_restart() est appelé, retourne True."""
+def test_install_and_restart_closes_after_success():
+    """Install in-process OK → _close_after_inprocess_update() est appelé (fermeture,
+    PAS de re-exec), retourne True."""
     import os
     import tempfile
 
@@ -133,9 +134,9 @@ def test_install_and_restart_requests_native_restart_on_success():
     try:
         job = make_job()
         job._install_oxt_inprocess = MagicMock(return_value=True)
-        job._request_native_restart = MagicMock()  # évite le vrai terminate/SIGTERM
+        job._close_after_inprocess_update = MagicMock()  # évite le vrai terminate/SIGTERM
         assert job._install_and_restart_in_process(path) is True
-        job._request_native_restart.assert_called_once()
+        job._close_after_inprocess_update.assert_called_once()
     finally:
         os.remove(path)
 
