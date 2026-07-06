@@ -91,48 +91,44 @@ def test_in_process_install_degrades_gracefully(tmp_path):
     try:
         job = make_job()
         job._terminate_on_main_thread = MagicMock()  # sécurité
-        job._get_extension_manager = MagicMock(return_value=None)  # aucune API dispo
+        job._install_oxt_inprocess = MagicMock(return_value=False)  # aucune API dispo
         assert job._install_and_restart_in_process(path) is False
         job._terminate_on_main_thread.assert_not_called()
     finally:
         os.remove(path)
 
 
-# ── ExtensionManager est un SINGLETON new-style : accessor = .get(ctx) ─────
-# (createInstance ET getValueByName renvoient None sur LO 25.8 — confirmé par
-#  macro de sonde. Le fix .19 visait getValueByName → toujours None.)
+# ── Install in-process : PackageManagerFactory via getValueByName (sans import,
+#    thread-safe côté worker) ; l'import `from com.sun.star…` échoue hors thread
+#    principal ("No module named 'com'") — d'où le pré-bind + ce chemin. ─────────
 
-def test_get_extension_manager_uses_singleton_get():
-    """Régression : le manager s'obtient via theExtensionManager.get(ctx)."""
-    import sys
+def test_install_oxt_inprocess_uses_package_manager_factory():
+    """Chemin principal : thePackageManagerFactory (getValueByName, pas d'import)
+    → getPackageManager('user').addPackage(...)."""
+    job = make_job()
+    factory = MagicMock(name="thePackageManagerFactory")
+    job.ctx.getValueByName.return_value = factory
 
-    dep = sys.modules["com.sun.star.deployment"]
-    sentinel = MagicMock(name="theExtensionManager-instance")
-    prev = dep.theExtensionManager.get.return_value
-    dep.theExtensionManager.get.return_value = sentinel
+    assert job._install_oxt_inprocess("file:///x.oxt", (), None, None) is True
+    job.ctx.getValueByName.assert_called_with(
+        "/singletons/com.sun.star.deployment.thePackageManagerFactory"
+    )
+    factory.getPackageManager.assert_called_with("user")
+    factory.getPackageManager.return_value.addPackage.assert_called_once()
+
+
+def test_install_oxt_inprocess_false_when_no_api():
+    """Ni factory ni singleton ExtensionManager → False (repli script/manuel)."""
+    import src.mirai.entrypoint as ep
+
+    job = make_job()
+    job.ctx.getValueByName.return_value = None
+    prev = ep._EXT_MGR_SINGLETON
+    ep._EXT_MGR_SINGLETON = None
     try:
-        job = make_job()
-        assert job._get_extension_manager() is sentinel
-        dep.theExtensionManager.get.assert_called_with(job.ctx)
+        assert job._install_oxt_inprocess("file:///x.oxt", (), None, None) is False
     finally:
-        dep.theExtensionManager.get.return_value = prev
-
-
-def test_get_extension_manager_none_when_get_returns_none():
-    """Si .get(ctx) rend None (API indisponible), le helper renvoie None."""
-    import sys
-
-    dep = sys.modules["com.sun.star.deployment"]
-    prev_the = dep.theExtensionManager.get.return_value
-    prev_svc = dep.ExtensionManager.get.return_value
-    dep.theExtensionManager.get.return_value = None
-    dep.ExtensionManager.get.return_value = None
-    try:
-        job = make_job()
-        assert job._get_extension_manager() is None
-    finally:
-        dep.theExtensionManager.get.return_value = prev_the
-        dep.ExtensionManager.get.return_value = prev_svc
+        ep._EXT_MGR_SINGLETON = prev
 
 
 # ── Bouton « Ouvrir le dossier » : ouverture native, sans cmd.exe ────
