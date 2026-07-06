@@ -91,39 +91,48 @@ def test_in_process_install_degrades_gracefully(tmp_path):
     try:
         job = make_job()
         job._terminate_on_main_thread = MagicMock()  # sécurité
-        # Ni le singleton, ni le fallback createInstance ne fournissent le manager.
-        job.ctx.getValueByName.return_value = None
-        job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = None
+        job._get_extension_manager = MagicMock(return_value=None)  # aucune API dispo
         assert job._install_and_restart_in_process(path) is False
         job._terminate_on_main_thread.assert_not_called()
     finally:
         os.remove(path)
 
 
-# ── ExtensionManager est un SINGLETON (bug de la .17 : createInstance → None) ──
+# ── ExtensionManager est un SINGLETON new-style : accessor = .get(ctx) ─────
+# (createInstance ET getValueByName renvoient None sur LO 25.8 — confirmé par
+#  macro de sonde. Le fix .19 visait getValueByName → toujours None.)
 
-def test_get_extension_manager_prefers_singleton():
-    """Régression : le manager doit être lu via /singletons/...theExtensionManager,
-    PAS via createInstance (qui renvoie None pour ce singleton — cause du « in-process
-    install unavailable » observé dans les logs .16/.17/.18)."""
-    job = make_job()
-    sentinel = MagicMock(name="theExtensionManager")
-    job.ctx.getValueByName.return_value = sentinel
+def test_get_extension_manager_uses_singleton_get():
+    """Régression : le manager s'obtient via theExtensionManager.get(ctx)."""
+    import sys
 
-    assert job._get_extension_manager() is sentinel
-    job.ctx.getValueByName.assert_called_with(
-        "/singletons/com.sun.star.deployment.theExtensionManager"
-    )
+    dep = sys.modules["com.sun.star.deployment"]
+    sentinel = MagicMock(name="theExtensionManager-instance")
+    prev = dep.theExtensionManager.get.return_value
+    dep.theExtensionManager.get.return_value = sentinel
+    try:
+        job = make_job()
+        assert job._get_extension_manager() is sentinel
+        dep.theExtensionManager.get.assert_called_with(job.ctx)
+    finally:
+        dep.theExtensionManager.get.return_value = prev
 
 
-def test_get_extension_manager_falls_back_to_service():
-    """Si le singleton est indisponible (None), on tente le service en repli."""
-    job = make_job()
-    job.ctx.getValueByName.return_value = None
-    fallback = MagicMock(name="fallback-mgr")
-    job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = fallback
+def test_get_extension_manager_none_when_get_returns_none():
+    """Si .get(ctx) rend None (API indisponible), le helper renvoie None."""
+    import sys
 
-    assert job._get_extension_manager() is fallback
+    dep = sys.modules["com.sun.star.deployment"]
+    prev_the = dep.theExtensionManager.get.return_value
+    prev_svc = dep.ExtensionManager.get.return_value
+    dep.theExtensionManager.get.return_value = None
+    dep.ExtensionManager.get.return_value = None
+    try:
+        job = make_job()
+        assert job._get_extension_manager() is None
+    finally:
+        dep.theExtensionManager.get.return_value = prev_the
+        dep.ExtensionManager.get.return_value = prev_svc
 
 
 # ── Bouton « Ouvrir le dossier » : ouverture native, sans cmd.exe ────
