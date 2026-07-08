@@ -1,0 +1,14 @@
+{
+    "_note": "Tier PROD. bootstrap_urls = failover dans l'ordre : DGX (on-prem MI) → OCP ocpbm02s2 (MI interne) → passerelle Scaleway (public, filet). Transport seul : le SSO (mirai) et le reste sont servis par le DM. L'URL OCP a un cert interne → SSL non vérifié par-URL via bootstrap_insecure_urls (les autres restent vérifiées).",
+    "configVersion": 1,
+    "enabled": true,
+    "bootstrap_urls": [
+        "https://onyxia.gpu.minint.fr/bootstrap",
+        "https://bootstrap.apps.ocpbm02s2.cores.r2.pi2.minint.fr",
+        "https://bootstrap.fake-domain.name"
+    ],
+    "bootstrap_insecure_urls": [
+        "https://bootstrap.apps.ocpbm02s2.cores.r2.pi2.minint.fr"
+    ],
+    "config_path": "/config/mirai-libreoffice/config.json?profile=prod"
+}

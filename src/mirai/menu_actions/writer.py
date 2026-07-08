@@ -417,179 +417,15 @@ def _open_settings(job, selection):
         text_range.setString(text_range.getString() + ":error: " + str(e))
 
 
-def _get_writer_selection(job, model):
-    text = model.Text
-    ctrl = model.CurrentController
-    selection = ctrl.getSelection()
-    count = 0
-    try:
-        count = int(selection.getCount())
-    except Exception:
-        count = 1
-    if count <= 0:
-        job._log("[writer-selection] empty selection container")
-        return text, ctrl, selection, None, ""
-    text_range = selection.getByIndex(0)
-    selected_text = text_range.getString()
-    job._log(
-        "[writer-selection] ranges=%s selected_chars=%s empty=%s"
-        % (count, len(selected_text or ""), not bool((selected_text or "").strip()))
-    )
-    return text, ctrl, selection, text_range, selected_text
-
-
-def _correct_selection(job, text, selection, text_range, controller=None, model=None):
-    job._send_telemetry(
-        "CorrectSelection",
-        {
-            "action": "correct_selection",
-            "text_length": str(len(text_range.getString())),
-        },
-    )
-
-    try:
-        original_text = text_range.getString()
-        if not original_text.strip():
-            return
-
-        prompt = (
-            "TEXTE À CORRIGER :\n"
-            + original_text
-            + """
-
-Corrige les fautes d'orthographe, de grammaire et de syntaxe de ce texte.
-Garde le sens, le style et la structure d'origine.
-
-RÈGLES :
-- Garde la MÊME LANGUE que le texte original
-- Ne change PAS le sens ou le registre
-- Ne reformule PAS inutilement, corrige uniquement les erreurs
-- Ne pose AUCUNE question
-- N'ajoute AUCUNE explication
-- Produis UNIQUEMENT le texte corrigé
-
-TEXTE CORRIGÉ :
-"""
-        )
-
-        system_prompt = (
-            "Tu es un correcteur orthographique et grammatical expert. "
-            "Tu corriges les fautes d'orthographe, de grammaire et de syntaxe "
-            "en préservant le sens, le style et la langue du texte original. "
-            "Tu ne reformules pas — tu corriges uniquement."
-        )
-        max_tokens = len(original_text) + int(job.get_config("correct_selection_max_tokens", 4000))
-        request = job.make_api_request(prompt, system_prompt, max_tokens)
-
-        cursor = text.createTextCursorByRange(text_range)
-        cursor.collapseToEnd()
-
-        corrected_text = ""
-        correct_done = [False]
-        stop_phrases = ["[END]", "---END---"]
-
-        with _undo_context(model, "Corriger"):
-            text.insertString(cursor, "\n\n---début-de-correction---\n", False)
-
-            def append_corrected(chunk_text):
-                nonlocal corrected_text
-                if correct_done[0]:
-                    return
-                corrected_text += chunk_text
-                to_insert, done = _check_stop_phrase(corrected_text, chunk_text, stop_phrases)
-                if done:
-                    corrected_text = corrected_text[:len(corrected_text) - len(chunk_text) + len(to_insert)].rstrip()
-                    correct_done[0] = True
-                if to_insert:
-                    text.insertString(cursor, to_insert, False)
-                    _scroll_to_cursor(controller, cursor)
-
-            job.stream_request(request, "chat", append_corrected)
-            text.insertString(cursor, "\n---fin-de-correction---\n", False)
-    except Exception as e:
-        text_range = selection.getByIndex(0)
-        text_range.setString(text_range.getString() + ": " + str(e))
-
-
-def _translate_selection(job, text, selection, text_range, controller=None, model=None):
-    job._send_telemetry(
-        "TranslateSelection",
-        {
-            "action": "translate_selection",
-            "text_length": str(len(text_range.getString())),
-        },
-    )
-
-    try:
-        original_text = text_range.getString()
-        if not original_text.strip():
-            return
-
-        prompt = (
-            "TEXTE À TRADUIRE :\n"
-            + original_text
-            + """
-
-Traduis ce texte. Si le texte est en français, traduis-le en anglais. Sinon, traduis-le en français.
-
-RÈGLES :
-- Traduis fidèlement le sens, sans paraphraser
-- Garde le registre (formel/informel) du texte original
-- Ne pose AUCUNE question
-- N'ajoute AUCUNE explication ni note du traducteur
-- Produis UNIQUEMENT le texte traduit
-
-TRADUCTION :
-"""
-        )
-
-        system_prompt = (
-            "Tu es un traducteur professionnel expert. "
-            "Tu traduis fidèlement entre le français et l'anglais "
-            "en respectant le sens, le registre et le style du texte original. "
-            "Tu produis uniquement la traduction, sans commentaire."
-        )
-        max_tokens = len(original_text) + int(job.get_config("translate_selection_max_tokens", 4000))
-        request = job.make_api_request(prompt, system_prompt, max_tokens)
-
-        cursor = text.createTextCursorByRange(text_range)
-        cursor.collapseToEnd()
-
-        translated_text = ""
-        translate_done = [False]
-        stop_phrases = ["[END]", "---END---"]
-
-        with _undo_context(model, "Traduire"):
-            text.insertString(cursor, "\n\n---début-de-traduction---\n", False)
-
-            def append_translated(chunk_text):
-                nonlocal translated_text
-                if translate_done[0]:
-                    return
-                translated_text += chunk_text
-                to_insert, done = _check_stop_phrase(translated_text, chunk_text, stop_phrases)
-                if done:
-                    translated_text = translated_text[:len(translated_text) - len(chunk_text) + len(to_insert)].rstrip()
-                    translate_done[0] = True
-                if to_insert:
-                    text.insertString(cursor, to_insert, False)
-                    _scroll_to_cursor(controller, cursor)
-
-            job.stream_request(request, "chat", append_translated)
-            text.insertString(cursor, "\n---fin-de-traduction---\n", False)
-    except Exception as e:
-        text_range = selection.getByIndex(0)
-        text_range.setString(text_range.getString() + ": " + str(e))
-
-
 def handle_writer_action(job, args, model):
     if not hasattr(model, "Text"):
         return False
 
     job._log("Processing Writer document")
-    text, ctrl, selection, text_range, selected_text = _get_writer_selection(job, model)
-    if text_range is None:
-        return True
+    text = model.Text
+    ctrl = model.CurrentController
+    selection = ctrl.getSelection()
+    text_range = selection.getByIndex(0)
 
     if args == "ExtendSelection":
         _extend_selection(job, text, selection, text_range, controller=ctrl, model=model)
@@ -601,10 +437,6 @@ def handle_writer_action(job, args, model):
         _simplify_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "ResizeSelection":
         _resize_selection(job, text, selection, text_range, controller=ctrl, model=model)
-    elif args == "CorrectSelection":
-        _correct_selection(job, text, selection, text_range, controller=ctrl, model=model)
-    elif args == "TranslateSelection":
-        _translate_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "AboutDialog":
         try:
             job._show_about_dialog()
@@ -620,3 +452,4 @@ def handle_writer_action(job, args, model):
         _open_settings(job, selection)
 
     return True
+
