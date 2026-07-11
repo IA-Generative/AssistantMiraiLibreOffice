@@ -26,6 +26,15 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.28",
+      "date": "2026-07-06",
+      "changes": [
+        "Fix : install in-process via thePackageManagerFactory (getValueByName, sans import) \u2014 fonctionne depuis le thread worker",
+        "Fix : remove-before-add \u2014 retire l'ancienne registration avant addPackage (\u00e9vite le doublon 'duplicate implementation name')",
+        "Fix : apr\u00e8s l'install, LibreOffice se ferme proprement (thread principal, sans re-exec) avec le message 'rouvrez LibreOffice' \u2014 fini le red\u00e9marrage en zombie sans fen\u00eatre ; aucun processus enfant (OK poste durci)"
+      ]
+    },
+    {
       "version": "0.0.1.0.22",
       "date": "2026-07-06",
       "changes": [
