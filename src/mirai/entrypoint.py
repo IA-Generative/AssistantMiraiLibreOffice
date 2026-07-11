@@ -493,6 +493,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         "EnrollSuccess": "enroll.ok",
         "EnrollFailed": "enroll.fail",
         "BootstrapConfig": "bootstrap",
+        "LlmRelayError": "llm.error",
     }
 
     def _send_telemetry(self, span_name, attributes=None):
@@ -500,6 +501,75 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         attrs.setdefault("plugin.action", self._ACTION_NAMES.get(span_name, span_name))
         attrs.setdefault("trigger.source", getattr(self, "_trigger_source", "auto"))
         send_telemetry_trace_async(self, span_name, attrs)
+
+    # Anti-tempête : au plus un événement LlmRelayError par code d'erreur et par
+    # fenêtre de 60 s — un utilisateur au quota qui insiste ne doit pas générer
+    # une rafale de télémétrie (contrat DM, protocole § 8 bis).
+    _LLM_ERROR_DEDUP_SECONDS = 60
+
+    @staticmethod
+    def _parse_llm_error(status_code, body, headers=None):
+        """Extrait (error_code, retry_after) d'une réponse d'erreur du relais LLM.
+
+        Corps attendu (proxy DM /llm/v1) : {"error": {"code", "type", ...}} avec,
+        pour le 429, "retry_after" (secondes) — sinon repli sur l'en-tête
+        Retry-After, puis sur un code générique http_<statut>.
+        """
+        error_code = ""
+        retry_after = None
+        try:
+            data = json.loads(body) if body else {}
+            if isinstance(data, dict):
+                err = data.get("error")
+                if isinstance(err, dict):
+                    error_code = str(err.get("code") or err.get("type") or "").strip()
+                retry_after = data.get("retry_after")
+        except Exception:
+            pass
+        if retry_after is None and headers is not None:
+            try:
+                retry_after = headers.get("Retry-After")
+            except Exception:
+                retry_after = None
+        if not error_code:
+            error_code = f"http_{int(status_code or 0)}"
+        return error_code, retry_after
+
+    def _send_llm_relay_error(self, status_code, error_code, retry_after=None,
+                              request_id="", endpoint="chat/completions",
+                              will_retry=False):
+        """Journalisation fonctionnelle des erreurs du relais LLM (429/401/403/5xx).
+
+        Vue « parc côté client » complémentaire de l'audit serveur du proxy —
+        `llm.request_id` (recopie de X-Request-Id) est la clé de corrélation de
+        bout en bout. Jamais de contenu de prompt ni de réponse. Contrat :
+        device-management, docs/plugin-developer/…-update-features.md § 8 bis.
+        """
+        try:
+            now = time.time()
+            if not hasattr(self, "_llm_error_last_sent"):
+                self._llm_error_last_sent = {}
+            key = str(error_code or "unknown")
+            if now - self._llm_error_last_sent.get(key, 0) < self._LLM_ERROR_DEDUP_SECONDS:
+                return
+            self._llm_error_last_sent[key] = now
+            attrs = {
+                "llm.status_code": int(status_code or 0),
+                "llm.error_code": key,
+                "llm.endpoint": str(endpoint or "chat/completions"),
+                "llm.model": str(self.get_config("llm_default_models", "") or ""),
+                "llm.will_retry": bool(will_retry),
+            }
+            if retry_after is not None:
+                try:
+                    attrs["llm.retry_after_s"] = int(retry_after)
+                except (TypeError, ValueError):
+                    pass
+            if request_id:
+                attrs["llm.request_id"] = str(request_id)[:64]
+            self._send_telemetry("LlmRelayError", attrs)
+        except Exception as e:
+            log_to_file(f"Failed to send LlmRelayError telemetry: {str(e)}")
 
     def _get_user_config_dir(self):
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
@@ -4934,6 +5004,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         _DONE = object()          # sentinel
         _ERROR_401 = object()     # sentinel for auth error
         _ERROR_403 = object()     # sentinel for permission error (token not yet synced)
+        _ERROR_429 = object()     # sentinel for quota exceeded (paired with retry_after)
         chunk_queue = _queue.Queue()
 
         def _network_thread():
@@ -4973,16 +5044,34 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     body = e.read().decode("utf-8")
                 except Exception:
                     body = ""
-                if e.code == 401 or ("\"401\"" in body or "status\":401" in body
-                                     or "code\":401" in body):
+                error_code, retry_after = self._parse_llm_error(e.code, body, e.headers)
+                request_id = ""
+                try:
+                    if e.headers:
+                        request_id = str(e.headers.get("X-Request-Id", "") or "")
+                except Exception:
+                    pass
+                if e.code == 429:
+                    chunk_queue.put((_ERROR_429, retry_after))
+                elif e.code == 401 or ("\"401\"" in body or "status\":401" in body
+                                       or "code\":401" in body):
                     chunk_queue.put(_ERROR_401)
                 elif e.code == 403:
                     chunk_queue.put(_ERROR_403)
+                # Vue « parc côté client » : journalisation fonctionnelle de
+                # l'erreur relais (429/401/403/5xx), corrélée à l'audit serveur
+                # par X-Request-Id — jamais de contenu (protocole DM § 8 bis).
+                self._send_llm_relay_error(
+                    e.code, error_code, retry_after=retry_after,
+                    request_id=request_id, will_retry=(e.code == 403))
                 log_to_file(
                     f"ERROR in stream_request: HTTP {e.code} {e.reason} "
-                    f"body={body[:2000]}")
+                    f"request_id={request_id} body={body[:2000]}")
             except Exception as e:
-                log_to_file(f"ERROR in stream_request: {str(e)}")
+                reason = str(e)
+                self._send_llm_relay_error(
+                    0, "timeout" if "timed out" in reason.lower() else "network_error")
+                log_to_file(f"ERROR in stream_request: {reason}")
             finally:
                 chunk_queue.put(_DONE)
 
@@ -5024,6 +5113,22 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     continue
                 if item is _ERROR_403:
                     log_to_file("[stream] 403 received — caller should retry after config refresh")
+                    continue
+                if isinstance(item, tuple) and len(item) == 2 and item[0] is _ERROR_429:
+                    # Quota atteint : respecter retry_after (pas de réessai
+                    # automatique) et l'afficher à l'utilisateur.
+                    try:
+                        delay = f"{int(item[1])} secondes" if item[1] else "quelques instants"
+                    except (TypeError, ValueError):
+                        delay = "quelques instants"
+                    try:
+                        self._show_message(
+                            "Quota de requêtes atteint",
+                            "Le quota de requêtes vers l'assistant IA est atteint "
+                            "pour le moment.\n\n"
+                            f"Merci de réessayer dans {delay}.")
+                    except Exception:
+                        pass
                     continue
 
                 # Close thinking widget on first real chunk
