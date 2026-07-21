@@ -76,6 +76,7 @@ import base64
 import hashlib
 import threading
 import socket
+from .formatting import insert_formatted
 from .menu_actions.writer import handle_writer_action
 from .menu_actions.calc import handle_calc_action
 from .security_flow import (
@@ -5068,9 +5069,24 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         api_type = "chat"
         model = str(self.get_config("llm_default_models", ""))
         
-        # Add default system prompt to ensure plain text output and language preservation.
-        # /no_thinking prefix minimises reasoning tokens on Qwen3-style models.
-        default_system_prompt = "/no_thinking\nRenvoie uniquement du texte brut. N'utilise pas de markdown, de blocs de code ni de symboles de formatage comme **, *, _, ou #. RÈGLE ABSOLUE : tu DOIS répondre dans la MÊME LANGUE que le texte fourni par l'utilisateur. Si le texte est en français, réponds en français. Si le texte est en anglais, réponds en anglais. Ne change jamais la langue."
+        # Default system prompt: ask for structured Markdown (converted to native
+        # Writer formatting on insertion — see src/mirai/formatting) and enforce
+        # language preservation. /no_thinking prefix minimises reasoning tokens
+        # on Qwen3-style models.
+        default_system_prompt = (
+            "/no_thinking\n"
+            "Mets en forme ta réponse en Markdown standard : **gras**, *italique*, "
+            "titres avec #, listes avec - ou 1., citations avec >, liens en "
+            "[texte](url), tableaux avec des barres verticales. N'utilise JAMAIS de "
+            "balises HTML, sauf pour un alignement explicitement demandé "
+            "(centré, justifié, à droite), à indiquer uniquement avec "
+            "<p style=\"text-align:center\">...texte...</p> (ou right/justify) "
+            "autour du paragraphe concerné. "
+            "RÈGLE ABSOLUE : tu DOIS répondre dans la MÊME LANGUE que le texte "
+            "fourni par l'utilisateur. Si le texte est en français, réponds en "
+            "français. Si le texte est en anglais, réponds en anglais. Ne change "
+            "jamais la langue."
+        )
         if system_prompt:
             system_prompt = default_system_prompt + " " + system_prompt
         else:
@@ -6166,30 +6182,23 @@ EDITED VERSION:
                     insert_cursor.setPropertyValue("ParaStyleName", "Standard")
                 except Exception:
                     pass
-            text_obj.insertString(insert_cursor, accumulated_text, False)
-            log_to_file("EditSelection insert: done")
+            doc = None
+            try:
+                doc = self.ctx.ServiceManager.createInstanceWithContext(
+                    "com.sun.star.frame.Desktop", self.ctx
+                ).getCurrentComponent()
+            except Exception:
+                pass
 
-            # Reapply base styles to the whole inserted block
-            if old_len > 0 and new_len > 0:
-                try:
-                    style_cursor = text_obj.createTextCursorByRange(insert_point)
-                    style_cursor.goRight(new_len, True)
-                    if base_char_style:
-                        style_cursor.setPropertyValue("CharStyleName", base_char_style)
-                    if base_para_style:
-                        style_cursor.setPropertyValue("ParaStyleName", base_para_style)
-                except Exception:
-                    pass
+            insert_formatted(doc, text_obj, insert_cursor, accumulated_text, base_char_style, base_para_style)
+            log_to_file("EditSelection insert: done")
 
             # Reselect inserted text
             try:
-                model = self.ctx.ServiceManager.createInstanceWithContext(
-                    "com.sun.star.frame.Desktop", self.ctx
-                ).getCurrentComponent()
-                controller = model.getCurrentController() if model else None
+                controller = doc.getCurrentController() if doc else None
                 if controller:
                     sel_cursor = text_obj.createTextCursorByRange(insert_point)
-                    sel_cursor.goRight(new_len, True)
+                    sel_cursor.gotoRange(insert_cursor.getEnd(), True)
                     controller.select(sel_cursor)
             except Exception:
                 pass
@@ -6814,11 +6823,17 @@ EDITED VERSION:
                 except Exception:
                     mgr = None
                 try:
-                    rng.setString(raw)
+                    text_obj = rng.getText()
+                    resize_cursor = text_obj.createTextCursorByRange(rng)
+                    resize_cursor.setString("")
+                    insert_point = resize_cursor.getStart()
+                    insert_formatted(mdl, text_obj, resize_cursor, raw)
                     if ctrl:
                         try:
                             # Select the newly inserted text so user can resize again
-                            ctrl.select(rng)
+                            sel_cursor = text_obj.createTextCursorByRange(insert_point)
+                            sel_cursor.gotoRange(resize_cursor.getEnd(), True)
+                            ctrl.select(sel_cursor)
                         except Exception:
                             pass
                 finally:
