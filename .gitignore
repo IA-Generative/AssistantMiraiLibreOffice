@@ -32,3 +32,10 @@ log.txt
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Sorties sensibles locales (rapports, diagnostics) — jamais committées
+private/
+
+# Artefacts OXT décompressés / archives locales
+mirai-dgx/
+mirai-dgx.zip

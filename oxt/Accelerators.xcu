@@ -3,45 +3,39 @@
   <node oor:name="PrimaryKeys">
     <node oor:name="Modules">
 
+      <!--
+        Un seul raccourci : ouvrir la palette universelle.
+        ⚠ JAMAIS Ctrl+Shift+Espace (SPACE_SHIFT_MOD1) : c'est l'espace
+        insécable dans Writer et « Tout sélectionner » dans Calc.
+        SPACE_MOD1_MOD2 = Ctrl+Alt+Espace (Win/Linux) — slot libre vérifié.
+        SPACE_MOD3_MOD2 = Ctrl+Opt+Espace (macOS, où MOD1=Cmd est capté par
+        le Finder) — MOD3 n'existe pas ailleurs, binding inerte hors macOS.
+      -->
+
       <!-- ── Writer ──────────────────────────────────────────────────── -->
       <node oor:name="com.sun.star.text.TextDocument">
-        <node oor:name="Q_MOD1" oor:op="replace">
+        <node oor:name="SPACE_MOD1_MOD2" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?ExtendSelection&amp;src=key</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?OpenAssistant&amp;src=key</value>
           </prop>
         </node>
-        <node oor:name="E_MOD1" oor:op="replace">
+        <node oor:name="SPACE_MOD3_MOD2" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?EditSelection&amp;src=key</value>
-          </prop>
-        </node>
-        <node oor:name="R_MOD1" oor:op="replace">
-          <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?SummarizeSelection&amp;src=key</value>
-          </prop>
-        </node>
-        <node oor:name="L_MOD1" oor:op="replace">
-          <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?SimplifySelection&amp;src=key</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?OpenAssistant&amp;src=key</value>
           </prop>
         </node>
       </node>
 
       <!-- ── Calc ────────────────────────────────────────────────────── -->
       <node oor:name="com.sun.star.sheet.SpreadsheetDocument">
-        <node oor:name="T_MOD1" oor:op="replace">
+        <node oor:name="SPACE_MOD1_MOD2" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?TransformToColumn&amp;src=key</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?OpenAssistant&amp;src=key</value>
           </prop>
         </node>
-        <node oor:name="G_MOD1" oor:op="replace">
+        <node oor:name="SPACE_MOD3_MOD2" oor:op="replace">
           <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?GenerateFormula&amp;src=key</value>
-          </prop>
-        </node>
-        <node oor:name="K_MOD1" oor:op="replace">
-          <prop oor:name="Command">
-            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?AnalyzeRange&amp;src=key</value>
+            <value xml:lang="en-US">service:fr.gouv.interieur.mirai.do?OpenAssistant&amp;src=key</value>
           </prop>
         </node>
       </node>

@@ -524,6 +524,14 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._auth_prompt_lock = threading.Lock()
         self._auth_prompt_in_progress = False
         self._auth_prompted_at = 0
+        # Récupération d'auth LLM : ré-enrôlement de fond (creds relay manquants
+        # ou révoqués) et reprise après un 401 du proxy DM. Les deux sont
+        # backoffées — un DM volontairement sans relais ne doit pas être matraqué.
+        self._relay_recovery_lock = threading.Lock()
+        self._relay_recovery_in_progress = False
+        self._relay_recovery_last_at = 0
+        self._llm_auth_recovery_lock = threading.Lock()
+        self._llm_auth_recovery_last_at = 0
         self._config_write_lock = threading.Lock()
         self._edit_dialog = None
         self._resize_dialog = None
@@ -848,6 +856,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         "EnrollSuccess": "enroll.ok",
         "EnrollFailed": "enroll.fail",
         "BootstrapConfig": "bootstrap",
+        "LlmRelayError": "llm.error",
     }
 
     def _send_telemetry(self, span_name, attributes=None):
@@ -855,6 +864,75 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         attrs.setdefault("plugin.action", self._ACTION_NAMES.get(span_name, span_name))
         attrs.setdefault("trigger.source", getattr(self, "_trigger_source", "auto"))
         send_telemetry_trace_async(self, span_name, attrs)
+
+    # Anti-tempête : au plus un événement LlmRelayError par code d'erreur et par
+    # fenêtre de 60 s — un utilisateur au quota qui insiste ne doit pas générer
+    # une rafale de télémétrie (contrat DM, protocole § 8 bis).
+    _LLM_ERROR_DEDUP_SECONDS = 60
+
+    @staticmethod
+    def _parse_llm_error(status_code, body, headers=None):
+        """Extrait (error_code, retry_after) d'une réponse d'erreur du relais LLM.
+
+        Corps attendu (proxy DM /llm/v1) : {"error": {"code", "type", ...}} avec,
+        pour le 429, "retry_after" (secondes) — sinon repli sur l'en-tête
+        Retry-After, puis sur un code générique http_<statut>.
+        """
+        error_code = ""
+        retry_after = None
+        try:
+            data = json.loads(body) if body else {}
+            if isinstance(data, dict):
+                err = data.get("error")
+                if isinstance(err, dict):
+                    error_code = str(err.get("code") or err.get("type") or "").strip()
+                retry_after = data.get("retry_after")
+        except Exception:
+            pass
+        if retry_after is None and headers is not None:
+            try:
+                retry_after = headers.get("Retry-After")
+            except Exception:
+                retry_after = None
+        if not error_code:
+            error_code = f"http_{int(status_code or 0)}"
+        return error_code, retry_after
+
+    def _send_llm_relay_error(self, status_code, error_code, retry_after=None,
+                              request_id="", endpoint="chat/completions",
+                              will_retry=False):
+        """Journalisation fonctionnelle des erreurs du relais LLM (429/401/403/5xx).
+
+        Vue « parc côté client » complémentaire de l'audit serveur du proxy —
+        `llm.request_id` (recopie de X-Request-Id) est la clé de corrélation de
+        bout en bout. Jamais de contenu de prompt ni de réponse. Contrat :
+        device-management, docs/plugin-developer/…-update-features.md § 8 bis.
+        """
+        try:
+            now = time.time()
+            if not hasattr(self, "_llm_error_last_sent"):
+                self._llm_error_last_sent = {}
+            key = str(error_code or "unknown")
+            if now - self._llm_error_last_sent.get(key, 0) < self._LLM_ERROR_DEDUP_SECONDS:
+                return
+            self._llm_error_last_sent[key] = now
+            attrs = {
+                "llm.status_code": int(status_code or 0),
+                "llm.error_code": key,
+                "llm.endpoint": str(endpoint or "chat/completions"),
+                "llm.model": str(self.get_config("llm_default_models", "") or ""),
+                "llm.will_retry": bool(will_retry),
+            }
+            if retry_after is not None:
+                try:
+                    attrs["llm.retry_after_s"] = int(retry_after)
+                except (TypeError, ValueError):
+                    pass
+            if request_id:
+                attrs["llm.request_id"] = str(request_id)[:64]
+            self._send_telemetry("LlmRelayError", attrs)
+        except Exception as e:
+            log_to_file(f"Failed to send LlmRelayError telemetry: {str(e)}")
 
     def _get_user_config_dir(self):
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
@@ -1383,6 +1461,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             pass
                         self._persist_bootstrap_config(config_data)
                         self._persist_config_cache(config_data)
+                        # Le DM signale ici une auth relais manquante/refusée.
+                        # Réagir tout de suite évite de découvrir le problème
+                        # seulement au premier 401 sur /llm/v1.
+                        try:
+                            self._check_relay_auth_notice(config_data)
+                        except Exception as exc:
+                            log_to_file(f"[ENROLL] auth notice check failed: {str(exc)}")
                         return config_data
                     last_error = f"Invalid JSON root type: {type(config_data).__name__}"
                     log_to_file(f"Failed to fetch device management config ({mode}): {last_error}")
@@ -1419,7 +1504,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             if not isinstance(inner, dict):
                 return
             keys_to_sync = [
-                "llm_base_urls", "llm_api_tokens",
+                "llm_base_urls", "llm_api_tokens", "llmTokenExpiresAt",
                 "llm_default_models", "systemPrompt",
                 "telemetryEndpoint", "telemetryKey",
                 "telemetryAuthorizationType", "telemetrySel",
@@ -1434,18 +1519,31 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             ]
             # Keys that are only written locally if the user has no local value yet
             user_preference_keys = {"llm_default_models"}
+            # Clés dont la valeur VIDE est significative : le DM nous dit « ce
+            # credential n'est plus valable ». L'ignorer laisse un llmToken
+            # périmé ou révoqué sur disque, rejoué indéfiniment en 401.
+            clearable_keys = {"llm_api_tokens", "llmTokenExpiresAt"}
             for key in keys_to_sync:
-                if key in inner:
-                    val = inner[key]
-                    current = self._get_config_from_file(key, None)
-                    if key in user_preference_keys:
-                        # Only set from DM if user has no local preference
-                        if not current and val:
-                            self.set_config(key, val)
-                    elif val != current and val != "":
+                if key not in inner:
+                    continue
+                val = inner[key]
+                current = self._get_config_from_file(key, None)
+                if key in user_preference_keys:
+                    # Only set from DM if user has no local preference
+                    if not current and val:
                         self.set_config(key, val)
-                        if key == "llm_api_tokens":
-                            log_to_file(f"[persist] llm_api_tokens synced from DM ({len(str(val))} chars)")
+                    continue
+                if val == current:
+                    continue
+                if val == "" and key not in clearable_keys:
+                    continue
+                self.set_config(key, val)
+                if key == "llm_api_tokens":
+                    log_to_file(
+                        f"[persist] llm_api_tokens synced from DM ({len(str(val))} chars)"
+                        if val else
+                        "[persist] llm_api_tokens vidé par le DM (aucun llmToken minté)"
+                    )
             log_to_file("Bootstrap config persisted to local file")
         except Exception as e:
             log_to_file(f"Failed to persist bootstrap config: {str(e)}")
@@ -2380,11 +2478,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return self._get_config_from_file("llm_base_urls", default, telemetry_defaults=telemetry_defaults)
 
         if key == "llm_api_tokens":
-            config_value = self._get_setting("llm_api_tokens")
-            if config_value is not None:
-                if len(str(config_value)) >= 6:
-                    return config_value
-            return self._get_config_from_file("llm_api_tokens", default, telemetry_defaults=telemetry_defaults)
+            return self._resolve_llm_token(default, telemetry_defaults=telemetry_defaults)
 
         if key == "llm_default_models":
             local_model = str(self._get_config_from_file("llm_default_models", "", telemetry_defaults=telemetry_defaults)).strip()
@@ -3853,7 +3947,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         """Enrollment feedback is now handled inside the wizard — delegates to async."""
         self._ensure_device_management_state_async()
 
-    def _ensure_device_management_state(self):
+    def _ensure_device_management_state(self, force_enroll=False):
+        """Synchronise l'état DM et enrôle le poste si nécessaire.
+
+        `force_enroll` outrepasse le court-circuit « déjà enrôlé » : utilisé par
+        la récupération d'auth, quand le DM nous a explicitement signalé que nos
+        creds relay sont absents ou refusés.
+        """
         if not self._device_management_enabled():
             return
         config_data = self._fetch_config()
@@ -3918,8 +4018,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         if not enroll_endpoint:
             return
 
-        if self._as_bool(self._get_config_from_file("enrolled", False)):
+        # Court-circuit sur les CREDS RELAY, pas sur le drapeau `enrolled`.
+        # `enrolled=True` ne prouve que « /enroll a répondu 200 » : un poste
+        # marqué enrôlé mais sans creds relay est dans un état absorbant — le DM
+        # ne minte alors jamais de llmToken et tout /llm/v1 tombe en 401, sans
+        # aucun chemin de sortie. On re-tente donc l'enrôlement (POST /enroll est
+        # idempotent côté DM : il ré-émet une paire).
+        if self._relay_credentials_valid() and not force_enroll:
             return
+        if self._as_bool(self._get_config_from_file("enrolled", False)):
+            log_to_file(
+                "[ENROLL] enrolled=True mais creds relay absents/expirés"
+                f"{' (ré-enrôlement forcé)' if force_enroll else ''} — nouvel enrôlement"
+            )
 
         inner = config_data.get("config", {}) if isinstance(config_data, dict) else {}
         device_name = (
@@ -3981,8 +4092,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     self._fetch_config(force=True)
                 except Exception as _e:
                     log_to_file(f"Post-enroll config refresh failed: {_e}")
+                token_after = str(self.get_config("llm_api_tokens", "") or "").strip()
+                log_to_file(
+                    f"[ENROLL] post-enroll llmToken={'obtenu' if token_after else 'TOUJOURS ABSENT'}"
+                )
             else:
-                log_to_file("Device management enroll succeeded without relay credentials")
+                # Enrôlement « à moitié » : accepté par le DM mais sans creds
+                # relay. On le trace explicitement — c'est cet état, marqué
+                # `enrolled` sans creds, qui bloquait le poste indéfiniment.
+                log_to_file(
+                    "Device management enroll succeeded WITHOUT relay credentials — "
+                    "le DM ne pourra minter aucun llmToken (relais désactivé côté "
+                    "serveur ?) ; l'enrôlement sera re-tenté"
+                )
             self.set_config("enrolled", True)
         except Exception as e:
             error_body = ""
@@ -4010,7 +4132,222 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         token = str(preferred_token or "").strip()
         if token:
             return token
+        if self._llm_proxy_mode():
+            # Le proxy DM /llm/v1 n'accepte QUE le llmToken HMAC qu'il a minté
+            # (app/llm/tokens.py : format payload_b64.sig_b64). Un access_token
+            # Keycloak est un JWT à 3 segments : la vérification de signature
+            # échoue et le 401 renvoyé accuse le token au lieu de l'enrôlement.
+            # On refuse donc ce repli, qui ne peut structurellement pas marcher.
+            log_to_file(
+                "[llm-auth] aucun llmToken et proxy DM actif — repli sur "
+                "l'access_token Keycloak refusé (format incompatible)"
+            )
+            return ""
         return str(self._get_openwebui_access_token() or "").strip()
+
+    # ── Credentials du proxy LLM (llmToken / relay) ─────────────────────
+
+    @staticmethod
+    def _token_expired_at(raw_expires_at, skew_seconds=60):
+        """True si l'horodatage d'expiration (epoch) est atteint.
+
+        Absent ou <= 0 = expiration inconnue → False : on ne périme jamais un
+        credential sur une absence d'information, c'est le serveur qui tranche.
+        """
+        try:
+            expires_at = int(raw_expires_at or 0)
+        except (TypeError, ValueError):
+            return False
+        if expires_at <= 0:
+            return False
+        return time.time() >= (expires_at - skew_seconds)
+
+    def _llm_proxy_mode(self):
+        """True quand le DM annonce SON proxy /llm/v1 comme endpoint LLM.
+
+        Deux signaux, du plus fiable au plus robuste : la clé `llmToken` que le
+        DM ne pose que dans ce mode (app/main.py _apply_llm_proxy_overrides), et
+        à défaut la forme de l'endpoint (<bootstrap>/llm/v1) quand le cache DM
+        est froid.
+        """
+        settings = self._select_settings(self.config_cache)
+        if isinstance(settings, dict) and "llmToken" in settings:
+            return True
+        endpoint = str(self._get_config_from_file("llm_base_urls", "") or "").strip().rstrip("/")
+        if not endpoint.endswith("/llm/v1"):
+            return False
+        bootstrap = str(self._active_bootstrap_url() or "").strip().rstrip("/")
+        return bool(bootstrap) and endpoint.startswith(bootstrap)
+
+    def _relay_credentials_valid(self, skew_seconds=300):
+        """True si le poste a des credentials relay exploitables.
+
+        C'est LA source de vérité de l'enrôlement effectif : le drapeau
+        `enrolled` ne dit que « un POST /enroll a répondu 200 ». Sans ces creds,
+        /config repart sans X-Relay-*, le DM ne mint aucun llmToken, et tous les
+        appels /llm/v1 finissent en 401.
+        """
+        client_id = str(self._get_config_from_file("relay_client_id", "") or "").strip()
+        client_key = str(self._get_config_from_file("relay_client_key", "") or "").strip()
+        if not client_id or not client_key:
+            return False
+        return not self._token_expired_at(
+            self._get_config_from_file("relay_key_expires_at", 0), skew_seconds
+        )
+
+    def _resolve_llm_token(self, default, telemetry_defaults=None):
+        """Résout le llmToken en gardant token et expiration SOLIDAIRES.
+
+        Le llmToken est court (TTL DM 3600 s par défaut) alors que le cache de
+        config vit 300 s : le servir sans vérifier son expiration produit un 401
+        `invalid_api_key` que rien ne rattrape. Token et `llmTokenExpiresAt`
+        sont donc lus depuis la même source, cache DM d'abord puis disque.
+        """
+        cached = self._get_setting("llm_api_tokens")
+        settings = self._select_settings(self.config_cache) or {}
+        if cached is not None and len(str(cached)) >= 6:
+            if not self._token_expired_at(settings.get("llmTokenExpiresAt")):
+                return cached
+            log_to_file("[llm-auth] llmToken du cache DM expiré — refresh forcé")
+            self._schedule_config_refresh(force=True, reason="llm_token_expired")
+
+        stored = self._get_config_from_file(
+            "llm_api_tokens", default, telemetry_defaults=telemetry_defaults)
+        if stored and self._token_expired_at(
+                self._get_config_from_file("llmTokenExpiresAt", 0)):
+            log_to_file("[llm-auth] llmToken persisté expiré — ignoré, refresh forcé")
+            self._schedule_config_refresh(force=True, reason="llm_token_expired")
+            return default
+        return stored
+
+    def _llm_auth_debug(self):
+        """Une ligne sans ambiguïté sur le credential retenu pour l'appel LLM.
+
+        Distingue les trois cas que les logs confondaient : jeton présent,
+        aucun jeton faute d'enrôlement relais, et mode direct hors proxy DM.
+        """
+        proxy = self._llm_proxy_mode()
+        relay = "yes" if self._relay_credentials_valid() else "no"
+        token = str(self.get_config("llm_api_tokens", "") or "").strip()
+        if not token:
+            vector = "none"
+            detail = ""
+        elif proxy:
+            vector = "llmToken"
+            expires_at = self._get_config_from_file("llmTokenExpiresAt", 0)
+            try:
+                remaining = int(expires_at or 0) - int(time.time())
+            except (TypeError, ValueError):
+                remaining = 0
+            detail = f" expires_in={remaining}s" if remaining else ""
+        else:
+            vector = "api_key"
+            detail = ""
+        return (f"vector={vector}{detail} proxy_mode={proxy} relay_creds={relay} "
+                f"enrolled={self._as_bool(self._get_config_from_file('enrolled', False))}")
+
+    def _check_relay_auth_notice(self, config_data):
+        """Réagit au signal d'auth manquante que le DM place dans /config.
+
+        Le DM répond `_auth_notice` (+ `llmToken:""`) quand la requête /config
+        n'a pas présenté de paire X-Relay-Client/Key valide. C'est le diagnostic
+        le plus fiable dont dispose le plugin : sans creds relay, aucun llmToken
+        ne sera jamais minté et TOUS les appels /llm/v1 finiront en 401. Ignorer
+        ce signal, c'est rester bloqué indéfiniment.
+        """
+        if not self._device_management_enabled():
+            return False
+        inner = config_data.get("config", {}) if isinstance(config_data, dict) else {}
+        if not isinstance(inner, dict):
+            return False
+        notice = str(inner.get("_auth_notice", "") or "").strip()
+        proxy_mode = "llmToken" in inner
+        minted = str(inner.get("llmToken", "") or "").strip()
+        if not notice and not (proxy_mode and not minted):
+            return False
+        if self._relay_credentials_valid():
+            # Deux causes possibles, indiscernables côté client : creds révoqués
+            # côté serveur, ou DM_LLM_TOKEN_SIGNING_KEY absente côté DM (le mint
+            # rend alors "" sans erreur). Le ré-enrôlement traite la première ;
+            # la seconde se voit dans les logs DM.
+            log_to_file(
+                "[ENROLL] le DM n'a minté aucun llmToken malgré des creds relay "
+                "valides — creds révoqués, ou clé de signature absente côté DM ; "
+                "ré-enrôlement"
+            )
+        else:
+            log_to_file(
+                "[ENROLL] aucun llmToken minté et aucun cred relay valide — "
+                "ré-enrôlement planifié"
+            )
+        return self._schedule_relay_recovery()
+
+    def _schedule_relay_recovery(self, min_interval_seconds=900):
+        """Relance un enrôlement en tâche de fond pour récupérer des creds relay.
+
+        Jamais sur le thread appelant (/config tourne déjà dans un worker, et le
+        POST /enroll est bloquant). Backoff long : un DM délibérément sans relais
+        renverra toujours le même signal, on ne le matraque pas.
+        """
+        now = time.time()
+        with self._relay_recovery_lock:
+            if self._relay_recovery_in_progress:
+                return False
+            if now - self._relay_recovery_last_at < min_interval_seconds:
+                log_to_file("[ENROLL] relay recovery ignorée (backoff)")
+                return False
+            self._relay_recovery_in_progress = True
+            self._relay_recovery_last_at = now
+
+        def _worker():
+            try:
+                self._ensure_device_management_state(force_enroll=True)
+            except Exception as exc:
+                log_to_file(f"[ENROLL] relay recovery échouée: {str(exc)}")
+            finally:
+                self._relay_recovery_in_progress = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+
+    def _recover_llm_auth(self, min_interval_seconds=30):
+        """Restaure un credential LLM exploitable après un 401 du proxy DM.
+
+        APPELÉ DEPUIS LE THREAD RÉSEAU du pump SSE, jamais depuis le thread
+        principal : les deux étapes font du réseau bloquant et gèleraient
+        LibreOffice (cf. core/sse_pump.py).
+
+        1. /config forcé — suffit quand les creds relay sont bons : le DM mint un
+           llmToken frais à chaque réponse /config authentifiée.
+        2. ré-enrôlement synchrone — nécessaire quand les creds relay manquent ou
+           ont été révoqués, sans quoi l'étape 1 ne rendra jamais de token.
+        """
+        now = time.time()
+        with self._llm_auth_recovery_lock:
+            if now - self._llm_auth_recovery_last_at < min_interval_seconds:
+                log_to_file("[llm-auth] recovery ignorée (backoff)")
+                return bool(str(self.get_config("llm_api_tokens", "") or "").strip())
+            self._llm_auth_recovery_last_at = now
+
+        try:
+            self._fetch_config(force=True)
+        except Exception as exc:
+            log_to_file(f"[llm-auth] recovery: refresh /config échoué: {str(exc)}")
+        if str(self.get_config("llm_api_tokens", "") or "").strip():
+            log_to_file("[llm-auth] recovery: llmToken renouvelé via /config")
+            return True
+
+        if not self._relay_credentials_valid():
+            log_to_file("[llm-auth] recovery: creds relay absents/expirés — ré-enrôlement")
+            try:
+                self._ensure_device_management_state(force_enroll=True)
+            except Exception as exc:
+                log_to_file(f"[llm-auth] recovery: ré-enrôlement échoué: {str(exc)}")
+                return False
+
+        ok = bool(str(self.get_config("llm_api_tokens", "") or "").strip())
+        log_to_file(f"[llm-auth] recovery {'réussie' if ok else 'échouée'} — {self._llm_auth_debug()}")
+        return ok
 
     def _auth_header(self):
         name = str(self.get_config("authHeaderName", "Authorization")).strip() or "Authorization"
@@ -4025,6 +4362,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         if not relay_client_id or not relay_client_key:
             log_to_file(f"[RELAY] no relay creds: id={'yes' if relay_client_id else 'no'} key={'yes' if relay_client_key else 'no'}")
             return {}
+        if self._token_expired_at(self._get_config_from_file("relay_key_expires_at", 0)):
+            # On envoie quand même : le serveur reste l'autorité sur la validité.
+            # La trace sert à distinguer « creds absents » de « creds périmés ».
+            log_to_file("[RELAY] relay creds expirés d'après relay_key_expires_at")
         log_to_file(f"[RELAY] injecting relay headers: id={relay_client_id[:12]}...")
         return {
             "X-Relay-Client": relay_client_id,
@@ -4120,6 +4461,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     def _urlopen(self, request, context=None, timeout=None, use_proxy=True):
         try:
             req_url = str(getattr(request, "full_url", "") or "")
+            # NE PAS étendre cette règle à /llm/v1 : le trafic LLM s'authentifie
+            # avec le llmToken SEUL (scopé "llm", TTL 1 h). Décision du
+            # 2026-07-25, surface d'attaque : la paire relay est le credential
+            # maître (config + télémétrie + LLM) et vit 30 jours. De plus, côté
+            # DM, la présence de X-Relay-Client engage la branche relais qui
+            # échoue en 401 SANS repli vers le Bearer — les en-têtes masqueraient
+            # donc un llmToken valide. Voir prompts/fix-llm-token-auth.md.
             if "/relay-assistant/" in req_url:
                 for header_name, header_value in self._relay_headers().items():
                     try:
@@ -5090,6 +5438,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         header_name, header_prefix = self._auth_header()
         if api_key:
             headers[header_name] = f'{header_prefix}{api_key}'
+        log_to_file(f"[llm-auth] {self._llm_auth_debug()}")
 
         url = endpoint + api_path + "/chat/completions"
         log_to_file(f"Full URL: {url}")
@@ -5163,6 +5512,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         header_name, header_prefix = self._auth_header()
         if api_key:
             headers[header_name] = f"{header_prefix}{api_key}"
+        log_to_file(f"[llm-auth] {self._llm_auth_debug()}")
 
         url = endpoint + api_path + "/chat/completions"
         data = {
@@ -5289,6 +5639,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         _DONE = object()          # sentinel
         _ERROR_401 = object()     # sentinel for auth error
         _ERROR_403 = object()     # sentinel for permission error (token not yet synced)
+        _ERROR_429 = object()     # sentinel for quota exceeded (paired with retry_after)
         chunk_queue = _queue.Queue()
 
         def _network_thread():
@@ -5328,16 +5679,34 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     body = e.read().decode("utf-8")
                 except Exception:
                     body = ""
-                if e.code == 401 or ("\"401\"" in body or "status\":401" in body
-                                     or "code\":401" in body):
+                error_code, retry_after = self._parse_llm_error(e.code, body, e.headers)
+                request_id = ""
+                try:
+                    if e.headers:
+                        request_id = str(e.headers.get("X-Request-Id", "") or "")
+                except Exception:
+                    pass
+                if e.code == 429:
+                    chunk_queue.put((_ERROR_429, retry_after))
+                elif e.code == 401 or ("\"401\"" in body or "status\":401" in body
+                                       or "code\":401" in body):
                     chunk_queue.put(_ERROR_401)
                 elif e.code == 403:
                     chunk_queue.put(_ERROR_403)
+                # Vue « parc côté client » : journalisation fonctionnelle de
+                # l'erreur relais (429/401/403/5xx), corrélée à l'audit serveur
+                # par X-Request-Id — jamais de contenu (protocole DM § 8 bis).
+                self._send_llm_relay_error(
+                    e.code, error_code, retry_after=retry_after,
+                    request_id=request_id, will_retry=(e.code == 403))
                 log_to_file(
                     f"ERROR in stream_request: HTTP {e.code} {e.reason} "
-                    f"body={body[:2000]}")
+                    f"request_id={request_id} body={body[:2000]}")
             except Exception as e:
-                log_to_file(f"ERROR in stream_request: {str(e)}")
+                reason = str(e)
+                self._send_llm_relay_error(
+                    0, "timeout" if "timed out" in reason.lower() else "network_error")
+                log_to_file(f"ERROR in stream_request: {reason}")
             finally:
                 chunk_queue.put(_DONE)
 
@@ -5379,6 +5748,22 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     continue
                 if item is _ERROR_403:
                     log_to_file("[stream] 403 received — caller should retry after config refresh")
+                    continue
+                if isinstance(item, tuple) and len(item) == 2 and item[0] is _ERROR_429:
+                    # Quota atteint : respecter retry_after (pas de réessai
+                    # automatique) et l'afficher à l'utilisateur.
+                    try:
+                        delay = f"{int(item[1])} secondes" if item[1] else "quelques instants"
+                    except (TypeError, ValueError):
+                        delay = "quelques instants"
+                    try:
+                        self._show_message(
+                            "Quota de requêtes atteint",
+                            "Le quota de requêtes vers l'assistant IA est atteint "
+                            "pour le moment.\n\n"
+                            f"Merci de réessayer dans {delay}.")
+                    except Exception:
+                        pass
                     continue
 
                 # Close thinking widget on first real chunk
@@ -9744,10 +10129,21 @@ EDITED VERSION:
             if not self._device_management_enabled():
                 return False
             enrolled = self._as_bool(self._get_config_from_file("enrolled", False))
-            if enrolled:
-                return False
             access_token = str(self._get_config_from_file("access_token", "")).strip()
-            if access_token and not self._token_is_expired(access_token):
+            has_login = bool(access_token) and not self._token_is_expired(access_token)
+            if enrolled:
+                # Enrôlé « à moitié » : sans creds relay le DM ne mint aucun
+                # llmToken, et le ré-enrôlement de fond a lui-même besoin d'une
+                # session valide (il dérive l'email du token). Sans les deux, le
+                # poste ne peut plus sortir de l'impasse tout seul → wizard.
+                if not self._relay_credentials_valid() and not has_login:
+                    log_to_file(
+                        "[ENROLL] enrolled=True mais ni creds relay ni session "
+                        "valide — wizard d'enrôlement requis"
+                    )
+                    return True
+                return False
+            if has_login:
                 return False
             return True
         except Exception:
@@ -9857,6 +10253,13 @@ EDITED VERSION:
             "com.sun.star.frame.Desktop", self.ctx)
         model = desktop.getCurrentComponent()
         self._log(f"Current component type: {type(model)}")
+
+        # Palette universelle (démonstrateur moteur MCP) — import paresseux :
+        # zéro coût au chargement de l'extension.
+        if action == "OpenAssistant":
+            from .core.entry import open_palette
+            open_palette(self, model)
+            return
 
         if handle_writer_action(self, action, model):
             return
