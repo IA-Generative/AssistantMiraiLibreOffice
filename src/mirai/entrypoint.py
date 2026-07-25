@@ -3956,9 +3956,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _ensure_device_management_state_with_dialog(self):
-        """Enrollment feedback is now handled inside the wizard — delegates to async."""
-        self._ensure_device_management_state_async()
 
     def _ensure_device_management_state(self, force_enroll=False):
         """Synchronise l'état DM et enrôle le poste si nécessaire.
@@ -4573,30 +4570,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file(f"Failed to read LibreOffice proxy settings: {str(e)}")
         return settings
 
-    def _proxy_mismatch(self):
-        cfg = self._get_proxy_config()
-        lo = self._lo_proxy_settings()
-        mismatches = []
-        if cfg["enabled"] != lo["enabled"]:
-            mismatches.append("enabled")
-        cfg_host = ""
-        cfg_port = ""
-        if cfg["proxy_url"]:
-            normalized = self._normalize_proxy_url(cfg["proxy_url"])
-            try:
-                parsed = urllib.parse.urlparse(normalized)
-                cfg_host = parsed.hostname or ""
-                cfg_port = str(parsed.port) if parsed.port else ""
-            except Exception:
-                pass
-        if cfg["enabled"] and lo["enabled"]:
-            if cfg_host and lo["host"] and cfg_host != lo["host"]:
-                mismatches.append("host")
-            if cfg_port and lo["port"] and cfg_port != lo["port"]:
-                mismatches.append("port")
-            if cfg["username"] and lo["username"] and cfg["username"] != lo["username"]:
-                mismatches.append("username")
-        return mismatches, cfg, lo
 
     def _schedule_enrollment_check(self):
         """Deferred enrollment check — fires ~3s after init to let UI start."""
@@ -5252,25 +5225,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._models_cache_loaded_at = now
         return models
 
-    def _api_reachable(self, endpoint, headers, is_openwebui, path):
-        endpoint = (endpoint or "").rstrip("/")
-        if path.startswith("http://") or path.startswith("https://"):
-            url = path
-        else:
-            if path.startswith("/"):
-                url = endpoint + path
-            else:
-                url = endpoint + "/" + path
-        try:
-            request = urllib.request.Request(url, headers=_with_user_agent(headers))
-            with self._urlopen(request, context=self.get_ssl_context(), timeout=5) as response:
-                if response.status < 200 or response.status >= 300:
-                    return False
-                payload = response.read().decode("utf-8")
-            json.loads(payload)
-            return True
-        except Exception:
-            return False
 
     def _api_probe(self, endpoint, headers, path):
         endpoint = (endpoint or "").rstrip("/")
@@ -5345,72 +5299,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         return anon_ok, auth_ok
 
-    def _choose_model_via_ai(self, description, endpoint, api_key, is_openwebui):
-        api_key = self._effective_api_token(api_key)
-        models = self._fetch_models_list(endpoint, api_key, is_openwebui)
-        if not models:
-            return None
-
-        current_model = str(self.get_config("llm_default_models", "")).strip()
-        model_for_request = current_model or models[0]
-        endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
-        if api_path:
-            url = endpoint + api_path + "/chat/completions"
-        else:
-            url = endpoint + "/chat/completions"
-
-        headers = {"Content-Type": "application/json"}
-        if is_openwebui:
-            header_name, header_prefix = self._auth_header()
-            if api_key:
-                headers[header_name] = f"{header_prefix}{api_key}"
-        elif api_key:
-            header_name, header_prefix = self._auth_header()
-            headers[header_name] = f"{header_prefix}{api_key}"
-
-        system_prompt = (
-            "Select the best model id from the provided list. "
-            "Return exactly one model id from the list and nothing else."
-        )
-        user_prompt = f"Use case: {description}\n\nModel list:\n" + "\n".join(models)
-        data = {
-            "model": model_for_request,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "max_tokens": 32,
-            "temperature": 0,
-            "stream": False
-        }
-
-        try:
-            json_data = json.dumps(data).encode("utf-8")
-            request = urllib.request.Request(url, data=json_data, headers=_with_user_agent(headers))
-            request.get_method = lambda: 'POST'
-            with self._urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
-                payload = response.read().decode("utf-8")
-            response_data = json.loads(payload)
-            choice = None
-            if isinstance(response_data, dict) and response_data.get("choices"):
-                first = response_data["choices"][0]
-                if isinstance(first, dict):
-                    message = first.get("message", {})
-                    if isinstance(message, dict):
-                        choice = message.get("content")
-                    if not choice:
-                        choice = first.get("text")
-            if choice:
-                candidate = choice.strip()
-                if candidate in models:
-                    return candidate
-                for model_id in models:
-                    if candidate.lower() in model_id.lower():
-                        return model_id
-        except Exception as e:
-            log_to_file(f"Model AI search failed: {str(e)}")
-
-        return models[0] if models else None
 
 
     def make_api_request(self, prompt, system_prompt="", max_tokens=15000, api_type=None):
@@ -8995,153 +8883,6 @@ EDITED VERSION:
         dlg.setVisible(True)
         self._formula_dialog = dlg
 
-    def credentials_box(self, title="Device Management", login_label="Login", password_label="Mot de passe"):
-        """Dialog with login + password and a show/hide toggle."""
-        WIDTH = 540
-        HORI_MARGIN = 16
-        VERT_MARGIN = 14
-        BUTTON_WIDTH = 110
-        BUTTON_HEIGHT = 30
-        HORI_SEP = 10
-        VERT_SEP = 8
-        LABEL_HEIGHT = 20
-        EDIT_HEIGHT = 28
-        TOGGLE_WIDTH = 90
-        HEIGHT = VERT_MARGIN * 2 + (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP) * 2 + BUTTON_HEIGHT + VERT_SEP * 2
-        import uno
-        from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
-        from com.sun.star.awt.PushButtonType import OK, CANCEL
-        ctx = uno.getComponentContext()
-        def create(name):
-            return ctx.getServiceManager().createInstanceWithContext(name, ctx)
-        dialog = create("com.sun.star.awt.UnoControlDialog")
-        dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
-        dialog.setModel(dialog_model)
-        try:
-            dialog_model.BackgroundColor = _UI["bg"]
-        except Exception:
-            pass
-        dialog.setVisible(False)
-        dialog.setTitle(title)
-        dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
-
-        def add(name, type, x_, y_, width_, height_, props):
-            try:
-                model = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type + "Model")
-            except Exception as e:
-                log_to_file(f"Dialog control type unsupported: name={name} type={type} error={str(e)}")
-                return None
-            try:
-                dialog_model.insertByName(name, model)
-            except Exception as e:
-                log_to_file(f"Dialog insert failed: name={name} type={type} error={str(e)}")
-                return None
-            control = dialog.getControl(name)
-            try:
-                control.setPosSize(x_, y_, width_, height_, POSSIZE)
-            except Exception as e:
-                log_to_file(f"Dialog size failed: name={name} type={type} error={str(e)}")
-            for key, value in props.items():
-                try:
-                    setattr(model, key, value)
-                except Exception as e:
-                    log_to_file(f"Dialog prop unsupported: control={name} type={type} prop={key} error={str(e)}")
-            return control
-
-        current_y = VERT_MARGIN
-        # Section header
-        add("section_auth", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
-            "Label": "Authentification", "NoLabel": True,
-            "FontHeight": _UI["font_section"],
-            "TextColor": _UI["primary"],
-            "FontWeight": 150,
-        })
-        current_y += LABEL_HEIGHT + VERT_SEP
-
-        add("label_login", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
-            "Label": str(login_label), "NoLabel": True,
-            "FontHeight": _UI["font_label"],
-            "TextColor": _UI["text"],
-        })
-        current_y += LABEL_HEIGHT + VERT_SEP
-        add("edit_login", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
-            "Text": "", "BackgroundColor": _UI["bg_input"],
-        })
-        current_y += EDIT_HEIGHT + VERT_SEP
-
-        add("label_password", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
-            "Label": str(password_label), "NoLabel": True,
-            "FontHeight": _UI["font_label"],
-            "TextColor": _UI["text"],
-        })
-        current_y += LABEL_HEIGHT + VERT_SEP
-        password_width = WIDTH - HORI_MARGIN * 2 - TOGGLE_WIDTH - HORI_SEP
-        add("edit_password", "Edit", HORI_MARGIN, current_y, password_width, EDIT_HEIGHT, {
-            "Text": "", "EchoChar": ord("*"),
-            "BackgroundColor": _UI["bg_input"],
-        })
-        add("btn_toggle", "Button", HORI_MARGIN + password_width + HORI_SEP, current_y,
-            TOGGLE_WIDTH, EDIT_HEIGHT, {
-                "Label": "Afficher",
-                "FontHeight": _UI["font_small"],
-            })
-
-        current_y += EDIT_HEIGHT + VERT_SEP * 2
-        # Separator
-        add("line_before_btns", "FixedLine", HORI_MARGIN, current_y,
-            WIDTH - HORI_MARGIN * 2, 2, {})
-        current_y += VERT_SEP
-
-        add("btn_ok", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH * 2 - HORI_SEP, current_y,
-            BUTTON_WIDTH, BUTTON_HEIGHT, {
-                "PushButtonType": OK, "DefaultButton": True,
-                "FontHeight": _UI["font_label"],
-            })
-        add("btn_cancel", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH, current_y,
-            BUTTON_WIDTH, BUTTON_HEIGHT, {
-                "PushButtonType": CANCEL, "Label": "Annuler",
-                "FontHeight": _UI["font_label"],
-            })
-
-        frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
-        window = frame.getContainerWindow() if frame else None
-        dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
-        if window:
-            ps = window.getPosSize()
-            _x = ps.Width / 2 - WIDTH / 2
-            _y = ps.Height / 2 - HEIGHT / 2
-            dialog.setPosSize(_x, _y, 0, 0, POS)
-
-        edit_login = dialog.getControl("edit_login")
-        edit_password = dialog.getControl("edit_password")
-        btn_toggle = dialog.getControl("btn_toggle")
-        is_masked = {"value": True}
-
-        class ToggleListener(unohelper.Base, XActionListener):
-            def actionPerformed(self, event):
-                is_masked["value"] = not is_masked["value"]
-                try:
-                    edit_password.getModel().EchoChar = ord("*") if is_masked["value"] else 0
-                except Exception:
-                    pass
-                try:
-                    btn_toggle.getModel().Label = "Afficher" if is_masked["value"] else "Masquer"
-                except Exception:
-                    pass
-            def disposing(self, event):
-                return
-
-        try:
-            btn_toggle.addActionListener(ToggleListener())
-        except Exception:
-            pass
-
-        edit_login.setFocus()
-        ok = dialog.execute()
-        username = edit_login.getModel().Text.strip() if ok else ""
-        password = edit_password.getModel().Text if ok else ""
-        dialog.dispose()
-        return username, password
 
     def settings_box(self,title="", x=None, y=None):
         """ Settings dialog with configurable backend options """

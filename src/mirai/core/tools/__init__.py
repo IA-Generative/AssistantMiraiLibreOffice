@@ -1,6 +1,6 @@
 """Enregistrement des tools UNO du moteur."""
 
-from . import writer_tools, calc_tools
+from . import calc_tools, writer_tools
 
 
 def register_all(registry):

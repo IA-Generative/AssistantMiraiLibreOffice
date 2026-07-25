@@ -7,9 +7,6 @@ from .shared import apply_settings_result
 _RE_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
-def _strip_think_blocks(text):
-    """Remove <think>...</think> chain-of-thought blocks (e.g. deepseek-r1)."""
-    return _RE_THINK.sub("", text).lstrip("\n")
 
 
 def _check_stop_phrase(accumulated, chunk, stop_phrases):

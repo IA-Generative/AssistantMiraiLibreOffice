@@ -9,7 +9,9 @@ pump SSE) — ils peuvent donc toucher l'UI et le document.
 """
 
 from .text_filters import (
-    check_stop_phrase, contains_pattern, strip_markdown,
+    check_stop_phrase,
+    contains_pattern,
+    strip_markdown,
 )
 
 

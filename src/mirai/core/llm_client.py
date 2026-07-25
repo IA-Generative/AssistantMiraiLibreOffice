@@ -16,8 +16,8 @@ import json
 import re
 
 from . import sse_pump
-from .tool_calls import ToolCall
 from .text_filters import strip_think_blocks
+from .tool_calls import ToolCall
 
 DEFAULT_STEP_MAX_TOKENS = 4000
 

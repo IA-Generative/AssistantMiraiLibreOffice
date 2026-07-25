@@ -1,0 +1,58 @@
+# Outillage de DÉVELOPPEMENT uniquement — rien d'ici n'est embarqué dans l'OXT.
+# La contrainte « no-pip » porte sur le plugin livré (qui n'utilise que la
+# bibliothèque standard et urllib), pas sur le poste de développement.
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"          # version du Python embarqué dans LibreOffice 25.8
+extend-exclude = ["mirai-dgx", "dist", "build", ".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle — erreurs et avertissements
+    "F",        # pyflakes — noms non définis, imports et variables inutilisés
+    "I",        # tri des imports
+    "B",        # bugbear — pièges classiques (mutable default, boucle/closure…)
+    "C90",      # complexité cyclomatique (voir mccabe ci-dessous)
+    "UP",       # modernisation de syntaxe
+    "ARG",      # arguments inutilisés
+]
+ignore = [
+    # Les frontières UNO imposent des `except Exception` larges : la règle du
+    # projet n'est pas de les interdire mais d'exiger qu'ils JOURNALISENT.
+    # Ce point se vérifie en revue, pas au linter.
+    "B008",     # appel de fonction dans une valeur par défaut (usage UNO courant)
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# Les tests peuvent importer largement et déclarer des fixtures non utilisées.
+"tests/**" = ["ARG", "E501"]
+# Signatures uniformes imposées par un contrat, pas par négligence :
+#  - presets  : tous les runners partagent (ctx, shell, user_text, tee,
+#               cancel_event, dispatcher) pour être interchangeables ; chacun
+#               n'en consomme qu'une partie. La factorisation `run_text_pipeline`
+#               prévue au plan supprimera ce besoin — dette nommée, pas oubliée.
+#  - sinks / tools / ui_thread / dsfr : implémentations d'interfaces (stream_delta,
+#               finish, handler de tool, callback) dont la signature est fixée
+#               par l'appelant.
+"src/mirai/core/presets.py" = ["ARG001"]
+"src/mirai/core/sinks.py" = ["ARG002"]
+"src/mirai/core/tools/*.py" = ["ARG001"]
+"src/mirai/core/ui_thread.py" = ["ARG002"]
+"src/mirai/ui/dsfr.py" = ["ARG001", "ARG002"]
+"src/mirai/ui/palette.py" = ["ARG002"]
+# La coquille historique est en cours de découpage : elle est hors budget tant
+# que le travail n'est pas fini. Les modules NEUFS (core/, ui/) le respectent.
+"src/mirai/entrypoint.py" = ["C901", "E501", "ARG", "B", "UP", "I", "E402", "E701", "E741", "F841"]
+"src/mirai/menu_actions/*.py" = ["C901", "E501", "ARG", "B", "UP", "I"]
+"src/mirai/security_flow.py" = ["C901", "E501", "ARG", "B", "UP", "I"]
+"src/mirai/calc_prompt_function.py" = ["C901", "E501", "ARG", "B", "UP", "I", "E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit", "tests/integration"]
+# tests/fixtures contient des générateurs de documents qui dépendent d'odfpy —
+# hors périmètre de la suite, et absent du poste par défaut.
+norecursedirs = ["tests/fixtures", "tests/simulation"]

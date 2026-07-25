@@ -30,19 +30,20 @@ except Exception:
     class XCallback:  # stub hors LO (tests)
         pass
 
+from ..core import presets as presets_module
 from ..core.context import ToolContext
 from ..core.conversation import ConversationStore
 from ..core.llm_client import LLMClient
 from ..core.orchestrator import Orchestrator, RunObserver
 from ..core.registry import ToolRegistry
 from ..core.sinks import PaletteSink, WriterReplaceSink
-from ..core import presets as presets_module
 from ..core.tools import register_all
 from ..core.ui_thread import DispatcherClosed, MainThreadDispatcher
 from . import dsfr
 
 try:
-    from com.sun.star.awt.Key import RETURN as KEY_RETURN, ESCAPE as KEY_ESCAPE
+    from com.sun.star.awt.Key import ESCAPE as KEY_ESCAPE
+    from com.sun.star.awt.Key import RETURN as KEY_RETURN
 except Exception:
     KEY_RETURN, KEY_ESCAPE = 1280, 1281
 
@@ -646,58 +647,13 @@ class AssistantPalette:
         Aucun accès direct à l'UI ni au document ici : tout passe par
         `self.dispatcher` (post pour l'affichage, call pour le document).
         """
-        observer = _JournalObserver(self)
         try:
             if preset is not None and preset.mode == "pipeline":
-                # Le pipeline touche le document : il s'exécute sur le thread
-                # principal, mais son appel LLM reste dans ce worker (il est
-                # lancé par le runner lui-même, hors dispatcher).
-                message = preset.runner(ctx, self.shell, prompt_text, None,
-                                        cancel_event=self._cancel,
-                                        dispatcher=self.dispatcher)
-                self._append_response("MIrAI : ", message)
-                self.conversation.append("user", shown, ctx.app)
-                self.conversation.append("assistant", message, ctx.app)
+                self._run_pipeline(preset, prompt_text, ctx, shown)
             else:
-                llm = LLMClient(self.shell)
-                orchestrator = Orchestrator(
-                    llm, self.registry, ctx, observer=observer,
-                    conversation=self.conversation,
-                    cancel_event=self._cancel,
-                    dispatcher=self.dispatcher)
-                extra = ""
-                user_prompt = prompt_text
-                sink = PaletteSink(on_delta=None)
-                if preset is not None:
-                    if preset.build_extra:
-                        extra = preset.build_extra(ctx, self.shell, prompt_text)
-                    if preset.prompt_template:
-                        user_prompt = preset.prompt_template(prompt_text)
-                    if preset.sink_spec == "auto_edit":
-                        # Lecture du document → thread principal obligatoire.
-                        selection = self.dispatcher.call(
-                            lambda: _selection_string(ctx), timeout=10)
-                        if selection.strip():
-                            sink = WriterReplaceSink(ctx)
-                self._append_response("MIrAI : ")
-                if isinstance(sink, PaletteSink):
-                    sink = PaletteSink(on_delta=self._stream_response)
-                result = orchestrator.run_agentic(
-                    user_prompt, sink,
-                    preset_extra=extra,
-                    preset_id=preset.id if preset else "free")
-                self._delta_buffer.flush()
-                if not result.ok:
-                    self._stream_response("⚠ " + (result.text or result.reason))
-                elif not isinstance(sink, PaletteSink):
-                    self._stream_response(result.text or "Modification appliquée.")
+                self._run_agentic(preset, prompt_text, ctx)
             self._delta_buffer.flush()
-            if self._cancelled():
-                self.set_status("Arrêté.", tone="neutral")
-            else:
-                self.dispatcher.post(
-                    lambda: self._models["prompt"].__setattr__("Text", ""))
-                self.set_status("Terminé", tone="success")
+            self._finish_run()
         except DispatcherClosed:
             self.shell.log("[palette] run interrompu : palette fermée")
         except Exception as exc:
@@ -711,6 +667,68 @@ class AssistantPalette:
             self._worker = None
             self.dispatcher.post(
                 lambda: self._models["send"].__setattr__("Label", "Envoyer  ⏎"))
+
+    def _run_pipeline(self, preset, prompt_text, ctx, shown):
+        """Preset piloté par Python : le LLM n'est qu'une fonction texte.
+
+        Le runner touche le document ; il le fait via ctx.on_main. Son appel LLM
+        reste dans ce worker.
+        """
+        message = preset.runner(ctx, self.shell, prompt_text, None,
+                                cancel_event=self._cancel,
+                                dispatcher=self.dispatcher)
+        self._append_response("MIrAI : ", message)
+        self.conversation.append("user", shown, ctx.app)
+        self.conversation.append("assistant", message, ctx.app)
+
+    def _run_agentic(self, preset, prompt_text, ctx):
+        """Run piloté par le LLM, qui appelle les outils du registre."""
+        orchestrator = Orchestrator(
+            LLMClient(self.shell), self.registry, ctx,
+            observer=_JournalObserver(self),
+            conversation=self.conversation,
+            cancel_event=self._cancel,
+            dispatcher=self.dispatcher)
+
+        extra, user_prompt, sink = self._prepare_agentic_run(preset, prompt_text, ctx)
+        self._append_response("MIrAI : ")
+        result = orchestrator.run_agentic(
+            user_prompt, sink, preset_extra=extra,
+            preset_id=preset.id if preset else "free")
+        self._delta_buffer.flush()
+        if not result.ok:
+            self._stream_response("⚠ " + (result.text or result.reason))
+        elif not isinstance(sink, PaletteSink):
+            self._stream_response(result.text or "Modification appliquée.")
+
+    def _prepare_agentic_run(self, preset, prompt_text, ctx):
+        """Résout prompt, contexte supplémentaire et destination de la sortie."""
+        extra = ""
+        user_prompt = prompt_text
+        sink = None
+        if preset is not None:
+            if preset.build_extra:
+                extra = preset.build_extra(ctx, self.shell, prompt_text)
+            if preset.prompt_template:
+                user_prompt = preset.prompt_template(prompt_text)
+            if preset.sink_spec == "auto_edit":
+                # Lecture du document → thread principal obligatoire.
+                selection = self.dispatcher.call(
+                    lambda: _selection_string(ctx), timeout=10)
+                if selection.strip():
+                    sink = WriterReplaceSink(ctx)
+        if sink is None:
+            sink = PaletteSink(on_delta=self._stream_response)
+        return extra, user_prompt, sink
+
+    def _finish_run(self):
+        """Statut de fin : arrêté, ou terminé avec le champ de prompt vidé."""
+        if self._cancelled():
+            self.set_status("Arrêté.", tone="neutral")
+            return
+        self.dispatcher.post(
+            lambda: self._models["prompt"].__setattr__("Text", ""))
+        self.set_status("Terminé", tone="success")
 
     def _cancelled(self):
         return self._cancel is not None and self._cancel.is_set()

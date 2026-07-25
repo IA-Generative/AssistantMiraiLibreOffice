@@ -5,7 +5,7 @@ JAMAIS en argument JSON — elle arrive par le sink de streaming (voir
 orchestrator). Les tools mutants restent donc courts et sûrs.
 """
 
-from ..tool_calls import ToolSpec, ToolResult
+from ..tool_calls import ToolResult, ToolSpec
 
 
 def _selection_range(ctx):

@@ -27,7 +27,7 @@ class ConversationStore:
 
     def load(self):
         try:
-            with open(self._path, "r", encoding="utf-8") as fh:
+            with open(self._path, encoding="utf-8") as fh:
                 data = json.load(fh)
             entries = data.get("entries") if isinstance(data, dict) else None
             if not isinstance(entries, list):

@@ -7,8 +7,8 @@ bas reproduisent exactement les comportements historiques.
 
 import re
 
-from ..tool_calls import ToolSpec, ToolResult
 from ..text_filters import strip_markdown
+from ..tool_calls import ToolResult, ToolSpec
 
 RESULT_HEADER_BASE = "Résultat IA"
 

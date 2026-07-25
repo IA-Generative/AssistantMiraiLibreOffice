@@ -19,7 +19,9 @@ from .llm_client import LLMClient
 from .prompts import LEGACY_TEXT_SYSTEM
 from .sinks import CalcCellSink, WriterInsertSink, WriterReplaceSink
 from .text_filters import (
-    EXTEND_QUESTION_PATTERNS, SIMPLIFY_QUESTION_PATTERNS, STOP_PHRASES,
+    EXTEND_QUESTION_PATTERNS,
+    SIMPLIFY_QUESTION_PATTERNS,
+    STOP_PHRASES,
 )
 from .tools import calc_tools
 
@@ -476,7 +478,7 @@ def _load_functions_db():
     ]
     for candidate in candidates:
         try:
-            with open(os.path.normpath(candidate), "r", encoding="utf-8") as fh:
+            with open(os.path.normpath(candidate), encoding="utf-8") as fh:
                 data = json.load(fh)
             _functions_db_cache = {k: v for k, v in data.items()
                                    if not k.startswith("_")}

@@ -52,6 +52,14 @@ class _JobCase(unittest.TestCase):
     def setUp(self):
         self.config_dir = tempfile.mkdtemp()
         self.job = make_job(config_dir=self.config_dir)
+        # `MainJob.__init__` lance un rafraîchissement de configuration en tâche
+        # de fond, qui réécrit config.json. Sans le laisser finir puis le
+        # désarmer, ce thread entre en course avec les écritures du test : selon
+        # la charge de la machine, il écrase la valeur qu'on vient de persister.
+        # C'est ce qui rendait ces tests dépendants de l'ordre d'exécution.
+        time.sleep(0.05)
+        self.job._fetching_config = False
+        self.job._schedule_config_refresh = MagicMock()
         self.job._device_management_enabled = MagicMock(return_value=True)
         self.job._active_bootstrap_url = MagicMock(return_value=BOOTSTRAP)
 
