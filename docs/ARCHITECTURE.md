@@ -28,10 +28,30 @@
 
 ## Règles non négociables
 
-1. **Threading** : le drain SSE (`sse_pump.run_stream`) et tous les sinks
-   tournent sur le **thread principal UNO** — `processEventsToIdle` n'est
-   JAMAIS appelé depuis un thread de fond (crash LibreOffice). Le thread
-   réseau ne touche qu'à la queue.
+1. **Threading — modèle worker + dispatcher** (itération 2, remplace le drain).
+   Le run **entier** vit dans un thread worker ; le thread principal retourne
+   immédiatement à la boucle d'événements de LibreOffice, qui reste utilisable
+   pendant toute la génération. Tout ce qui touche UNO — document, contrôles,
+   undo, exécution des tools — repasse par `MainThreadDispatcher`
+   (`core/ui_thread.py`) :
+   - `post(fn)` pour l'affichage (sans attendre) ;
+   - `call(fn, timeout)` pour lire ou modifier le document (rend le résultat).
+
+   **Plus aucun `processEventsToIdle` dans `core/` ni `ui/`** — vérifié par
+   `test_core_and_ui_never_pump_events` (analyse AST, pas du texte). La classe
+   de gel (et l'abort `std::terminate` dans `DispatchUserEvents`) devient
+   impossible par construction, au lieu d'être évitée par vigilance.
+
+   Corollaires :
+   - **La reprise d'authentification après 401 fait du réseau bloquant** : elle
+     vit dans le thread du pump (via la fabrique de requête de `run_stream`),
+     jamais sur le thread principal. Même famille de piège que le drain.
+   - **La sélection se lit en PUSH** (`XSelectionChangeListener`, livré par
+     LibreOffice sur le thread principal), jamais par un thread qui interroge
+     en boucle. Le listener est retiré **avant** `dispose()`.
+   - **Anti-flood** : les deltas sont coalescés (~120 ms ou ~80 caractères)
+     avant d'être postés, sinon la file du thread principal sature et
+     l'application redevient molle.
 2. **Zéro import de la coquille** dans `core/` et `ui/` — la façade
    `shell_facade.MainJobShell` duck-type l'objet MainJob. Règle exécutable :
    `tests/unit/core/test_no_entrypoint_import.py`.

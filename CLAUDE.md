@@ -35,8 +35,9 @@ curl -s -H "X-Admin-Token: $DM_ADMIN_TOKEN" \
 python3 tests/simulation/deploy_simulator.py \
   --devices 100 --bootstrap-url https://bootstrap.fake-domain.name --profile int
 
-# Tests
-python3 -m pytest tests/unit/ -v
+# Tests (unitaires + intégration + lint + build)
+./scripts/03-test-local.sh
+python3 -m pytest tests/unit/ tests/integration/ -q
 
 # K8s deploy (device-management Scaleway)
 cd ../device-management && ./scripts/k8s/deploy.sh scaleway
@@ -44,7 +45,7 @@ cd ../device-management && ./scripts/k8s/deploy.sh scaleway
 
 ## Architecture
 
-> ⚠️ Branche `exp-jetable/demonstrateur-moteur-mcp` : démonstrateur jetable —
+> ⚠️ Branche `exp-jetable/demonstrateur-v2` : démonstrateur jetable —
 > le cœur est réécrit en moteur MCP interne + palette universelle DSFR.
 > Voir **docs/ARCHITECTURE.md** (carte des couches, tools, règles, checklist
 > « ajouter un tool »). La coquille (enrollment/SSO/DM/update/télémétrie)
@@ -63,7 +64,11 @@ cd ../device-management && ./scripts/k8s/deploy.sh scaleway
 
 ## Key constraints
 
-- **Threading**: NEVER call `processEventsToIdle` from a background thread — crashes LibreOffice
+- **Threading**: le run vit dans un thread worker ; tout accès UNO (document,
+  contrôles, undo, tools) repasse par `MainThreadDispatcher` (`core/ui_thread.py`).
+  `processEventsToIdle` est **interdit dans `core/` et `ui/`** — règle testée
+  (`test_core_and_ui_never_pump_events`). Dans la coquille legacy, ne jamais
+  l'appeler depuis un thread de fond (crash LibreOffice).
 - **No pip**: Only `urllib.request` — no external Python packages in the plugin
 - **UNO API**: All UI via `com.sun.star.awt.*` dialogs
 - **Config profiles**: `dev`, `int`, `prod` (not `integration` — device-management rejects it)
