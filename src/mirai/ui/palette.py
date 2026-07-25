@@ -18,6 +18,12 @@ empêche toute réentrance depuis les listeners.
 import unohelper
 from com.sun.star.awt import XKeyListener
 
+try:
+    from com.sun.star.awt import XCallback
+except Exception:
+    class XCallback:  # stub hors LO (tests)
+        pass
+
 from ..core.context import ToolContext
 from ..core.conversation import ConversationStore
 from ..core.llm_client import LLMClient
@@ -49,6 +55,25 @@ TOOL_LABELS = {
 }
 
 _open_palette = [None]   # singleton de session
+
+
+class _DeferredCall(unohelper.Base, XCallback):
+    """Exécute fn dans un événement utilisateur PROPRE (AsyncCallback).
+
+    INVARIANT : ne jamais lancer un run LLM directement depuis un listener
+    souris/clavier — le pompage processEventsToIdle depuis un dispatch
+    imbriqué gèle l'UI et peut aborter LibreOffice (std::terminate dans
+    DispatchUserEvents). On sort du dispatch courant avant de travailler.
+    """
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def notify(self, data):
+        try:
+            self._fn()
+        except Exception:
+            pass
 
 
 class _KeyHandler(unohelper.Base, XKeyListener):
@@ -430,11 +455,27 @@ class AssistantPalette:
         except Exception:
             return ""
 
+    def _defer(self, fn):
+        """Planifie fn hors du dispatch d'événement courant (voir _DeferredCall)."""
+        try:
+            async_callback = self.uno_ctx.getServiceManager() \
+                .createInstanceWithContext("com.sun.star.awt.AsyncCallback",
+                                           self.uno_ctx)
+            deferred = _DeferredCall(fn)
+            self._handlers.append(deferred)   # référence vivante jusqu'au notify
+            async_callback.addCallback(deferred, None)
+        except Exception:
+            fn()   # repli : exécution directe (mieux que rien)
+
     def _on_chip(self, preset):
-        self._run(preset=preset)
+        if self.busy:
+            return
+        self._defer(lambda: self._run(preset=preset))
 
     def _on_send(self):
-        self._run(preset=None)
+        if self.busy:
+            return
+        self._defer(lambda: self._run(preset=None))
 
     def _run(self, preset=None):
         if self.busy:
