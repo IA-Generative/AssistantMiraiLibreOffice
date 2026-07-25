@@ -30,7 +30,13 @@ except Exception:
     class XCallback:  # stub hors LO (tests)
         pass
 
+try:
+    from com.sun.star.view import XSelectionChangeListener as _XSelectionChangeListener
+except Exception:
+    _XSelectionChangeListener = None
+
 from ..core import presets as presets_module
+from ..core import selection_info
 from ..core.context import ToolContext
 from ..core.conversation import ConversationStore
 from ..core.llm_client import LLMClient
@@ -67,6 +73,37 @@ _open_palette = [None]   # singleton de session
 FLUSH_INTERVAL_S = 0.12   # cadence maximale des mises à jour d'affichage
 FLUSH_CHARS = 80          # ou dès qu'on a accumulé ce nombre de caractères
 
+# Le retour d'un run doit se VOIR : une ligne de statut colorée selon l'issue,
+# pas un texte discret dans une zone grise. C'est la leçon du « il ne se passe
+# rien » — l'action partait bien, mais rien ne le signalait à l'écran.
+STATUS_COLORS = {
+    "neutral": dsfr.TOKENS["text_mention"],
+    "error":   dsfr.TOKENS["error"],
+    "success": dsfr.TOKENS["success"],
+}
+
+
+class _SelectionWatcher(unohelper.Base,
+                        *([_XSelectionChangeListener]
+                          if _XSelectionChangeListener else [])):
+    """Suit la sélection du document — en PUSH, jamais en polling.
+
+    LibreOffice livre `selectionChanged` sur le thread principal : on peut donc
+    écrire dans les contrôles depuis le callback sans marshalling. C'est ce qui
+    distingue ce patron du thread de rafraîchissement du code historique, qui
+    écrivait dans des contrôles VCL toutes les 3 s depuis un thread de fond,
+    sans SolarMutex.
+    """
+
+    def __init__(self, palette):
+        self._palette = palette
+
+    def selectionChanged(self, _event):
+        self._palette.refresh_selection_label()
+
+    def disposing(self, _event):
+        self._palette.detach_selection_watcher()
+
 
 def _selection_string(ctx):
     """Texte sélectionné, ou chaîne vide. À n'appeler que sur le thread principal."""
@@ -74,6 +111,31 @@ def _selection_string(ctx):
         return ctx.controller.getSelection().getByIndex(0).getString()
     except Exception:
         return ""
+
+
+def _writer_targets(model):
+    """(texte sélectionné, texte du paragraphe courant) — jamais d'exception.
+
+    Sans sélection les actions ciblent le paragraphe sous le curseur : il faut
+    donc pouvoir l'afficher, sinon l'indicateur laisse croire qu'aucune cible
+    n'est déterminée.
+    """
+    selected = paragraph = ""
+    try:
+        selected = model.CurrentController.getSelection().getByIndex(0).getString()
+    except Exception:
+        selected = ""
+    if not selected.strip():
+        try:
+            view_cursor = model.CurrentController.getViewCursor()
+            text = view_cursor.getText()
+            cursor = text.createTextCursorByRange(view_cursor)
+            cursor.gotoStartOfParagraph(False)
+            cursor.gotoEndOfParagraph(True)
+            paragraph = cursor.getString()
+        except Exception:
+            paragraph = ""
+    return selected, paragraph
 
 
 def _friendly_error(exc):
@@ -228,6 +290,7 @@ class AssistantPalette:
         self._worker = None
         self._cancel = None
         self._delta_buffer = _DeltaCoalescer(self._flush_deltas)
+        self._selection_watcher = None      # (listener, contrôleur) — garde vivante
         self._build()
 
     # ── Construction (création des contrôles, positions posées par _layout) ──
@@ -258,6 +321,15 @@ class AssistantPalette:
                 on_click=(lambda p=preset: self._on_chip(p)))
             self._chip_names.append(name)
             self._handlers.append(control)
+
+        # Indicateur de sélection : ce sur quoi l'action va porter, en direct.
+        _, selection_model = dsfr.add_control(
+            dialog, model, "selection", "FixedText", 0, 0, 100, 18, {
+                "Label": "",
+                "TextColor": dsfr.TOKENS["text_mention"],
+                "FontName": font, "FontHeight": 8,
+            })
+        self._models["selection"] = selection_model
 
         prompt_control, prompt_model = dsfr.add_control(
             dialog, model, "prompt", "Edit", 0, 0, 100, 56, {
@@ -406,6 +478,12 @@ class AssistantPalette:
             x += w + gap
         y += chip_h + int(8 * scale)
 
+        # Indicateur de sélection — sous les chips, au-dessus du prompt : c'est
+        # la réponse au « sur quoi ça va porter ? » posée avant de cliquer.
+        selection_h = int(line_h + 2 * scale)
+        self._place("selection", margin, y, width - 2 * margin, selection_h)
+        y += selection_h + int(4 * scale)
+
         # Prompt (≈ 3 lignes de texte)
         prompt_h = int(line_h * 2 + 12 * scale)
         self._place("prompt", margin, y, width - 2 * margin, prompt_h)
@@ -462,6 +540,9 @@ class AssistantPalette:
             self.dialog.getControl("prompt").setFocus()
         except Exception:
             pass
+        # Après createPeer : le contrôleur est prêt à accepter un listener.
+        self.attach_selection_watcher()
+        self.refresh_selection_label()
 
     def close(self):
         """Ferme la palette et neutralise tout run encore en vol.
@@ -473,6 +554,9 @@ class AssistantPalette:
         """
         if self._cancel is not None:
             self._cancel.set()
+        # Retirer le listener AVANT dispose() : l'ordre inverse laisse
+        # LibreOffice notifier un contrôle détruit.
+        self.detach_selection_watcher()
         self.dispatcher.close()
         try:
             self.dialog.setVisible(False)
@@ -491,13 +575,77 @@ class AssistantPalette:
         """Ligne de statut, colorée selon l'issue — le retour doit se VOIR."""
         def _apply():
             self._models["status"].Label = message
-            self._models["status"].TextColor = dsfr.TOKENS.get(
-                {"error": "error", "success": "success"}.get(tone, "text_light"),
-                dsfr.TOKENS["text_light"])
+            self._models["status"].TextColor = STATUS_COLORS.get(
+                tone, STATUS_COLORS["neutral"])
         self.dispatcher.post(_apply)
 
     def set_journal_text(self, text):
         self.dispatcher.post(lambda: self._models["journal"].__setattr__("Text", text))
+
+    # ── Indicateur de sélection ─────────────────────────────────────────
+
+    def attach_selection_watcher(self):
+        """Branche le listener sur le contrôleur courant. Après createPeer."""
+        if _XSelectionChangeListener is None:
+            return
+        try:
+            controller = self._current_controller()
+            if controller is None:
+                return
+            watcher = _SelectionWatcher(self)
+            controller.addSelectionChangeListener(watcher)
+            # Le couple est conservé sur l'instance : sans référence vivante le
+            # ramasse-miettes emporterait le listener et les événements
+            # cesseraient silencieusement.
+            self._selection_watcher = (watcher, controller)
+        except Exception as exc:
+            self.shell.log(f"[palette] listener de sélection indisponible : {exc}")
+
+    def detach_selection_watcher(self):
+        """Retire le listener. À appeler AVANT dispose() — le legacy fait
+        l'inverse et ne survit que grâce à un try/except."""
+        pair = getattr(self, "_selection_watcher", None)
+        if not pair:
+            return
+        watcher, controller = pair
+        self._selection_watcher = None
+        try:
+            controller.removeSelectionChangeListener(watcher)
+        except Exception as exc:
+            self.shell.log(f"[palette] retrait du listener : {exc}")
+
+    def _current_controller(self):
+        desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+            "com.sun.star.frame.Desktop", self.uno_ctx)
+        model = desktop.getCurrentComponent()
+        return getattr(model, "CurrentController", None) if model else None
+
+    def refresh_selection_label(self):
+        """Recalcule le libellé de cible. Thread principal uniquement."""
+        if self.busy:
+            return
+        try:
+            self._models["selection"].Label = self._describe_selection()
+        except Exception:
+            pass          # contrôle disposé : la palette se ferme, rien à signaler
+
+    def _describe_selection(self):
+        """Décrit la cible courante ; ne rend JAMAIS None ni ne lève."""
+        try:
+            desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.uno_ctx)
+            model = desktop.getCurrentComponent()
+            if model is None:
+                return ""
+            if hasattr(model, "Text"):
+                return selection_info.writer_label(*_writer_targets(model))
+            if hasattr(model, "Sheets"):
+                area = model.CurrentController.Selection.getRangeAddress()
+                return selection_info.calc_label(
+                    area.StartColumn, area.StartRow, area.EndColumn, area.EndRow)
+        except Exception:
+            pass
+        return ""
 
     def _toggle_journal(self):
         self.journal_visible = not self.journal_visible
