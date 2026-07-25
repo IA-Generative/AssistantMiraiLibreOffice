@@ -92,7 +92,8 @@ def _system(specific):
 
 # ── Presets pipeline Writer ─────────────────────────────────────────────
 
-def run_extend(ctx, shell, user_text, tee):
+def run_extend(ctx, shell, user_text, tee, cancel_event=None,
+               dispatcher=None):
     base_text = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "ExtendSelection",
                       {"action": "extend_selection",
@@ -118,7 +119,8 @@ def run_extend(ctx, shell, user_text, tee):
     try:
         step = llm.step([{"role": "system", "content": system_prompt},
                          {"role": "user", "content": base_text}],
-                        on_text_delta=sink.stream_delta)
+                        on_text_delta=sink.stream_delta,
+                        cancel_event=cancel_event)
         if step.error:
             from .orchestrator import error_message
             return error_message(step.error)
@@ -138,7 +140,8 @@ def run_extend(ctx, shell, user_text, tee):
                               "aucune introduction.")
             step = llm.step([{"role": "system", "content": retry_system},
                              {"role": "user", "content": retry_prompt}],
-                            on_text_delta=sink.stream_delta)
+                            on_text_delta=sink.stream_delta,
+                        cancel_event=cancel_event)
             if sink.question_detected:
                 sink.insert_message(
                     "\n[Le modèle n'a pas pu continuer le texte."
@@ -149,7 +152,8 @@ def run_extend(ctx, shell, user_text, tee):
         ctx.undo_end()
 
 
-def run_summarize(ctx, shell, user_text, tee):
+def run_summarize(ctx, shell, user_text, tee, cancel_event=None,
+                  dispatcher=None):
     original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "SummarizeSelection",
                       {"action": "summarize_selection",
@@ -182,7 +186,8 @@ def run_summarize(ctx, shell, user_text, tee):
     try:
         step = llm.step([{"role": "system", "content": system_prompt},
                          {"role": "user", "content": prompt}],
-                        on_text_delta=sink.stream_delta)
+                        on_text_delta=sink.stream_delta,
+                        cancel_event=cancel_event)
         if step.error:
             from .orchestrator import error_message
             return error_message(step.error)
@@ -192,7 +197,8 @@ def run_summarize(ctx, shell, user_text, tee):
         ctx.undo_end()
 
 
-def run_simplify(ctx, shell, user_text, tee):
+def run_simplify(ctx, shell, user_text, tee, cancel_event=None,
+                 dispatcher=None):
     original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "SimplifySelection",
                       {"action": "simplify_selection",
@@ -235,7 +241,8 @@ def run_simplify(ctx, shell, user_text, tee):
     try:
         step = llm.step([{"role": "system", "content": system_prompt},
                          {"role": "user", "content": prompt}],
-                        on_text_delta=sink.stream_delta)
+                        on_text_delta=sink.stream_delta,
+                        cancel_event=cancel_event)
         if step.error:
             from .orchestrator import error_message
             return error_message(step.error)
@@ -245,7 +252,7 @@ def run_simplify(ctx, shell, user_text, tee):
         ctx.undo_end()
 
 
-def _run_resize(ctx, shell, ratio, undo_label, tee):
+def _run_resize(ctx, shell, ratio, undo_label, tee, cancel_event=None):
     original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "ResizeSelection",
                       {"action": "resize_selection",
@@ -272,7 +279,8 @@ def _run_resize(ctx, shell, ratio, undo_label, tee):
     try:
         step = llm.step([{"role": "system", "content": system_prompt},
                          {"role": "user", "content": prompt}],
-                        on_text_delta=sink.stream_delta)
+                        on_text_delta=sink.stream_delta,
+                        cancel_event=cancel_event)
         if step.error:
             from .orchestrator import error_message
             return error_message(step.error)
@@ -282,17 +290,20 @@ def _run_resize(ctx, shell, ratio, undo_label, tee):
         ctx.undo_end()
 
 
-def run_shorten(ctx, shell, user_text, tee):
-    return _run_resize(ctx, shell, 0.65, "Raccourcir", tee)
+def run_shorten(ctx, shell, user_text, tee, cancel_event=None,
+                dispatcher=None):
+    return _run_resize(ctx, shell, 0.65, "Raccourcir", tee, cancel_event)
 
 
-def run_lengthen(ctx, shell, user_text, tee):
-    return _run_resize(ctx, shell, 1.4, "Allonger", tee)
+def run_lengthen(ctx, shell, user_text, tee, cancel_event=None,
+                 dispatcher=None):
+    return _run_resize(ctx, shell, 1.4, "Allonger", tee, cancel_event)
 
 
 # ── Presets pipeline Calc ───────────────────────────────────────────────
 
-def run_transform(ctx, shell, user_text, tee):
+def run_transform(ctx, shell, user_text, tee, cancel_event=None,
+                  dispatcher=None):
     sheet = ctx.controller.ActiveSheet
     area = ctx.controller.getSelection().getRangeAddress()
     col_range = range(area.StartColumn, area.EndColumn + 1)
@@ -340,7 +351,8 @@ def run_transform(ctx, shell, user_text, tee):
             sink = CalcCellSink(target_cell, tee=tee)
             step = llm.step([{"role": "system", "content": system_prompt},
                              {"role": "user", "content": prompt}],
-                            on_text_delta=sink.stream_delta)
+                            on_text_delta=sink.stream_delta,
+                        cancel_event=cancel_event)
             if step.error:
                 from .orchestrator import error_message
                 target_cell.setString("#ERREUR: " + step.error)
@@ -371,7 +383,8 @@ def run_transform(ctx, shell, user_text, tee):
         ctx.undo_end()
 
 
-def run_analyze(ctx, shell, user_text, tee):
+def run_analyze(ctx, shell, user_text, tee, cancel_event=None,
+                dispatcher=None):
     sheet = ctx.controller.ActiveSheet
     area = ctx.controller.getSelection().getRangeAddress()
     _legacy_telemetry(ctx, "AnalyzeRange", {"context": "calc"})
@@ -417,7 +430,8 @@ def run_analyze(ctx, shell, user_text, tee):
         sink = CalcCellSink(target_cell, tee=tee)
         step = llm.step([{"role": "system", "content": system_prompt},
                          {"role": "user", "content": prompt}],
-                        on_text_delta=sink.stream_delta)
+                        on_text_delta=sink.stream_delta,
+                        cancel_event=cancel_event)
         if step.error:
             from .orchestrator import error_message
             return error_message(step.error)

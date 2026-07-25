@@ -147,24 +147,39 @@ def test_401_twice_gives_up_without_looping():
     assert shell.recover_auth_calls == 1
 
 
-def test_401_recovery_runs_in_network_thread():
-    """La récupération fait du réseau bloquant : elle doit avoir lieu dans le
-    thread du pump (via build_chat_request), jamais sur le thread principal."""
+def test_401_recovery_happens_inside_the_stream():
+    """La reprise d'authentification fait du réseau bloquant.
+
+    Elle doit donc se produire à l'intérieur du pump — c'est-à-dire dans le
+    thread qui exécute le run (le worker depuis l'itération 2) — et jamais sur
+    le thread principal. On le vérifie par la position de l'appel dans la
+    séquence : la reprise s'intercale entre l'échec et la reconstruction de la
+    requête, sans repasser par l'appelant.
+    """
     shell = FakeShell(
         config={"llm_tool_mode": "native"},
         responses=[_unauthorized(), FakeSSEResponse(text_chunks("ok"))],
         recover_auth_result=True)
-    main_thread = threading.current_thread()
-    seen = {}
-    original = shell.recover_llm_auth
+    order = []
+    original_recover = shell.recover_llm_auth
+    original_build = shell.build_chat_request
 
-    def _tracked():
-        seen["thread"] = threading.current_thread()
-        return original()
+    def _tracked_recover():
+        order.append("recover")
+        return original_recover()
 
-    shell.recover_llm_auth = _tracked
+    def _tracked_build(messages, max_tokens=2000, extra_body=None):
+        order.append("build")
+        return original_build(messages, max_tokens, extra_body)
+
+    shell.recover_llm_auth = _tracked_recover
+    shell.build_chat_request = _tracked_build
+
     LLMClient(shell).step([{"role": "user", "content": "x"}], tools=TOOLS)
-    assert seen["thread"] is not main_thread
+
+    assert order == ["build", "recover", "build"], (
+        "la reprise doit s'intercaler entre l'échec et la nouvelle requête, "
+        f"dans le même thread ; observé : {order}")
 
 
 def test_network_error_returned_as_step_error():

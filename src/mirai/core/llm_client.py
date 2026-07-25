@@ -135,11 +135,17 @@ class LLMClient:
         detected = str(self.shell.get_config("llm_tool_mode_detected", "") or "")
         return "json" if detected == "json" else "native"
 
-    def step(self, messages, tools=None, on_text_delta=None):
+    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None):
         """Un aller LLM. Avec `tools`, peut retourner des tool_calls ;
-        sans tools, streaming texte intégral (aucune rétention)."""
+        sans tools, streaming texte intégral (aucune rétention).
+
+        `cancel_event` interrompt la lecture du flux entre deux chunks : une
+        annulation ne doit ni attendre la fin de la génération ni relancer une
+        reprise d'authentification.
+        """
         mode = self.effective_mode() if tools else "text"
-        result = self._run_step(messages, tools, on_text_delta, mode)
+        result = self._run_step(messages, tools, on_text_delta, mode,
+                                cancel_event=cancel_event)
 
         # Auto-détection : le relais rejette la requête portant des tools →
         # bascule définitive en mode JSON et re-tentative immédiate.
@@ -151,19 +157,22 @@ class LLMClient:
             except Exception:
                 pass
             mode = "json"
-            result = self._run_step(messages, tools, on_text_delta, mode)
+            result = self._run_step(messages, tools, on_text_delta, mode,
+                                    cancel_event=cancel_event)
 
         # 401 : jeton d'accès absent, expiré ou révoqué. Une seule reprise, avec
         # la récupération exécutée DANS le thread réseau (recover_auth passe par
         # _build_request) — elle fait du réseau bloquant, et sur le thread
         # principal LibreOffice paraîtrait gelé (cf. sse_pump).
-        if result.error == "http_401":
+        cancelled = cancel_event is not None and cancel_event.is_set()
+        if result.error == "http_401" and not cancelled:
             self.shell.log("[llm] 401 — tentative de récupération du jeton d'accès")
             result = self._run_step(messages, tools, on_text_delta, mode,
-                                    recover_auth=True)
+                                    recover_auth=True, cancel_event=cancel_event)
         return result
 
-    def _run_step(self, messages, tools, on_text_delta, mode, recover_auth=False):
+    def _run_step(self, messages, tools, on_text_delta, mode, recover_auth=False,
+                  cancel_event=None):
         extra_body = None
         if tools and mode == "native":
             extra_body = {"tools": tools, "tool_choice": "auto"}
@@ -232,7 +241,8 @@ class LLMClient:
             if choice.get("finish_reason"):
                 finish[0] = choice["finish_reason"]
 
-        outcome = sse_pump.run_stream(self.shell, _build_request, _on_event)
+        outcome = sse_pump.run_stream(self.shell, _build_request, _on_event,
+                                      cancel_event=cancel_event)
         if not outcome.ok:
             if isinstance(outcome.error, sse_pump.StreamHttpError):
                 return StepResult(error=f"http_{outcome.error.status}",

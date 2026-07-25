@@ -10,10 +10,16 @@ getPreferredSize() (tailles réelles de rendu, HiDPI/Retina compris) et le
 reste est dérivé d'un facteur d'échelle. Invariant : relancer _layout() est
 toujours sûr (repli du journal, etc.).
 
-Threading : tout tourne sur le thread principal UNO. Pendant un run, le pump
-SSE traite les événements UI (processEventsToIdle) — le drapeau `busy`
-empêche toute réentrance depuis les listeners.
+Threading : le run entier vit dans un thread worker ; le thread principal
+retourne immédiatement à la boucle d'événements de LibreOffice, qui reste donc
+utilisable pendant toute la génération (frappe, défilement, autre document).
+Tout ce qui touche UNO — document, contrôles, undo — repasse par
+`MainThreadDispatcher` (core/ui_thread.py). Le drapeau `busy` interdit deux
+runs simultanés ; `_cancel` permet d'arrêter celui en cours.
 """
+
+import threading
+import time
 
 import unohelper
 from com.sun.star.awt import XKeyListener
@@ -32,6 +38,7 @@ from ..core.registry import ToolRegistry
 from ..core.sinks import PaletteSink, WriterReplaceSink
 from ..core import presets as presets_module
 from ..core.tools import register_all
+from ..core.ui_thread import DispatcherClosed, MainThreadDispatcher
 from . import dsfr
 
 try:
@@ -55,6 +62,69 @@ TOOL_LABELS = {
 }
 
 _open_palette = [None]   # singleton de session
+
+FLUSH_INTERVAL_S = 0.12   # cadence maximale des mises à jour d'affichage
+FLUSH_CHARS = 80          # ou dès qu'on a accumulé ce nombre de caractères
+
+
+def _selection_string(ctx):
+    """Texte sélectionné, ou chaîne vide. À n'appeler que sur le thread principal."""
+    try:
+        return ctx.controller.getSelection().getByIndex(0).getString()
+    except Exception:
+        return ""
+
+
+def _friendly_error(exc):
+    """Traduit une panne technique en phrase actionnable pour l'utilisateur."""
+    text = str(exc)
+    if "401" in text or "Unauthorized" in text or "Missing credentials" in text:
+        return ("Jeton expiré — Menu MIrAI ▸ Paramètres pour vous reconnecter.")
+    if "timeout" in text.lower() or "timed out" in text.lower():
+        return "Le service n'a pas répondu à temps. Réessayez dans un instant."
+    if "thread principal n'a pas répondu" in text:
+        return "LibreOffice était occupé (fenêtre ouverte ?). Réessayez."
+    return f"Erreur : {text}"
+
+
+class _DeltaCoalescer:
+    """Regroupe les fragments du flux avant de les envoyer au thread principal.
+
+    Sans ce tampon, un flux rapide poste un événement UNO par token et sature
+    la file du thread principal — l'application redevient molle alors même
+    qu'on vient de la libérer. On ne publie donc qu'au plus toutes les
+    ~120 ms, ou dès ~80 caractères accumulés.
+    """
+
+    def __init__(self, flush):
+        self._flush = flush
+        self._pending = []
+        self._chars = 0
+        self._last_flush = 0.0
+
+    def add(self, text):
+        if not text:
+            return
+        self._pending.append(text)
+        self._chars += len(text)
+        now = time.monotonic()
+        if self._chars >= FLUSH_CHARS or (now - self._last_flush) >= FLUSH_INTERVAL_S:
+            self.flush(now)
+
+    def flush(self, now=None):
+        """Publie ce qui est en attente. Sûr même si rien n'a été accumulé."""
+        if not self._pending:
+            return
+        text = "".join(self._pending)
+        self._pending = []
+        self._chars = 0
+        self._last_flush = now if now is not None else time.monotonic()
+        self._flush(text)
+
+    def reset(self):
+        self._pending = []
+        self._chars = 0
+        self._last_flush = 0.0
 
 
 class _DeferredCall(unohelper.Base, XCallback):
@@ -151,6 +221,12 @@ class AssistantPalette:
         self._models = {}
         self._handlers = []                 # garde les listeners vivants (GC)
         self._chip_names = []
+        # Exécution non bloquante : le run vit dans un worker, tout ce qui
+        # touche UNO repasse par le dispatcher (voir core/ui_thread.py).
+        self.dispatcher = MainThreadDispatcher(uno_ctx, log=shell.log)
+        self._worker = None
+        self._cancel = None
+        self._delta_buffer = _DeltaCoalescer(self._flush_deltas)
         self._build()
 
     # ── Construction (création des contrôles, positions posées par _layout) ──
@@ -387,6 +463,16 @@ class AssistantPalette:
             pass
 
     def close(self):
+        """Ferme la palette et neutralise tout run encore en vol.
+
+        L'ordre compte : on annule d'abord, on rend le dispatcher inerte
+        ensuite, et seulement après on dispose. Un worker qui se réveille
+        pendant la fermeture reçoit DispatcherClosed au lieu de toucher un
+        contrôle détruit.
+        """
+        if self._cancel is not None:
+            self._cancel.set()
+        self.dispatcher.close()
         try:
             self.dialog.setVisible(False)
             self.dialog.dispose()
@@ -395,11 +481,22 @@ class AssistantPalette:
         if _open_palette[0] is self:
             _open_palette[0] = None
 
-    def set_status(self, message):
-        self._models["status"].Label = message
+    # ── Mises à jour d'affichage ────────────────────────────────────────
+    # Ces méthodes sont appelées indifféremment depuis le thread principal et
+    # depuis le worker : elles postent systématiquement, ce qui garantit que
+    # l'écriture dans les contrôles VCL a bien lieu sur le thread principal.
+
+    def set_status(self, message, tone="neutral"):
+        """Ligne de statut, colorée selon l'issue — le retour doit se VOIR."""
+        def _apply():
+            self._models["status"].Label = message
+            self._models["status"].TextColor = dsfr.TOKENS.get(
+                {"error": "error", "success": "success"}.get(tone, "text_light"),
+                dsfr.TOKENS["text_light"])
+        self.dispatcher.post(_apply)
 
     def set_journal_text(self, text):
-        self._models["journal"].Text = text
+        self.dispatcher.post(lambda: self._models["journal"].__setattr__("Text", text))
 
     def _toggle_journal(self):
         self.journal_visible = not self.journal_visible
@@ -417,13 +514,21 @@ class AssistantPalette:
         self._models["response"].Text = "\n\n".join(lines)
 
     def _append_response(self, prefix, text=""):
-        current = self._models["response"].Text
-        addition = (prefix + text) if text or prefix else ""
-        self._models["response"].Text = (
-            (current + "\n\n" + addition) if current else addition)
+        def _apply():
+            current = self._models["response"].Text
+            addition = (prefix + text) if text or prefix else ""
+            self._models["response"].Text = (
+                (current + "\n\n" + addition) if current else addition)
+        self.dispatcher.post(_apply)
 
     def _stream_response(self, chunk):
-        self._models["response"].Text = self._models["response"].Text + chunk
+        """Entrée du flux : on accumule, le tampon décide quand publier."""
+        self._delta_buffer.add(chunk)
+
+    def _flush_deltas(self, text):
+        def _apply():
+            self._models["response"].Text = self._models["response"].Text + text
+        self.dispatcher.post(_apply)
 
     def _on_clear(self):
         if self.busy:
@@ -435,6 +540,13 @@ class AssistantPalette:
 
     # ── Exécution ───────────────────────────────────────────────────────
     def _current_context(self):
+        """Résout le document courant. À appeler depuis le thread principal.
+
+        Le document est re-résolu à chaque run plutôt que mémorisé à
+        l'ouverture : l'utilisateur peut avoir changé d'onglet entre-temps.
+        Le contexte porte le dispatcher — c'est par lui que les tools et les
+        sinks remonteront sur le thread principal depuis le worker.
+        """
         desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.uno_ctx)
         model = desktop.getCurrentComponent()
@@ -447,7 +559,7 @@ class AssistantPalette:
         else:
             return None
         return ToolContext(self.uno_ctx, model, model.CurrentController,
-                           app, self.shell)
+                           app, self.shell, dispatcher=self.dispatcher)
 
     def _prompt_text(self):
         try:
@@ -470,43 +582,79 @@ class AssistantPalette:
     def _on_chip(self, preset):
         if self.busy:
             return
-        self._defer(lambda: self._run(preset=preset))
+        self._defer(lambda: self._start_run(preset=preset))
 
     def _on_send(self):
+        """Envoyer, ou Arrêter si un run est déjà en cours."""
         if self.busy:
+            self._cancel_run()
             return
-        self._defer(lambda: self._run(preset=None))
+        self._defer(lambda: self._start_run(preset=None))
 
-    def _run(self, preset=None):
+    def _cancel_run(self):
+        """Demande l'arrêt du run en cours. Le worker s'arrête entre deux chunks."""
+        if self._cancel is not None:
+            self._cancel.set()
+            self.set_status("Arrêt en cours…")
+
+    def _start_run(self, preset=None):
+        """Valide la demande sur le thread principal, puis lance le worker.
+
+        Les contrôles préalables (prompt vide, type de document) lisent l'UI et
+        le document : ils doivent rester ici. Dès que la demande est valide, la
+        main est rendue à LibreOffice et tout le travail part dans le worker.
+        """
         if self.busy:
             return
         prompt_text = self._prompt_text().strip()
         if preset is None and not prompt_text:
-            self.set_status("Tapez d'abord votre demande.")
+            self.set_status("Tapez d'abord votre demande.", tone="error")
             return
         if preset is not None and preset.needs_input and not prompt_text:
-            self.set_status(preset.input_hint or "Précisez votre demande.")
+            self.set_status(preset.input_hint or "Précisez votre demande.",
+                            tone="error")
             return
 
         ctx = self._current_context()
         if ctx is None:
-            self.set_status("Ouvrez un document Writer ou Calc.")
+            self.set_status("Ouvrez un document Writer ou Calc.", tone="error")
             return
         if preset is not None and ctx.app not in preset.apps:
             wanted = "Writer" if "writer" in preset.apps else "Calc"
-            self.set_status(f"Cette action nécessite un document {wanted}.")
+            self.set_status(f"Cette action nécessite un document {wanted}.",
+                            tone="error")
             return
 
         self.busy = True
-        self._models["send"].Label = "…"
+        self._cancel = threading.Event()
+        self._delta_buffer.reset()
+        self._models["send"].Label = "Arrêter"
         self.set_status("L'assistant travaille…")
-        observer = _JournalObserver(self)
         shown = prompt_text if preset is None else (
             preset.label + ((" — " + prompt_text) if prompt_text else ""))
         self._append_response("Vous : ", shown)
+
+        self._worker = threading.Thread(
+            target=self._run_in_worker,
+            args=(preset, prompt_text, ctx, shown),
+            daemon=True, name="mirai-run")
+        self._worker.start()
+
+    def _run_in_worker(self, preset, prompt_text, ctx, shown):
+        """Corps du run — s'exécute HORS du thread principal.
+
+        Aucun accès direct à l'UI ni au document ici : tout passe par
+        `self.dispatcher` (post pour l'affichage, call pour le document).
+        """
+        observer = _JournalObserver(self)
         try:
             if preset is not None and preset.mode == "pipeline":
-                message = preset.runner(ctx, self.shell, prompt_text, None)
+                # Le pipeline touche le document : il s'exécute sur le thread
+                # principal, mais son appel LLM reste dans ce worker (il est
+                # lancé par le runner lui-même, hors dispatcher).
+                message = preset.runner(ctx, self.shell, prompt_text, None,
+                                        cancel_event=self._cancel,
+                                        dispatcher=self.dispatcher)
                 self._append_response("MIrAI : ", message)
                 self.conversation.append("user", shown, ctx.app)
                 self.conversation.append("assistant", message, ctx.app)
@@ -514,7 +662,9 @@ class AssistantPalette:
                 llm = LLMClient(self.shell)
                 orchestrator = Orchestrator(
                     llm, self.registry, ctx, observer=observer,
-                    conversation=self.conversation)
+                    conversation=self.conversation,
+                    cancel_event=self._cancel,
+                    dispatcher=self.dispatcher)
                 extra = ""
                 user_prompt = prompt_text
                 sink = PaletteSink(on_delta=None)
@@ -524,12 +674,9 @@ class AssistantPalette:
                     if preset.prompt_template:
                         user_prompt = preset.prompt_template(prompt_text)
                     if preset.sink_spec == "auto_edit":
-                        selection = ""
-                        try:
-                            selection = ctx.controller.getSelection() \
-                                .getByIndex(0).getString()
-                        except Exception:
-                            pass
+                        # Lecture du document → thread principal obligatoire.
+                        selection = self.dispatcher.call(
+                            lambda: _selection_string(ctx), timeout=10)
                         if selection.strip():
                             sink = WriterReplaceSink(ctx)
                 self._append_response("MIrAI : ")
@@ -539,19 +686,34 @@ class AssistantPalette:
                     user_prompt, sink,
                     preset_extra=extra,
                     preset_id=preset.id if preset else "free")
+                self._delta_buffer.flush()
                 if not result.ok:
                     self._stream_response("⚠ " + (result.text or result.reason))
                 elif not isinstance(sink, PaletteSink):
                     self._stream_response(result.text or "Modification appliquée.")
-            self._models["prompt"].Text = ""
-            self.set_status("")
+            self._delta_buffer.flush()
+            if self._cancelled():
+                self.set_status("Arrêté.", tone="neutral")
+            else:
+                self.dispatcher.post(
+                    lambda: self._models["prompt"].__setattr__("Text", ""))
+                self.set_status("Terminé", tone="success")
+        except DispatcherClosed:
+            self.shell.log("[palette] run interrompu : palette fermée")
         except Exception as exc:
             self.shell.log(f"[palette] run error: {exc}")
-            self.set_status("Erreur inattendue — voir le journal.")
-            self._append_response("MIrAI : ", f"⚠ Erreur : {exc}")
+            self._delta_buffer.flush()
+            self.set_status(_friendly_error(exc), tone="error")
+            self._append_response("MIrAI : ", f"⚠ {_friendly_error(exc)}")
         finally:
             self.busy = False
-            self._models["send"].Label = "Envoyer  ⏎"
+            self._cancel = None
+            self._worker = None
+            self.dispatcher.post(
+                lambda: self._models["send"].__setattr__("Label", "Envoyer  ⏎"))
+
+    def _cancelled(self):
+        return self._cancel is not None and self._cancel.is_set()
 
 
 def open_or_focus(uno_ctx, shell, app, callbacks):

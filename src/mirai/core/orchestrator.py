@@ -62,13 +62,23 @@ DEFAULT_MAX_ITERATIONS = 6
 
 
 class Orchestrator:
+    """Pilote un run complet. S'exécute dans le thread worker.
+
+    `dispatcher` (facultatif) marshalle vers le thread principal tout ce qui
+    touche UNO : exécution des tools et fermeture du contexte undo. Sans lui —
+    tests, ou contexte hors LibreOffice — les appels se font sur place.
+    `cancel_event` est consulté entre chaque étape et chaque tool.
+    """
+
     def __init__(self, llm, registry, ctx, observer=None, conversation=None,
-                 max_iterations=None):
+                 max_iterations=None, cancel_event=None, dispatcher=None):
         self.llm = llm
         self.registry = registry
         self.ctx = ctx
         self.observer = observer or RunObserver()
         self.conversation = conversation
+        self.cancel_event = cancel_event
+        self.dispatcher = dispatcher
         if max_iterations is None:
             try:
                 max_iterations = int(ctx.shell.get_config(
@@ -97,24 +107,24 @@ class Orchestrator:
         result = RunResult(ok=False, reason="max_iterations")
         try:
             for iteration in range(self.max_iterations):
+                if self.cancelled:
+                    return RunResult(ok=False, iterations=iteration,
+                                     reason="cancelled", text="Arrêté.")
                 step = self.llm.step(messages, tools=tools,
-                                     on_text_delta=sink.stream_delta)
+                                     on_text_delta=sink.stream_delta,
+                                     cancel_event=self.cancel_event)
                 if step.error:
                     message = error_message(step.error)
                     self.observer.on_error(step.error, message)
                     result = RunResult(ok=False, iterations=iteration + 1,
                                        reason=step.error, text=message)
                     return result
+                if self.cancelled:
+                    return RunResult(ok=False, iterations=iteration + 1,
+                                     reason="cancelled", text="Arrêté.")
                 if step.tool_calls:
                     self.observer.on_tool_calls(step.tool_calls)
-                    results = []
-                    for call in step.tool_calls:
-                        call_started = time.monotonic()
-                        tool_result = self.registry.call_tool(
-                            call.name, call.arguments, self.ctx, call_id=call.id)
-                        duration_ms = int((time.monotonic() - call_started) * 1000)
-                        self.observer.on_tool_result(call, tool_result, duration_ms)
-                        results.append(tool_result)
+                    results = self._execute_tool_calls(step.tool_calls)
                     messages.extend(self.llm.encode_tool_exchange(step, results))
                     continue
 
@@ -133,7 +143,7 @@ class Orchestrator:
                                    "précisant la demande.")
             return result
         finally:
-            self.ctx.undo_end()
+            self._on_main(self.ctx.undo_end)
             self.ctx.shell.telemetry("AssistantRun", {
                 "plugin.action": "assistant.run",
                 "assistant.preset": preset_id,
@@ -142,3 +152,34 @@ class Orchestrator:
                 "assistant.ok": str(result.ok).lower(),
                 "assistant.duration_ms": str(int((time.monotonic() - started) * 1000)),
             })
+
+    # ── Exécution des outils ────────────────────────────────────────────
+
+    @property
+    def cancelled(self):
+        return self.cancel_event is not None and self.cancel_event.is_set()
+
+    def _on_main(self, fn, timeout=30):
+        """Exécute fn sur le thread principal si un dispatcher est fourni.
+
+        Les tools touchent le document : hors dispatcher, ils s'exécuteraient
+        dans le worker, sans SolarMutex. C'est le seul point de passage.
+        """
+        if self.dispatcher is None:
+            return fn()
+        return self.dispatcher.call(fn, timeout=timeout)
+
+    def _execute_tool_calls(self, calls):
+        """Joue les outils demandés, en séquence, et rend leurs résultats."""
+        results = []
+        for call in calls:
+            if self.cancelled:
+                break
+            call_started = time.monotonic()
+            tool_result = self._on_main(
+                lambda c=call: self.registry.call_tool(
+                    c.name, c.arguments, self.ctx, call_id=c.id))
+            duration_ms = int((time.monotonic() - call_started) * 1000)
+            self.observer.on_tool_result(call, tool_result, duration_ms)
+            results.append(tool_result)
+        return results

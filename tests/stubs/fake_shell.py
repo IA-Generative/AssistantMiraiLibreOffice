@@ -56,6 +56,7 @@ class FakeShell:
         self.config = dict(config or {})
         self.responses = list(responses or [])
         self.requests = []           # corps JSON de chaque requête émise
+        self.urlopen_calls = 0       # nombre d'ouvertures de flux effectives
         self.telemetry_events = []   # (span, attrs)
         self.llm_errors = []         # (status, body)
         self.logs = []
@@ -92,6 +93,7 @@ class FakeShell:
         return self._recover_auth_result
 
     def urlopen(self, request, timeout=None):
+        self.urlopen_calls += 1
         if not self.responses:
             raise AssertionError("FakeShell : aucune réponse scriptée restante")
         response = self.responses.pop(0)

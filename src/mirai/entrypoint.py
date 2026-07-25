@@ -282,7 +282,20 @@ def _curl_headers_for_log(headers):
     return " ".join(parts)
 
 def log_to_file(message):
-    logging.info(message)
+    """Journalise sans jamais pouvoir faire échouer l'appelant.
+
+    `logging.info` peut lever (handler fermé, disque plein, fichier de log
+    verrouillé). Comme les appels à cette fonction sont disséminés au milieu de
+    chemins critiques eux-mêmes enveloppés dans des `except Exception` larges,
+    une panne de JOURNALISATION se transformait en perte silencieuse de
+    données : observé sur `_persist_bootstrap_config`, où un log levé entre
+    deux `set_config` faisait perdre `llmTokenExpiresAt` — donc un jeton LLM
+    sans date d'expiration, rejoué jusqu'au 401.
+    """
+    try:
+        logging.info(message)
+    except Exception:
+        pass
 
 
 def generate_trace_id():

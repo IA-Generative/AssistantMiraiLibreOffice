@@ -84,24 +84,84 @@ def test_request_factory_failure_becomes_network_error():
     assert shell.llm_errors and shell.llm_errors[0][0] == 0
 
 
-def test_llm_client_does_not_build_request_on_calling_thread():
-    """Garde-fou anti-régression : LLMClient.step ne doit pas appeler
-    build_chat_request avant de lancer le pump."""
-    import threading
+def test_llm_client_builds_request_inside_the_stream():
+    """La requête est construite DANS run_stream, pas avant.
+
+    Bâtir la requête déclenche côté coquille une lecture de configuration, une
+    résolution de modèle et, après un 401, une reprise d'authentification — donc
+    du réseau. Tant que la construction reste à l'intérieur du pump, elle vit
+    dans le thread qui exécute le run (le worker), et jamais sur le thread
+    principal. C'est la garantie qui remplace l'ancien « hors du thread
+    appelant » : depuis l'itération 2, le thread appelant EST le worker.
+    """
     from src.mirai.core.llm_client import LLMClient
 
-    main_thread = threading.current_thread().ident
-    build_threads = []
+    order = []
 
     class _RecordingShell(FakeShell):
         def build_chat_request(self, messages, max_tokens=2000, extra_body=None):
-            build_threads.append(threading.current_thread().ident)
+            order.append("build")
             return super().build_chat_request(messages, max_tokens, extra_body)
+
+        def urlopen(self, request, timeout=None):
+            order.append("urlopen")
+            return super().urlopen(request, timeout)
 
     shell = _RecordingShell(responses=[FakeSSEResponse(text_chunks("ok"))])
     LLMClient(shell).step([{"role": "user", "content": "x"}])
-    assert build_threads and all(t != main_thread for t in build_threads), (
-        "build_chat_request doit s'exécuter hors du thread appelant")
+
+    assert order[:2] == ["build", "urlopen"], (
+        "la construction doit être paresseuse et immédiatement suivie de "
+        f"l'ouverture du flux, dans le même thread ; observé : {order}")
+
+
+def test_run_stream_never_pumps_uno_events():
+    """Le pump ne doit plus toucher au toolkit : ce n'est plus son rôle."""
+    shell = FakeShell(responses=[FakeSSEResponse(text_chunks("a", "b"))])
+
+    def _explode():
+        raise AssertionError("run_stream ne doit plus demander le toolkit UNO")
+
+    shell.toolkit = _explode
+    outcome = sse_pump.run_stream(shell, object(), lambda e: None)
+    assert outcome.ok
+
+
+def test_cancel_event_stops_the_stream():
+    """Le bouton « Arrêter » : la lecture cesse entre deux chunks."""
+    import threading
+
+    shell = FakeShell(responses=[FakeSSEResponse(text_chunks("a", "b", "c", "d"))])
+    cancel = threading.Event()
+    seen = []
+
+    def _handler(event):
+        seen.append(event)
+        cancel.set()          # on annule dès le premier chunk reçu
+
+    outcome = sse_pump.run_stream(shell, object(), _handler, cancel_event=cancel)
+    assert outcome.cancelled is True
+    assert not outcome.ok
+    assert len(seen) == 1, "aucun chunk ne doit être traité après l'annulation"
+
+
+def test_cancel_before_start_does_no_network():
+    import threading
+
+    shell = FakeShell(responses=[FakeSSEResponse(text_chunks("a"))])
+    cancel = threading.Event()
+    cancel.set()
+
+    outcome = sse_pump.run_stream(shell, object(), lambda e: None, cancel_event=cancel)
+    assert outcome.cancelled is True
+    assert shell.urlopen_calls == 0
+
+
+def test_iter_sse_chunks_is_a_pure_generator():
+    """Testable sans réseau ni thread — c'est tout l'intérêt de l'avoir extrait."""
+    lines = [b'data: {"n":1}', b"", b"ligne hors data", b'data: {"n":2}',
+             b"data: [DONE]", b'data: {"n":3}']
+    assert [c["n"] for c in sse_pump.iter_sse_chunks(iter(lines))] == [1, 2]
 
 
 def test_on_event_exception_does_not_break_stream():

@@ -4,6 +4,7 @@ La façade duck-type l'objet MainJob sans import — c'est ce qui garantit que l
 moteur reste testable sans UNO et que la coquille reste intouchée.
 """
 
+import ast
 import os
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -47,3 +48,26 @@ def test_tools_never_import_ui():
             if "from ..ui" in content or "mirai.ui" in content:
                 offenders.append(os.path.relpath(path, _REPO_ROOT))
     assert offenders == []
+
+
+def test_core_and_ui_never_pump_events():
+    """Aucun processEventsToIdle dans le nouveau cœur.
+
+    Le run vit dans un thread worker et repasse par MainThreadDispatcher ; le
+    thread principal n'est jamais immobilisé dans une boucle de drain. Pomper
+    les événements depuis un dispatch imbriqué gèle LibreOffice et peut
+    l'aborter (std::terminate dans DispatchUserEvents) — la contrainte
+    historique disparaît ici par construction, pas par vigilance.
+    """
+    # On inspecte l'AST plutôt que le texte : une docstring qui explique la
+    # règle doit rester permise, seul un accès réel à l'attribut est fautif.
+    offenders = []
+    for path in _python_files():
+        with open(path, "r", encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr == "processEventsToIdle":
+                offenders.append(f"{os.path.relpath(path, _REPO_ROOT)}:{node.lineno}")
+    assert offenders == [], (
+        "processEventsToIdle est interdit dans core/ et ui/ : tout ce qui "
+        f"touche l'UI passe par MainThreadDispatcher. Occurrences : {offenders}")

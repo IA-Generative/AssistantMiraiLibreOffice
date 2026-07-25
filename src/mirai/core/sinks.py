@@ -60,6 +60,10 @@ class WriterInsertSink:
         if self._started:
             return
         self._started = True
+        self.ctx.on_main(self._start_on_main)
+
+    def _start_on_main(self):
+        """Prépare le curseur d'insertion. Thread principal exclusivement."""
         rng = self.ctx.controller.getSelection().getByIndex(0)
         self._text_obj = rng.getText()
         self._cursor = self._text_obj.createTextCursorByRange(rng)
@@ -70,14 +74,18 @@ class WriterInsertSink:
     def _insert(self, text):
         if not text:
             return
+        self.ctx.on_main(lambda: self._insert_on_main(text))
+        if self.tee:
+            self.tee(text)
+
+    def _insert_on_main(self, text):
+        """Écrit dans le document et suit du regard. Thread principal exclusivement."""
         self._text_obj.insertString(self._cursor, text, False)
         try:
             view_cursor = self.ctx.controller.getViewCursor()
             view_cursor.gotoRange(self._cursor.getEnd(), False)
         except Exception:
             pass
-        if self.tee:
-            self.tee(text)
 
     def stream_delta(self, chunk):
         if self.done:
@@ -113,7 +121,8 @@ class WriterInsertSink:
             # Texte arrivé d'un bloc (mode JSON retenu) : rejoue le filtrage.
             self.stream_delta(text)
         if self.footer_marker:
-            self._text_obj.insertString(self._cursor, self.footer_marker, False)
+            self.ctx.on_main(lambda: self._text_obj.insertString(
+                self._cursor, self.footer_marker, False))
 
 
 class WriterReplaceSink:
@@ -134,6 +143,10 @@ class WriterReplaceSink:
         final = (self.accumulated or text or "").strip()
         if not final:
             return
+        self.ctx.on_main(lambda: self._replace_on_main(final))
+
+    def _replace_on_main(self, final):
+        """Remplace puis resélectionne. Thread principal exclusivement."""
         rng = self.ctx.controller.getSelection().getByIndex(0)
         rng.setString(final)
         try:

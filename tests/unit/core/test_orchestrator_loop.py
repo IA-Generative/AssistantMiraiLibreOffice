@@ -19,12 +19,14 @@ class FakeLLM:
     def __init__(self, steps):
         self._steps = list(steps)
         self.seen_messages = []
+        self.seen_cancel_events = []
 
     def effective_mode(self):
         return "native"
 
-    def step(self, messages, tools=None, on_text_delta=None):
+    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None):
         self.seen_messages.append(list(messages))
+        self.seen_cancel_events.append(cancel_event)
         step = self._steps.pop(0)
         if step.text and not step.tool_calls and on_text_delta:
             on_text_delta(step.text)

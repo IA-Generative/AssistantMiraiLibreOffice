@@ -1,14 +1,21 @@
-"""Pump SSE générique : thread réseau → queue → drain sur le thread appelant.
+"""Lecture d'un flux SSE, dans le thread appelant.
 
-INVARIANT ABSOLU : run_stream() doit être appelé depuis le thread principal
-UNO — c'est lui qui pompe processEventsToIdle entre deux chunks (même cadence
-que l'historique stream_request). Le thread réseau ne touche jamais à l'UI.
+INVARIANT : `run_stream()` s'exécute dans le **thread worker** du run, jamais
+sur le thread principal. Il ne touche donc à aucun objet UNO et ne pompe aucun
+événement — c'est `MainThreadDispatcher` qui reporte les mises à jour d'affichage
+sur le thread principal, lequel reste libre pour LibreOffice pendant toute la
+génération.
+
+C'est le point de bascule par rapport à l'implémentation historique : le drain
+`processEventsToIdle` a disparu, donc la classe de gel (et l'abort
+`std::terminate` dans `DispatchUserEvents`) n'est plus possible ici — non pas
+évitée par vigilance, mais impossible par construction.
 """
+
+from __future__ import annotations
 
 import dataclasses
 import json
-import queue
-import threading
 import urllib.error
 
 
@@ -33,98 +40,82 @@ class StreamNetworkError:
 class StreamOutcome:
     ok: bool
     error: object = None      # StreamHttpError | StreamNetworkError | None
+    cancelled: bool = False
 
 
-def run_stream(shell, request, on_event, tick=None):
-    """Exécute la requête streaming ; dispatch les événements sur le thread appelant.
+def iter_sse_chunks(response):
+    """Génère les objets JSON d'un flux SSE. Générateur pur, testable sans réseau.
 
-    `request` peut être une requête urllib DÉJÀ construite, ou un CALLABLE qui
-    la construit — dans ce cas la construction a lieu dans le thread réseau.
-    C'est le mode à privilégier : bâtir la requête déclenche côté coquille des
-    lectures de config et une résolution de modèle qui peuvent partir en appel
-    réseau. Sur le thread principal, ces secondes-là sont vécues comme un GEL
-    de LibreOffice, puisque le pompage d'événements n'a pas encore commencé.
-
-    on_event(event) reçoit des RawChunk dans l'ordre. Les erreurs sont
-    journalisées (LlmRelayError côté coquille) et retournées dans l'outcome —
-    jamais levées. `tick()` est appelé ~20×/s pendant l'attente (animation).
+    Les lignes vides, les lignes hors `data:` et les charges utiles illisibles
+    sont ignorées ; `[DONE]` termine le flux.
     """
-    event_queue = queue.Queue()
-    _DONE = object()
-
-    def _network_thread():
+    for line in response:
+        if not line.strip() or not line.startswith(b"data: "):
+            continue
+        payload = line[len(b"data: "):].decode("utf-8").strip()
+        if payload == "[DONE]":
+            return
         try:
-            # Construction paresseuse : tout ce qui peut bloquer reste ici.
-            actual_request = request() if callable(request) else request
-            with shell.urlopen(actual_request, timeout=shell.request_timeout()) as response:
-                for line in response:
-                    if not line.strip() or not line.startswith(b"data: "):
-                        continue
-                    payload = line[len(b"data: "):].decode("utf-8").strip()
-                    if payload == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(payload)
-                    except Exception:
-                        continue
-                    event_queue.put(RawChunk(chunk))
-        except urllib.error.HTTPError as exc:
-            try:
-                body = exc.read().decode("utf-8")
-            except Exception:
-                body = ""
-            event_queue.put(StreamHttpError(exc.code, body, exc.headers))
-        except Exception as exc:
-            event_queue.put(StreamNetworkError(str(exc)))
-        finally:
-            event_queue.put(_DONE)
+            yield json.loads(payload)
+        except Exception:
+            continue
 
-    worker = threading.Thread(target=_network_thread, daemon=True)
-    worker.start()
+
+def run_stream(shell, request, on_event, tick=None, cancel_event=None):
+    """Lit le flux et dispatche les événements — dans le thread appelant.
+
+    `request` peut être une requête urllib déjà construite ou un CALLABLE qui la
+    construit. Le callable est le mode à privilégier : bâtir la requête déclenche
+    côté coquille des lectures de configuration, une résolution de modèle et,
+    après un 401, une reprise d'authentification — autant d'appels réseau qui
+    doivent rester dans ce thread.
+
+    `on_event(event)` reçoit des RawChunk dans l'ordre. `tick()` est appelé entre
+    les chunks (animation). `cancel_event` (threading.Event) est consulté entre
+    chaque chunk : dès qu'il est armé, la lecture s'arrête proprement.
+
+    Les erreurs ne sont jamais levées : elles sont journalisées et rapportées
+    dans l'outcome.
+    """
+    def _cancelled():
+        return cancel_event is not None and cancel_event.is_set()
+
+    if _cancelled():
+        return StreamOutcome(ok=False, cancelled=True)
 
     try:
-        toolkit = shell.toolkit()
-    except Exception:
-        toolkit = None
-
-    outcome = StreamOutcome(ok=True)
-    while True:
-        try:
-            item = event_queue.get(timeout=0.05)
-        except queue.Empty:
-            if tick is not None:
+        # Construction paresseuse : tout ce qui peut bloquer reste dans ce thread.
+        actual_request = request() if callable(request) else request
+        with shell.urlopen(actual_request, timeout=shell.request_timeout()) as response:
+            for chunk in iter_sse_chunks(response):
+                if _cancelled():
+                    return StreamOutcome(ok=False, cancelled=True)
                 try:
-                    tick()
-                except Exception:
-                    pass
-            if toolkit is not None:
-                try:
-                    toolkit.processEventsToIdle()
-                except Exception:
-                    pass
-            continue
-
-        if item is _DONE:
-            break
-        if isinstance(item, StreamHttpError):
-            shell.report_llm_error(item.status, item.body, item.headers)
-            shell.log(f"[sse] HTTP {item.status} body={item.body[:500]}")
-            outcome = StreamOutcome(ok=False, error=item)
-            continue
-        if isinstance(item, StreamNetworkError):
-            shell.report_llm_network_error(item.reason)
-            shell.log(f"[sse] network error: {item.reason}")
-            outcome = StreamOutcome(ok=False, error=item)
-            continue
-
+                    on_event(RawChunk(chunk))
+                except Exception as exc:
+                    shell.log(f"[sse] on_event error: {exc}")
+                if tick is not None:
+                    try:
+                        tick()
+                    except Exception:
+                        pass
+    except urllib.error.HTTPError as exc:
         try:
-            on_event(item)
-        except Exception as exc:
-            shell.log(f"[sse] on_event error: {exc}")
-        if toolkit is not None:
-            try:
-                toolkit.processEventsToIdle()
-            except Exception:
-                pass
+            body = exc.read().decode("utf-8")
+        except Exception:
+            body = ""
+        error = StreamHttpError(exc.code, body, exc.headers)
+        shell.report_llm_error(error.status, error.body, error.headers)
+        shell.log(f"[sse] HTTP {error.status} body={error.body[:500]}")
+        return StreamOutcome(ok=False, error=error)
+    except Exception as exc:
+        if _cancelled():
+            return StreamOutcome(ok=False, cancelled=True)
+        error = StreamNetworkError(str(exc))
+        shell.report_llm_network_error(error.reason)
+        shell.log(f"[sse] network error: {error.reason}")
+        return StreamOutcome(ok=False, error=error)
 
-    return outcome
+    if _cancelled():
+        return StreamOutcome(ok=False, cancelled=True)
+    return StreamOutcome(ok=True)
