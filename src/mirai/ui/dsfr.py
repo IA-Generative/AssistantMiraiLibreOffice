@@ -146,7 +146,7 @@ def add_chip(dialog, model, name, label, x, y, width, height, font, on_click):
             "Border": 2,
             "BorderColor": TOKENS["chip_bg"],
             "FontName": font,
-            "FontHeight": 10,
+            "FontHeight": 8,
             "FontWeight": 110.0,   # SEMIBOLD ≈ Marianne Medium
             "Align": 1,            # centré
             "VerticalAlign": 1,
@@ -164,7 +164,7 @@ def add_link(dialog, model, name, label, x, y, width, height, font, on_click):
             "Label": label,
             "TextColor": TOKENS["primary"],
             "FontName": font,
-            "FontHeight": 9,
+            "FontHeight": 8,
         })
     handler = ClickHandler(control_model, on_click=on_click,
                            fg=TOKENS["primary"], fg_hover=TOKENS["primary_hover"])
@@ -180,7 +180,7 @@ def add_primary_button(dialog, model, name, label, x, y, w, h, font, on_click):
             "BackgroundColor": TOKENS["primary"],
             "TextColor": TOKENS["text_inverted"],
             "FontName": font,
-            "FontHeight": 10,
+            "FontHeight": 9,
             "FontWeight": 150.0,
             "Align": 1,
             "VerticalAlign": 1,

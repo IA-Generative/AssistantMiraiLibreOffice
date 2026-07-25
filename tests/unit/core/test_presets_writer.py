@@ -28,12 +28,44 @@ def test_extend_inserts_between_legacy_markers():
     assert spans["ExtendSelection"]["via"] == "palette"
 
 
-def test_extend_empty_selection_returns_hint():
-    doc = FakeWriterDoc(selection_text="")
+def test_extend_no_selection_no_paragraph_returns_hint():
+    doc = FakeWriterDoc(selection_text="", current_paragraph="")
     shell = FakeShell()
     message = presets.run_extend(_ctx(doc, shell), shell, "", None)
-    assert "Sélectionnez" in message
+    assert "curseur" in message
     assert doc.inserted == ""
+
+
+def test_extend_targets_current_paragraph_without_selection():
+    # Action directe : pas de sélection → le paragraphe sous le curseur est
+    # identifié, sélectionné et utilisé comme cible.
+    doc = FakeWriterDoc(selection_text="",
+                        current_paragraph="Le paragraphe en cours de rédaction")
+    shell = FakeShell(responses=[FakeSSEResponse(text_chunks(" continue ici."))])
+    message = presets.run_extend(_ctx(doc, shell), shell, "", None)
+    assert " continue ici." in doc.inserted
+    assert "générée" in message.lower()
+    # le prompt envoyé au LLM est bien le paragraphe
+    prompt = shell.requests[0]["messages"][-1]["content"]
+    assert prompt == "Le paragraphe en cours de rédaction"
+
+
+def test_summarize_targets_current_paragraph_without_selection():
+    doc = FakeWriterDoc(selection_text="",
+                        current_paragraph="Un paragraphe administratif dense.")
+    shell = FakeShell(responses=[FakeSSEResponse(text_chunks("Résumé bref."))])
+    presets.run_summarize(_ctx(doc, shell), shell, "", None)
+    assert "Résumé bref." in doc.inserted
+    prompt = shell.requests[0]["messages"][-1]["content"]
+    assert "Un paragraphe administratif dense." in prompt
+
+
+def test_shorten_targets_current_paragraph_without_selection():
+    doc = FakeWriterDoc(selection_text="",
+                        current_paragraph=" ".join(f"mot{i}" for i in range(10)))
+    shell = FakeShell(responses=[FakeSSEResponse(text_chunks("court."))])
+    presets.run_shorten(_ctx(doc, shell), shell, "", None)
+    assert doc.replaced == "court."   # le paragraphe est remplacé
 
 
 def test_extend_question_triggers_single_retry():

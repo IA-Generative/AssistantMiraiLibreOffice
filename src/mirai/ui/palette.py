@@ -144,7 +144,7 @@ class AssistantPalette:
                 "Label": f"  MIrAI — Assistant ({app_label})",
                 "BackgroundColor": dsfr.TOKENS["primary"],
                 "TextColor": dsfr.TOKENS["text_inverted"],
-                "FontName": font, "FontHeight": 12, "FontWeight": 150.0,
+                "FontName": font, "FontHeight": 10, "FontWeight": 150.0,
                 "VerticalAlign": 1,
             })
         self._models["header"] = header_model
@@ -160,7 +160,7 @@ class AssistantPalette:
         prompt_control, prompt_model = dsfr.add_control(
             dialog, model, "prompt", "Edit", 0, 0, 100, 56, {
                 "MultiLine": True, "AutoVScroll": True,
-                "FontName": font, "FontHeight": 10,
+                "FontName": font, "FontHeight": 9,
                 "TextColor": dsfr.TOKENS["text_body"],
                 # Champ DSFR : fond contraste + bordure sombre, bien visible
                 "BackgroundColor": dsfr.TOKENS["bg_contrast"],
@@ -173,7 +173,7 @@ class AssistantPalette:
             dialog, model, "status", "FixedText", 0, 0, 100, 18, {
                 "Label": "",
                 "TextColor": dsfr.TOKENS["text_mention"],
-                "FontName": font, "FontHeight": 9,
+                "FontName": font, "FontHeight": 8,
             })
         self._models["status"] = status_model
 
@@ -185,7 +185,7 @@ class AssistantPalette:
         _, response_model = dsfr.add_control(
             dialog, model, "response", "Edit", 0, 0, 100, 200, {
                 "MultiLine": True, "ReadOnly": True, "VScroll": True,
-                "FontName": font, "FontHeight": 10,
+                "FontName": font, "FontHeight": 9,
                 "TextColor": dsfr.TOKENS["text_body"],
                 "BackgroundColor": dsfr.TOKENS["bg_alt"],
                 "Border": 2, "BorderColor": dsfr.TOKENS["border"],
@@ -196,7 +196,7 @@ class AssistantPalette:
             dialog, model, "journal_toggle", "FixedText", 0, 0, 160, 16, {
                 "Label": "▸ Voir les actions",
                 "TextColor": dsfr.TOKENS["primary"],
-                "FontName": font, "FontHeight": 9,
+                "FontName": font, "FontHeight": 8,
             })
         self._models["journal_toggle"] = toggle_model
         toggle_handler = dsfr.ClickHandler(
@@ -208,7 +208,7 @@ class AssistantPalette:
         journal_control, journal_model = dsfr.add_control(
             dialog, model, "journal", "Edit", 0, 0, 100, 100, {
                 "MultiLine": True, "ReadOnly": True, "VScroll": True,
-                "FontName": font, "FontHeight": 9,
+                "FontName": font, "FontHeight": 8,
                 "TextColor": dsfr.TOKENS["text_mention"],
                 "BackgroundColor": dsfr.TOKENS["bg_accent"],
                 "Border": 2, "BorderColor": dsfr.TOKENS["border"],
@@ -229,7 +229,7 @@ class AssistantPalette:
             dialog, model, "hint", "FixedText", 0, 0, 120, 16, {
                 "Label": "Échap : fermer",
                 "TextColor": dsfr.TOKENS["text_mention"],
-                "FontName": font, "FontHeight": 8, "Align": 2,
+                "FontName": font, "FontHeight": 7, "Align": 2,
             })
         self._models["hint"] = hint_model
 
@@ -278,17 +278,17 @@ class AssistantPalette:
             if pref is not None:
                 chip_prefs[name] = pref
                 line_h = max(line_h, pref.Height)
-        scale = max(1.0, line_h / 22.0)
+        scale = min(max(1.0, line_h / 16.0), 2.0)
 
-        margin = int(14 * scale)
-        gap = int(8 * scale)
-        chip_h = int(line_h + 10 * scale)
-        width = int(660 * scale)
+        margin = int(10 * scale)
+        gap = int(6 * scale)
+        chip_h = int(line_h + 6 * scale)
+        width = int(500 * scale)
         self._width = width
 
         # Bandeau
         header_pref = self._preferred("header")
-        header_h = int((header_pref.Height if header_pref else 24) + 18 * scale)
+        header_h = int((header_pref.Height if header_pref else 20) + 10 * scale)
         self._place("header", 0, 0, width, header_h)
         y = header_h + gap
 
@@ -296,30 +296,30 @@ class AssistantPalette:
         x = margin
         for name in self._chip_names:
             pref = chip_prefs.get(name)
-            w = int((pref.Width if pref else 90) + 18 * scale)
+            w = int((pref.Width if pref else 90) + 12 * scale)
             if x + w > width - margin and x > margin:
                 x = margin
                 y += chip_h + gap
             self._place(name, x, y, w, chip_h)
             x += w + gap
-        y += chip_h + int(12 * scale)
+        y += chip_h + int(8 * scale)
 
         # Prompt (≈ 3 lignes de texte)
-        prompt_h = int(line_h * 3 + 14 * scale)
+        prompt_h = int(line_h * 2 + 12 * scale)
         self._place("prompt", margin, y, width - 2 * margin, prompt_h)
         y += prompt_h + gap
 
         # Statut + bouton Envoyer (largeur mesurée)
         send_pref = self._preferred("send")
-        send_w = int((send_pref.Width if send_pref else 100) + 30 * scale)
-        send_h = int(line_h + 14 * scale)
+        send_w = int((send_pref.Width if send_pref else 100) + 22 * scale)
+        send_h = int(line_h + 10 * scale)
         self._place("send", width - margin - send_w, y, send_w, send_h)
         self._place("status", margin, y + (send_h - line_h) // 2,
                     width - 2 * margin - send_w - gap, line_h)
-        y += send_h + int(10 * scale)
+        y += send_h + int(8 * scale)
 
         # Fil de conversation
-        response_h = int(170 * scale)
+        response_h = int(120 * scale)
         self._place("response", margin, y, width - 2 * margin, response_h)
         y += response_h + gap
 
@@ -329,7 +329,7 @@ class AssistantPalette:
         self._place("journal_toggle", margin, y, toggle_w, line_h)
         y += line_h + int(4 * scale)
         if self.journal_visible:
-            journal_h = int(90 * scale)
+            journal_h = int(70 * scale)
             self._place("journal", margin, y, width - 2 * margin, journal_h)
             self.dialog.getControl("journal").setVisible(True)
             y += journal_h + gap
@@ -342,7 +342,7 @@ class AssistantPalette:
             pref = self._preferred(name)
             w = int((pref.Width if pref else 90) + 6 * scale)
             self._place(name, x, y, w, line_h)
-            x += w + int(14 * scale)
+            x += w + int(10 * scale)
         hint_pref = self._preferred("hint")
         hint_w = int((hint_pref.Width if hint_pref else 90) + 6 * scale)
         hint_x = max(x, width - margin - hint_w)

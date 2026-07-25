@@ -20,8 +20,9 @@ class FakeUndoManager:
 
 
 class FakeCursor:
-    def __init__(self):
-        pass
+    def __init__(self, doc=None):
+        self._doc = doc
+        self.selected_text = ""
 
     def collapseToEnd(self):
         pass
@@ -29,16 +30,26 @@ class FakeCursor:
     def getEnd(self):
         return self
 
+    # Ciblage du paragraphe courant (XParagraphCursor)
+    def gotoStartOfParagraph(self, expand):
+        pass
+
+    def gotoEndOfParagraph(self, expand):
+        self.selected_text = getattr(self._doc, "current_paragraph", "") or ""
+
+    def getString(self):
+        return self.selected_text
+
 
 class FakeWriterText:
     def __init__(self, doc):
         self._doc = doc
 
     def createTextCursorByRange(self, rng):
-        return FakeCursor()
+        return FakeCursor(self._doc)
 
     def createTextCursor(self):
-        return FakeCursor()
+        return FakeCursor(self._doc)
 
     def insertString(self, cursor, text, absorb):
         self._doc.inserted += text
@@ -91,20 +102,27 @@ class FakeTextRange:
 class FakeWriterDoc:
     """Document Writer factice : model + controller + sélection."""
 
-    def __init__(self, selection_text="", paragraphs=None):
+    def __init__(self, selection_text="", paragraphs=None, current_paragraph=""):
         self.inserted = ""            # tout ce qui a été inséré au fil de l'eau
         self.replaced = None          # dernière valeur de setString sur la sélection
         self.paragraphs = paragraphs or []
+        self.current_paragraph = current_paragraph  # paragraphe sous le curseur
         self.text_obj = FakeWriterText(self)
         self.undo = FakeUndoManager()
         self.selection_range = FakeTextRange(self, selection_text)
         self.selected = []            # appels controller.select
 
+        def _select(target):
+            self.selected.append(target)
+            # Sélectionner un curseur-paragraphe fait du paragraphe la sélection
+            if isinstance(target, FakeCursor) and target.selected_text:
+                self.selection_range = FakeTextRange(self, target.selected_text)
+
         controller = SimpleNamespace()
         controller.getSelection = lambda: SimpleNamespace(
             getByIndex=lambda i: self.selection_range)
         controller.getViewCursor = lambda: MagicMock()
-        controller.select = lambda rng: self.selected.append(rng)
+        controller.select = _select
         self.controller = controller
 
         # Interface "model" UNO

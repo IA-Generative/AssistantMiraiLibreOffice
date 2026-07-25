@@ -53,6 +53,34 @@ def _selection_text(ctx):
         return ""
 
 
+def _target_selection_text(ctx):
+    """Texte cible d'une action directe : la sélection si elle existe, sinon
+    le PARAGRAPHE COURANT (identifié sous le curseur, puis sélectionné pour
+    que les sinks opèrent dessus). Retourne "" si aucun texte ciblable."""
+    try:
+        rng = ctx.controller.getSelection().getByIndex(0)
+    except Exception:
+        return ""
+    text = rng.getString()
+    if text.strip():
+        return text
+    try:
+        cursor = rng.getText().createTextCursorByRange(rng)
+        cursor.gotoStartOfParagraph(False)
+        cursor.gotoEndOfParagraph(True)
+        paragraph = cursor.getString()
+        if not paragraph.strip():
+            return ""
+        ctx.controller.select(cursor)
+        return paragraph
+    except Exception:
+        return ""
+
+
+_NO_TARGET_HINT = ("Placez le curseur dans un paragraphe ou sélectionnez "
+                   "du texte.")
+
+
 def _text_client(shell, max_tokens):
     return LLMClient(shell, max_tokens=max_tokens)
 
@@ -65,12 +93,12 @@ def _system(specific):
 # ── Presets pipeline Writer ─────────────────────────────────────────────
 
 def run_extend(ctx, shell, user_text, tee):
-    base_text = _selection_text(ctx)
+    base_text = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "ExtendSelection",
                       {"action": "extend_selection",
                        "text_length": str(len(base_text))})
     if not base_text:
-        return "Sélectionnez d'abord le texte à continuer."
+        return _NO_TARGET_HINT
 
     configured = str(shell.get_config("extend_selection_system_prompt", "") or "").strip()
     directive = (
@@ -122,12 +150,12 @@ def run_extend(ctx, shell, user_text, tee):
 
 
 def run_summarize(ctx, shell, user_text, tee):
-    original = _selection_text(ctx)
+    original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "SummarizeSelection",
                       {"action": "summarize_selection",
                        "text_length": str(len(original))})
     if not original.strip():
-        return "Sélectionnez d'abord le texte à résumer."
+        return _NO_TARGET_HINT
 
     prompt = (
         "TEXTE À RÉSUMER :\n" + original + "\n\n"
@@ -165,12 +193,12 @@ def run_summarize(ctx, shell, user_text, tee):
 
 
 def run_simplify(ctx, shell, user_text, tee):
-    original = _selection_text(ctx)
+    original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "SimplifySelection",
                       {"action": "simplify_selection",
                        "text_length": str(len(original))})
     if not original.strip():
-        return "Sélectionnez d'abord le texte à reformuler."
+        return _NO_TARGET_HINT
 
     prompt = (
         "TEXTE À REFORMULER :\n" + original + "\n\n"
@@ -218,12 +246,12 @@ def run_simplify(ctx, shell, user_text, tee):
 
 
 def _run_resize(ctx, shell, ratio, undo_label, tee):
-    original = _selection_text(ctx)
+    original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "ResizeSelection",
                       {"action": "resize_selection",
                        "text_length": str(len(original))})
     if not original.strip():
-        return "Sélectionnez d'abord le texte à ajuster."
+        return _NO_TARGET_HINT
 
     word_count = len(original.split())
     target = max(1, int(round(word_count * ratio)))
