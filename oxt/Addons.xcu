@@ -26,6 +26,33 @@
               <value>_self</value>
             </prop>
           </node>
+          <node oor:name="M2" oor:op="replace">
+            <prop oor:name="URL" oor:type="xs:string">
+              <value>private:separator</value>
+            </prop>
+          </node>
+          <node oor:name="M3" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">⚙️ Paramètres</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?settings&amp;src=menu</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
+          <node oor:name="M4" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">ℹ️ À propos de l'IA'ssistant...</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?AboutDialog&amp;src=menu</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
         </node>
       </node>
     </node>

@@ -135,10 +135,11 @@ class ClickHandler(unohelper.Base, XMouseListener):
         pass
 
 
-def add_chip(dialog, model, name, label, x, y, width, font, on_click):
-    """Chip DSFR (bouton tertiaire) : FixedText cliquable fond bleu clair."""
+def add_chip(dialog, model, name, label, x, y, width, height, font, on_click):
+    """Chip DSFR (bouton tertiaire) : FixedText cliquable fond bleu clair.
+    Les tailles passées sont provisoires — le layout mesuré les recalcule."""
     control, control_model = add_control(
-        dialog, model, name, "FixedText", x, y, width, 28, {
+        dialog, model, name, "FixedText", x, y, width, height, {
             "Label": "  " + label + "  ",
             "BackgroundColor": TOKENS["chip_bg"],
             "TextColor": TOKENS["primary"],
@@ -156,10 +157,10 @@ def add_chip(dialog, model, name, label, x, y, width, font, on_click):
     return control, control_model
 
 
-def add_link(dialog, model, name, label, x, y, width, font, on_click):
+def add_link(dialog, model, name, label, x, y, width, height, font, on_click):
     """Lien discret du pied de palette (Réglages, À propos…)."""
     control, control_model = add_control(
-        dialog, model, name, "FixedText", x, y, width, 16, {
+        dialog, model, name, "FixedText", x, y, width, height, {
             "Label": label,
             "TextColor": TOKENS["primary"],
             "FontName": font,

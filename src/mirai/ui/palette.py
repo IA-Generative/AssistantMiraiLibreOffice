@@ -4,6 +4,12 @@ Point d'entrée unique de l'assistant : prompt libre + chips des fonctions
 fréquentes + fil de conversation persisté + journal d'actions optionnel
 (séquence des outils proposés puis exécutés, façon agent).
 
+Layout MESURÉ : les positions/tailles ne sont jamais estimées en pixels fixes
+— après création du peer, chaque contrôle texte est dimensionné via
+getPreferredSize() (tailles réelles de rendu, HiDPI/Retina compris) et le
+reste est dérivé d'un facteur d'échelle. Invariant : relancer _layout() est
+toujours sûr (repli du journal, etc.).
+
 Threading : tout tourne sur le thread principal UNO. Pendant un run, le pump
 SSE traite les événements UI (processEventsToIdle) — le drapeau `busy`
 empêche toute réentrance depuis les listeners.
@@ -26,11 +32,6 @@ try:
     from com.sun.star.awt.Key import RETURN as KEY_RETURN, ESCAPE as KEY_ESCAPE
 except Exception:
     KEY_RETURN, KEY_ESCAPE = 1280, 1281
-
-WIDTH = 580
-MARGIN = 16
-CHIP_HEIGHT = 28
-CHIP_GAP = 8
 
 TOOL_LABELS = {
     "writer_get_selection": "Lecture de la sélection",
@@ -122,13 +123,12 @@ class AssistantPalette:
         self.registry = register_all(ToolRegistry())
         self.conversation = ConversationStore(shell.user_config_dir())
         self.dialog = None
-        self._controls = {}
         self._models = {}
         self._handlers = []                 # garde les listeners vivants (GC)
-        self._journal_height = 100
+        self._chip_names = []
         self._build()
 
-    # ── Construction ────────────────────────────────────────────────────
+    # ── Construction (création des contrôles, positions posées par _layout) ──
     def _build(self):
         toolkit = self.shell.toolkit()
         font = dsfr.probe_font(toolkit)
@@ -136,55 +136,54 @@ class AssistantPalette:
 
         app_label = "Writer" if self.app == "writer" else "Calc"
         dialog, model = dsfr.make_dialog(
-            self.uno_ctx, "MIrAI — Assistant", WIDTH, 100)  # hauteur recalculée
+            self.uno_ctx, "MIrAI — Assistant", 640, 560)
         self.dialog, self.model = dialog, model
 
-        y = 0
-        # Bandeau bleu France
-        dsfr.add_control(dialog, model, "header", "FixedText", 0, 0, WIDTH, 44, {
-            "Label": f"   MIrAI — Assistant ({app_label})",
-            "BackgroundColor": dsfr.TOKENS["primary"],
-            "TextColor": dsfr.TOKENS["text_inverted"],
-            "FontName": font, "FontHeight": 12, "FontWeight": 150.0,
-            "VerticalAlign": 1,
-        })
-        y = 52
+        _, header_model = dsfr.add_control(
+            dialog, model, "header", "FixedText", 0, 0, 640, 40, {
+                "Label": f"  MIrAI — Assistant ({app_label})",
+                "BackgroundColor": dsfr.TOKENS["primary"],
+                "TextColor": dsfr.TOKENS["text_inverted"],
+                "FontName": font, "FontHeight": 12, "FontWeight": 150.0,
+                "VerticalAlign": 1,
+            })
+        self._models["header"] = header_model
 
-        # Chips des presets
-        y = self._build_chips(y, font)
+        for preset in presets_module.presets_for(self.app):
+            name = f"chip_{preset.id}"
+            control, _chip_model = dsfr.add_chip(
+                dialog, model, name, preset.label, 0, 0, 100, 28, font,
+                on_click=(lambda p=preset: self._on_chip(p)))
+            self._chip_names.append(name)
+            self._handlers.append(control)
 
-        # Zone de prompt
         prompt_control, prompt_model = dsfr.add_control(
-            dialog, model, "prompt", "Edit", MARGIN, y, WIDTH - 2 * MARGIN, 56, {
+            dialog, model, "prompt", "Edit", 0, 0, 100, 56, {
                 "MultiLine": True, "AutoVScroll": True,
                 "FontName": font, "FontHeight": 10,
                 "TextColor": dsfr.TOKENS["text_body"],
-                "Border": 2, "BorderColor": dsfr.TOKENS["border"],
+                # Champ DSFR : fond contraste + bordure sombre, bien visible
+                "BackgroundColor": dsfr.TOKENS["bg_contrast"],
+                "Border": 2, "BorderColor": dsfr.TOKENS["text_body"],
                 "HelpText": "Décrivez ce que l'assistant doit faire",
             })
-        self._controls["prompt"] = prompt_control
         self._models["prompt"] = prompt_model
-        y += 56 + 8
 
-        # Statut + bouton Envoyer
         _, status_model = dsfr.add_control(
-            dialog, model, "status", "FixedText", MARGIN, y + 6,
-            WIDTH - 2 * MARGIN - 130, 20, {
+            dialog, model, "status", "FixedText", 0, 0, 100, 18, {
                 "Label": "",
                 "TextColor": dsfr.TOKENS["text_mention"],
                 "FontName": font, "FontHeight": 9,
             })
         self._models["status"] = status_model
-        send_control, send_model = dsfr.add_primary_button(
-            dialog, model, "send", "Envoyer  ⏎", WIDTH - MARGIN - 120, y,
-            120, 32, font, self._on_send)
-        self._models["send"] = send_model
-        y += 32 + 10
 
-        # Fil de conversation (réponses)
+        _, send_model = dsfr.add_primary_button(
+            dialog, model, "send", "Envoyer  ⏎", 0, 0, 120, 32, font,
+            self._on_send)
+        self._models["send"] = send_model
+
         _, response_model = dsfr.add_control(
-            dialog, model, "response", "Edit", MARGIN, y,
-            WIDTH - 2 * MARGIN, 200, {
+            dialog, model, "response", "Edit", 0, 0, 100, 200, {
                 "MultiLine": True, "ReadOnly": True, "VScroll": True,
                 "FontName": font, "FontHeight": 10,
                 "TextColor": dsfr.TOKENS["text_body"],
@@ -192,12 +191,9 @@ class AssistantPalette:
                 "Border": 2, "BorderColor": dsfr.TOKENS["border"],
             })
         self._models["response"] = response_model
-        y += 200 + 6
 
-        # Journal d'actions (repliable)
         toggle_control, toggle_model = dsfr.add_control(
-            dialog, model, "journal_toggle", "FixedText", MARGIN, y,
-            220, 16, {
+            dialog, model, "journal_toggle", "FixedText", 0, 0, 160, 16, {
                 "Label": "▸ Voir les actions",
                 "TextColor": dsfr.TOKENS["primary"],
                 "FontName": font, "FontHeight": 9,
@@ -208,35 +204,47 @@ class AssistantPalette:
             fg=dsfr.TOKENS["primary"], fg_hover=dsfr.TOKENS["primary_hover"])
         toggle_control.addMouseListener(toggle_handler)
         self._handlers.append(toggle_handler)
-        y += 16 + 4
-        self._journal_y = y
 
         journal_control, journal_model = dsfr.add_control(
-            dialog, model, "journal", "Edit", MARGIN, y,
-            WIDTH - 2 * MARGIN, self._journal_height, {
+            dialog, model, "journal", "Edit", 0, 0, 100, 100, {
                 "MultiLine": True, "ReadOnly": True, "VScroll": True,
                 "FontName": font, "FontHeight": 9,
                 "TextColor": dsfr.TOKENS["text_mention"],
                 "BackgroundColor": dsfr.TOKENS["bg_accent"],
                 "Border": 2, "BorderColor": dsfr.TOKENS["border"],
             })
-        self._controls["journal"] = journal_control
         self._models["journal"] = journal_model
         journal_control.setVisible(False)
 
-        self._footer_base_y = y
-        self._build_footer(font)
-        self._apply_layout()
+        self._footer_specs = [
+            ("link_settings", "Réglages", self.callbacks.get("settings")),
+            ("link_about", "À propos", self.callbacks.get("about")),
+            ("link_doc", "Documentation", self.callbacks.get("documentation")),
+            ("link_clear", "🗑 Nouvelle conversation", self._on_clear),
+        ]
+        for name, label, callback in self._footer_specs:
+            dsfr.add_link(dialog, model, name, label, 0, 0, 120, 16, font,
+                          callback or (lambda: None))
+        _, hint_model = dsfr.add_control(
+            dialog, model, "hint", "FixedText", 0, 0, 120, 16, {
+                "Label": "Échap : fermer",
+                "TextColor": dsfr.TOKENS["text_mention"],
+                "FontName": font, "FontHeight": 8, "Align": 2,
+            })
+        self._models["hint"] = hint_model
 
-        # Peer + centrage sur la fenêtre du document
+        # Peer d'abord : les métriques réelles (Retina) ne sont fiables qu'après.
         frame = self.uno_ctx.getServiceManager().createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.uno_ctx).getCurrentFrame()
         parent_window = frame.getContainerWindow() if frame else None
         dialog.createPeer(toolkit, parent_window)
+
+        self._layout()
+
         if parent_window is not None:
             try:
                 ps = parent_window.getPosSize()
-                dialog.setPosSize(ps.X + max(0, (ps.Width - WIDTH) // 2),
+                dialog.setPosSize(ps.X + max(0, (ps.Width - self._width) // 2),
                                   ps.Y + max(0, (ps.Height - self._height) // 3),
                                   0, 0, 3)  # POS
             except Exception:
@@ -246,70 +254,110 @@ class AssistantPalette:
         prompt_control.addKeyListener(key_handler)
         self._handlers.append(key_handler)
 
-        # Restaure le fil persisté
         self._render_conversation()
 
-    def _build_chips(self, y, font):
-        x = MARGIN
-        for index, preset in enumerate(presets_module.presets_for(self.app)):
-            width = 24 + 8 * len(preset.label)
-            if x + width > WIDTH - MARGIN:
-                x = MARGIN
-                y += CHIP_HEIGHT + CHIP_GAP
-            control, chip_model = dsfr.add_chip(
-                self.dialog, self.model, f"chip_{preset.id}", preset.label,
-                x, y, width, font,
-                on_click=(lambda p=preset: self._on_chip(p)))
-            handler_ref = control  # les listeners sont retenus par add_chip
-            self._handlers.append(handler_ref)
-            x += width + CHIP_GAP
-        return y + CHIP_HEIGHT + 10
+    # ── Layout mesuré ───────────────────────────────────────────────────
+    def _preferred(self, name):
+        try:
+            return self.dialog.getControl(name).getPreferredSize()
+        except Exception:
+            return None
 
-    def _build_footer(self, font):
-        # Positions Y appliquées dans _apply_layout()
-        specs = [
-            ("link_settings", "Réglages", 90, self.callbacks.get("settings")),
-            ("link_about", "À propos", 80, self.callbacks.get("about")),
-            ("link_doc", "Documentation", 110, self.callbacks.get("documentation")),
-            ("link_clear", "🗑 Nouvelle conversation", 170, self._on_clear),
-        ]
-        x = MARGIN
-        for name, label, width, callback in specs:
-            control, link_model = dsfr.add_link(
-                self.dialog, self.model, name, label, x, 0, width, font,
-                callback or (lambda: None))
-            self._controls[name] = control
-            x += width + 12
-        _, hint_model = dsfr.add_control(
-            self.dialog, self.model, "hint", "FixedText",
-            x, 0, WIDTH - MARGIN - x, 16, {
-                "Label": "Échap : fermer",
-                "TextColor": dsfr.TOKENS["text_mention"],
-                "FontName": font, "FontHeight": 8, "Align": 2,
-            })
-        self._controls["hint"] = hint_model  # modèle suffisant (position via contrôle)
+    def _place(self, name, x, y, w, h):
+        control = self.dialog.getControl(name)
+        if control is not None:
+            control.setPosSize(int(x), int(y), int(w), int(h), 15)  # POSSIZE
 
-    def _apply_layout(self):
-        journal_h = (self._journal_height + 6) if self.journal_visible else 0
-        footer_y = self._footer_base_y + journal_h
-        for name in ("link_settings", "link_about", "link_doc", "link_clear"):
-            control = self._controls.get(name)
-            if control is not None:
-                ps = control.getPosSize()
-                control.setPosSize(ps.X, footer_y, 0, 0, 2)  # Y uniquement
-        hint = self.dialog.getControl("hint")
-        if hint is not None:
-            ps = hint.getPosSize()
-            hint.setPosSize(ps.X, footer_y, 0, 0, 2)
-        self._height = footer_y + 16 + MARGIN
+    def _layout(self):
+        """Positionne tout à partir des tailles réelles de rendu."""
+        # Échelle dérivée de la hauteur réelle d'une chip (HiDPI-safe)
+        chip_prefs = {}
+        line_h = 18
+        for name in self._chip_names:
+            pref = self._preferred(name)
+            if pref is not None:
+                chip_prefs[name] = pref
+                line_h = max(line_h, pref.Height)
+        scale = max(1.0, line_h / 22.0)
+
+        margin = int(14 * scale)
+        gap = int(8 * scale)
+        chip_h = int(line_h + 10 * scale)
+        width = int(660 * scale)
+        self._width = width
+
+        # Bandeau
+        header_pref = self._preferred("header")
+        header_h = int((header_pref.Height if header_pref else 24) + 18 * scale)
+        self._place("header", 0, 0, width, header_h)
+        y = header_h + gap
+
+        # Chips avec retour à la ligne, largeur = taille préférée + padding
+        x = margin
+        for name in self._chip_names:
+            pref = chip_prefs.get(name)
+            w = int((pref.Width if pref else 90) + 18 * scale)
+            if x + w > width - margin and x > margin:
+                x = margin
+                y += chip_h + gap
+            self._place(name, x, y, w, chip_h)
+            x += w + gap
+        y += chip_h + int(12 * scale)
+
+        # Prompt (≈ 3 lignes de texte)
+        prompt_h = int(line_h * 3 + 14 * scale)
+        self._place("prompt", margin, y, width - 2 * margin, prompt_h)
+        y += prompt_h + gap
+
+        # Statut + bouton Envoyer (largeur mesurée)
+        send_pref = self._preferred("send")
+        send_w = int((send_pref.Width if send_pref else 100) + 30 * scale)
+        send_h = int(line_h + 14 * scale)
+        self._place("send", width - margin - send_w, y, send_w, send_h)
+        self._place("status", margin, y + (send_h - line_h) // 2,
+                    width - 2 * margin - send_w - gap, line_h)
+        y += send_h + int(10 * scale)
+
+        # Fil de conversation
+        response_h = int(170 * scale)
+        self._place("response", margin, y, width - 2 * margin, response_h)
+        y += response_h + gap
+
+        # Toggle + journal repliable
+        toggle_pref = self._preferred("journal_toggle")
+        toggle_w = int((toggle_pref.Width if toggle_pref else 140) + 10 * scale)
+        self._place("journal_toggle", margin, y, toggle_w, line_h)
+        y += line_h + int(4 * scale)
+        if self.journal_visible:
+            journal_h = int(90 * scale)
+            self._place("journal", margin, y, width - 2 * margin, journal_h)
+            self.dialog.getControl("journal").setVisible(True)
+            y += journal_h + gap
+        else:
+            self.dialog.getControl("journal").setVisible(False)
+
+        # Pied : liens mesurés + hint aligné à droite
+        x = margin
+        for name, _label, _cb in self._footer_specs:
+            pref = self._preferred(name)
+            w = int((pref.Width if pref else 90) + 6 * scale)
+            self._place(name, x, y, w, line_h)
+            x += w + int(14 * scale)
+        hint_pref = self._preferred("hint")
+        hint_w = int((hint_pref.Width if hint_pref else 90) + 6 * scale)
+        hint_x = max(x, width - margin - hint_w)
+        self._place("hint", hint_x, y, width - margin - hint_x, line_h)
+        y += line_h + margin
+
+        self._height = y
         ps = self.dialog.getPosSize()
-        self.dialog.setPosSize(ps.X, ps.Y, WIDTH, self._height, 15)
+        self.dialog.setPosSize(ps.X, ps.Y, width, self._height, 15)
 
     # ── Affichage ───────────────────────────────────────────────────────
     def show(self):
         self.dialog.setVisible(True)
         try:
-            self._controls["prompt"].setFocus()
+            self.dialog.getControl("prompt").setFocus()
         except Exception:
             pass
 
@@ -333,8 +381,7 @@ class AssistantPalette:
         self._models["journal_toggle"].Label = (
             "▾ Masquer les actions" if self.journal_visible
             else "▸ Voir les actions")
-        self._controls["journal"].setVisible(self.journal_visible)
-        self._apply_layout()
+        self._layout()
 
     def _render_conversation(self):
         entries = self.conversation.load()
