@@ -38,8 +38,8 @@ def build_system(app, registry, mode, preset_extra=""):
         "par défaut). Tes réponses finales sont en texte brut, sans markdown.",
         "Règles : lis le contexte nécessaire avec les outils de lecture avant "
         "de modifier quoi que ce soit ; fais des modifications minimales et "
-        "précises ; si la demande est ambiguë, utilise l'outil ui_ask_user ou "
-        "pose ta question en réponse finale.",
+        "précises ; si la demande est ambiguë, pose ta question en réponse "
+        "finale (l'utilisateur répondra dans la conversation).",
     ]
     if mode in ("json", "auto"):
         catalog = registry.prompt_catalog(app)

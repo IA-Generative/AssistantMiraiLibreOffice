@@ -9586,6 +9586,13 @@ EDITED VERSION:
         model = desktop.getCurrentComponent()
         self._log(f"Current component type: {type(model)}")
 
+        # Palette universelle (démonstrateur moteur MCP) — import paresseux :
+        # zéro coût au chargement de l'extension.
+        if action == "OpenAssistant":
+            from .core.entry import open_palette
+            open_palette(self, model)
+            return
+
         if handle_writer_action(self, action, model):
             return
 
