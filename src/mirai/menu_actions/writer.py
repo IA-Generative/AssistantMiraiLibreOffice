@@ -582,13 +582,32 @@ TRADUCTION :
         text_range.setString(text_range.getString() + ": " + str(e))
 
 
+_WRITER_TEXT_ACTIONS = (
+    "ExtendSelection", "EditSelection", "SummarizeSelection", "SimplifySelection",
+    "ResizeSelection", "CorrectSelection", "TranslateSelection",
+)
+
+
 def handle_writer_action(job, args, model):
     if not hasattr(model, "Text"):
+        return False
+    if args not in _WRITER_TEXT_ACTIONS:
+        # Les actions non textuelles sont traitées en amont par la coquille
+        # (voir MainJob._handle_shell_action) : les laisser passer ici les
+        # exposerait de nouveau au `return True` sur sélection vide ci-dessous.
         return False
 
     job._log("Processing Writer document")
     text, ctrl, selection, text_range, selected_text = _get_writer_selection(job, model)
     if text_range is None:
+        # Sélection non résoluble : le dire. Auparavant on rendait la main en
+        # silence, et l'utilisateur ne pouvait pas distinguer « rien à traiter »
+        # d'une panne.
+        job._log(f"[writer] {args} : aucune plage de texte exploitable")
+        job._show_message(
+            "Rien à traiter",
+            "Placez le curseur dans un paragraphe ou sélectionnez du texte, "
+            "puis relancez l'action.")
         return True
 
     if args == "ExtendSelection":
@@ -605,18 +624,5 @@ def handle_writer_action(job, args, model):
         _correct_selection(job, text, selection, text_range, controller=ctrl, model=model)
     elif args == "TranslateSelection":
         _translate_selection(job, text, selection, text_range, controller=ctrl, model=model)
-    elif args == "AboutDialog":
-        try:
-            job._show_about_dialog()
-        except Exception as e:
-            job._log(f"AboutDialog error: {e}")
-    elif args == "OpenmiraiWebsite":
-        _open_mirai_website(job)
-    elif args == "Documentation":
-        _open_documentation(job)
-    elif args == "MenuSeparator":
-        return True
-    elif args == "settings":
-        _open_settings(job, selection)
 
     return True

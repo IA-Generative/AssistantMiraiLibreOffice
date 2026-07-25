@@ -10210,6 +10210,52 @@ EDITED VERSION:
             log_to_file(f"[context-menu] execute failed: {e}")
         return
 
+    # Actions qui ne portent ni sur le document ni sur une sélection : elles
+    # doivent aboutir dans TOUS les contextes, Writer comme Calc, avec ou sans
+    # sélection, et même sans document ouvert.
+    _SHELL_ACTIONS = ("settings", "proxy_settings", "AboutDialog",
+                      "Documentation", "OpenmiraiWebsite", "MenuSeparator")
+
+    def _handle_shell_action(self, action):
+        """Traite les actions non textuelles. Retourne True si prise en charge."""
+        if action not in self._SHELL_ACTIONS:
+            return False
+        if action == "MenuSeparator":
+            return True
+        try:
+            if action == "settings":
+                self._send_telemetry("OpenSettings", {"action": "open_settings"})
+                from .menu_actions.shared import apply_settings_result
+                apply_settings_result(self, self.settings_box("Settings"))
+            elif action == "proxy_settings":
+                self.proxy_settings_box()
+            elif action == "AboutDialog":
+                self._send_telemetry("AboutDialog", {"action": "about"})
+                self._show_about_dialog()
+            elif action == "Documentation":
+                self._send_telemetry("OpenDocumentation",
+                                     {"action": "open_documentation"})
+                self._open_url_config("doc_url")
+            elif action == "OpenmiraiWebsite":
+                self._send_telemetry("OpenmiraiWebsite", {"action": "open_website"})
+                self._open_url_config("portal_url")
+        except Exception as exc:
+            # Une action de coquille qui échoue doit se VOIR : jusqu'ici la
+            # panne était avalée et l'utilisateur concluait « ça ne marche pas ».
+            log_to_file(f"[dispatch] action {action} en échec : {exc}")
+            self._show_message(
+                "Action impossible",
+                f"« {action} » n'a pas pu s'exécuter.\n\n{exc}")
+        return True
+
+    def _open_url_config(self, key):
+        """Ouvre l'URL d'une clé de configuration, avec repli sur le portail."""
+        import webbrowser
+        url = self.get_config(key, "") or self.get_config("portal_url", "")
+        if not url:
+            raise RuntimeError(f"aucune URL configurée ({key})")
+        webbrowser.open(url)
+
     def trigger(self, args):
         # Parse &src= suffix if present (menu, toolbar, key)
         if "&src=" in args:
@@ -10274,11 +10320,33 @@ EDITED VERSION:
             open_palette(self, model)
             return
 
+        # Actions non textuelles : elles ne dépendent NI du type de document NI
+        # d'une sélection. Elles doivent donc être traitées AVANT les handlers
+        # par module. Le dispatch historique les faisait passer par
+        # handle_writer_action, qui sortait sur `return True` dès que la
+        # sélection était vide — un clic sur « Paramètres » ne produisait alors
+        # rien du tout ; et en Calc, « Documentation » et « Site mirai »
+        # n'étaient tout simplement pas branchées.
+        if self._handle_shell_action(action):
+            return
+
         if handle_writer_action(self, action, model):
             return
 
         if handle_calc_action(self, action, model):
             return
+
+        # Aucune branche n'a traité l'action : le dire, plutôt que de rendre la
+        # main en silence. Une action déclarée dans un manifeste mais non
+        # implémentée produisait jusqu'ici un clic sans le moindre effet, sans
+        # la moindre trace — impossible à diagnostiquer, pour l'utilisateur
+        # comme pour le support.
+        log_to_file(f"[dispatch] action non gérée : {action!r} "
+                    f"(document={type(model).__name__}, src={source})")
+        self._show_message(
+            "Action indisponible",
+            f"L'action « {action} » n'est pas disponible ici.\n\n"
+            "Ouvrez un document Writer ou Calc, puis réessayez.")
 
 # Starting from Python IDE
 def main():
