@@ -44,10 +44,21 @@ cd ../device-management && ./scripts/k8s/deploy.sh scaleway
 
 ## Architecture
 
-- `src/mirai/entrypoint.py` — Main extension code (MainJob)
-- `src/mirai/menu_actions/writer.py` — Writer actions (extend, edit, resize, summarize, simplify)
-- `src/mirai/menu_actions/calc.py` — Calc actions (transform, formula, analyze)
-- `oxt/Addons.xcu` — Menu definition (Writer + Calc)
+> ⚠️ Branche `exp-jetable/demonstrateur-moteur-mcp` : démonstrateur jetable —
+> le cœur est réécrit en moteur MCP interne + palette universelle DSFR.
+> Voir **docs/ARCHITECTURE.md** (carte des couches, tools, règles, checklist
+> « ajouter un tool »). La coquille (enrollment/SSO/DM/update/télémétrie)
+> reste dans entrypoint.py, inchangée.
+
+- `src/mirai/entrypoint.py` — Coquille (MainJob) + dispatch `OpenAssistant`
+- `src/mirai/core/` — Moteur : registry de tools UNO, orchestrateur agentique,
+  client LLM double-mode (natif/JSON), sinks, presets, conversation, façade
+  (`shell_facade.py` — seul pont vers MainJob, duck-typé, jamais d'import)
+- `src/mirai/ui/` — Palette universelle (dsfr.py tokens + palette.py)
+- `src/mirai/menu_actions/` — legacy, encore présent (suppression prévue après
+  validation du démonstrateur)
+- `oxt/Addons.xcu` — Entrée unique « MIrAI — Assistant » ; raccourci
+  Ctrl+Alt+Espace (macOS : Ctrl+Opt+Espace) — jamais Ctrl+Shift+Espace
 - `config/profiles/` — Bootstrap config profiles (dev, docker, integration, kubernetes, production)
 
 ## Key constraints
@@ -56,6 +67,8 @@ cd ../device-management && ./scripts/k8s/deploy.sh scaleway
 - **No pip**: Only `urllib.request` — no external Python packages in the plugin
 - **UNO API**: All UI via `com.sun.star.awt.*` dialogs
 - **Config profiles**: `dev`, `int`, `prod` (not `integration` — device-management rejects it)
+- **core/ui n'importent jamais entrypoint** (règle testée : `tests/unit/core/test_no_entrypoint_import.py`)
+- **macOS dev** : si `unopkg` échoue en SIGKILL « Launch Constraint Violation », re-signer ad hoc les binaires auxiliaires de LibreOffice.app (voir docs/ARCHITECTURE.md §Environnement) — à refaire après chaque mise à jour de LO
 
 ## Device Management (sibling repo)
 
