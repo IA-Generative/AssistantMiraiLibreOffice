@@ -1,8 +1,11 @@
 # MIrAI — Assistant LibreOffice
 
+> ⚠️ **EXPÉRIMENTATION JETABLE — ne pas merger vers master.**
+> Cette branche (`exp-jetable/demonstrateur-moteur-mcp`) est un **démonstrateur jetable** : réécriture du cœur du plugin autour d'un moteur interne de type MCP (outils UNO orchestrés par le LLM) et d'une fenêtre de prompt universelle proche du DSFR. La coquille (enrôlement, SSO, device management, mises à jour, télémétrie) est inchangée. Toute PR issue de cette branche reste en draft.
+
 Extension LibreOffice intégrant un assistant IA directement dans Writer et Calc. Elle se connecte à un backend compatible OpenAI (OpenWebUI, Ollama, Scaleway, etc.) et inclut un mécanisme d'enrôlement via Device Management pour préconfigurer les URLs, tokens et modèles.
 
-**Origine :** cette application est une version bêta développée dans le cadre du programme MIrAI du ministère de l'Intérieur. Elle s'appuie sur le travail de **John Balis**, auteur de l'extension [localwriter](https://github.com/balisujohn/localwriter), et sur des portions de code LibreOffice (MPL 2.0 — [gerrit.libreoffice.org](https://gerrit.libreoffice.org/c/core/+/159938)). Voir `registration/license.txt` pour les attributions complètes.
+**Origine :** cette application est développée dans le cadre du programme MIrAI du ministère de l'Intérieur.
 
 **Comparaison de modèles LLM :** une évaluation des modèles Scaleway sur les scénarios Writer (extension, résumé, reformulation) a été réalisée avec des textes issus de Wikipédia. Les résultats sont disponibles dans [bench/scaleway_model_comparison.md](bench/scaleway_model_comparison.md).
 
@@ -369,10 +372,7 @@ sequenceDiagram
 
 ## License
 
-- Code original : licence de John Balis (voir `registration/license.txt`)
-- Portions LibreOffice : MPL 2.0
-- Adaptations ministère de l'Intérieur : voir `registration/license.txt`
+- Voir `registration/license.txt`
 
-Dépôts de référence :
-- [balisujohn/localwriter](https://github.com/balisujohn/localwriter) — projet original
+Dépôt de référence :
 - [IA-Generative/AssistantMiraiLibreOffice](https://github.com/IA-Generative/AssistantMiraiLibreOffice) — ce dépôt
