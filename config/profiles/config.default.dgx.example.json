@@ -1,0 +1,9 @@
+{
+    "_note": "Copiez ce fichier en config.default.dgx.json et renseignez l'URL réelle. Tier PROD on-premise (GPU, réseau interne uniquement). Transport seul : le SSO et le reste sont servis par le DM. Le fichier renseigné est gitignoré — ne JAMAIS committer un nom d'hôte interne.",
+    "configVersion": 1,
+    "enabled": true,
+    "bootstrap_urls": [
+        "https://bootstrap.change-me.internal/bootstrap"
+    ],
+    "config_path": "/config/mirai-libreoffice/config.json?profile=prod"
+}

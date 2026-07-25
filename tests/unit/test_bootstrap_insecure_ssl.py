@@ -17,8 +17,8 @@ from tests.stubs.uno_stubs import install, make_job
 install()
 
 
-OCP = "https://bootstrap.apps.ocpbm02s2.cores.r2.pi2.minint.fr"
-DGX = "https://onyxia.gpu.minint.fr/bootstrap"
+OCP = "https://bootstrap.apps.ocp.internal.example"
+DGX = "https://gpu.internal.example/bootstrap"
 SCW = "https://bootstrap.fake-domain.name"
 
 
@@ -54,7 +54,7 @@ def test_no_list_means_never_insecure():
 def test_bare_host_entry_tolerated():
     # Entry written without a scheme still matches by host.
     job = _job_with_config(
-        {"bootstrap_insecure_urls": ["bootstrap.apps.ocpbm02s2.cores.r2.pi2.minint.fr"]}
+        {"bootstrap_insecure_urls": ["bootstrap.apps.ocp.internal.example"]}
     )
     assert job._is_insecure_bootstrap_url(OCP) is True
 

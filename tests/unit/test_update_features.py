@@ -254,7 +254,7 @@ def test_lo09_perform_update_checksum_ok_stages():
 def test_lo09b_download_fails_over_to_next_bootstrap():
     """Si la 1re base bootstrap est injoignable (DGX hors réseau : Errno 8), le
     download bascule sur la suivante au lieu d'abandonner (bug observé : figé sur
-    onyxia.gpu.minint.fr)."""
+    l'hôte GPU interne)."""
     job = make_job()
     fake_binary = b"oxt bytes for failover test"
     checksum = "sha256:" + hashlib.sha256(fake_binary).hexdigest()

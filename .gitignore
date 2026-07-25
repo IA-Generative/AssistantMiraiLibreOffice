@@ -5,6 +5,7 @@ config/keycloak-client-export.json
 config/profiles/config.default.integration.json
 config/profiles/config.default.production.json
 config/profiles/config.default.kubernetes.json
+config/profiles/config.default.dgx.json
 
 # Build artifacts
 *.oxt
