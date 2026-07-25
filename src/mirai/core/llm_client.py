@@ -158,8 +158,12 @@ class LLMClient:
         if tools and mode == "native":
             extra_body = {"tools": tools, "tool_choice": "auto"}
 
-        request = self.shell.build_chat_request(
-            messages, max_tokens=self.max_tokens, extra_body=extra_body)
+        # Fabrique différée : build_chat_request lit la config et peut résoudre
+        # le modèle via le réseau. Exécutée dans le thread du pump, jamais sur
+        # le thread principal — sinon LibreOffice paraît gelé (cf. sse_pump).
+        def _build_request():
+            return self.shell.build_chat_request(
+                messages, max_tokens=self.max_tokens, extra_body=extra_body)
 
         text_parts = []
         withhold = (mode == "json")   # rétention tant que ça ressemble à un tool call
@@ -214,7 +218,7 @@ class LLMClient:
             if choice.get("finish_reason"):
                 finish[0] = choice["finish_reason"]
 
-        outcome = sse_pump.run_stream(self.shell, request, _on_event)
+        outcome = sse_pump.run_stream(self.shell, _build_request, _on_event)
         if not outcome.ok:
             if isinstance(outcome.error, sse_pump.StreamHttpError):
                 return StepResult(error=f"http_{outcome.error.status}",

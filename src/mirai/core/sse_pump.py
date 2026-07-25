@@ -38,6 +38,13 @@ class StreamOutcome:
 def run_stream(shell, request, on_event, tick=None):
     """Exécute la requête streaming ; dispatch les événements sur le thread appelant.
 
+    `request` peut être une requête urllib DÉJÀ construite, ou un CALLABLE qui
+    la construit — dans ce cas la construction a lieu dans le thread réseau.
+    C'est le mode à privilégier : bâtir la requête déclenche côté coquille des
+    lectures de config et une résolution de modèle qui peuvent partir en appel
+    réseau. Sur le thread principal, ces secondes-là sont vécues comme un GEL
+    de LibreOffice, puisque le pompage d'événements n'a pas encore commencé.
+
     on_event(event) reçoit des RawChunk dans l'ordre. Les erreurs sont
     journalisées (LlmRelayError côté coquille) et retournées dans l'outcome —
     jamais levées. `tick()` est appelé ~20×/s pendant l'attente (animation).
@@ -47,7 +54,9 @@ def run_stream(shell, request, on_event, tick=None):
 
     def _network_thread():
         try:
-            with shell.urlopen(request, timeout=shell.request_timeout()) as response:
+            # Construction paresseuse : tout ce qui peut bloquer reste ici.
+            actual_request = request() if callable(request) else request
+            with shell.urlopen(actual_request, timeout=shell.request_timeout()) as response:
                 for line in response:
                     if not line.strip() or not line.startswith(b"data: "):
                         continue
