@@ -51,7 +51,8 @@ def native_tool_call_chunks(name, arguments_json, call_id="call_abc"):
 class FakeShell:
     """ShellServices factice : config en dict, réponses HTTP scriptées."""
 
-    def __init__(self, config=None, responses=None, config_dir="/tmp"):
+    def __init__(self, config=None, responses=None, config_dir="/tmp",
+                 recover_auth_result=False):
         self.config = dict(config or {})
         self.responses = list(responses or [])
         self.requests = []           # corps JSON de chaque requête émise
@@ -59,6 +60,8 @@ class FakeShell:
         self.llm_errors = []         # (status, body)
         self.logs = []
         self._config_dir = config_dir
+        self.recover_auth_calls = 0
+        self._recover_auth_result = recover_auth_result
 
     # Config
     def get_config(self, key, default=None):
@@ -83,6 +86,10 @@ class FakeShell:
         return SimpleNamespace(
             full_url="http://fake/api/chat/completions",
             data=json.dumps(body, ensure_ascii=False).encode("utf-8"))
+
+    def recover_llm_auth(self):
+        self.recover_auth_calls += 1
+        return self._recover_auth_result
 
     def urlopen(self, request, timeout=None):
         if not self.responses:

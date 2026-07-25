@@ -1,6 +1,7 @@
 """Client LLM : assemblage natif fragmenté, rétention JSON, détection auto."""
 
 import io
+import threading
 import urllib.error
 
 from src.mirai.core.llm_client import LLMClient
@@ -115,6 +116,55 @@ def test_http_error_returned_as_step_error():
     client = LLMClient(shell)
     step = client.step([{"role": "user", "content": "x"}], tools=TOOLS)
     assert step.error == "http_429"
+
+
+def _unauthorized():
+    return urllib.error.HTTPError(
+        "http://fake", 401, "Unauthorized", {},
+        io.BytesIO(b'{"error":{"code":"invalid_api_key"}}'))
+
+
+def test_401_recovers_auth_and_retries_once():
+    """Le llmToken du proxy DM est court et peut être révoqué : un 401 doit
+    déclencher une récupération d'auth puis UNE seule re-tentative."""
+    shell = FakeShell(
+        config={"llm_tool_mode": "native"},
+        responses=[_unauthorized(), FakeSSEResponse(text_chunks("ok"))],
+        recover_auth_result=True)
+    client = LLMClient(shell)
+    step = client.step([{"role": "user", "content": "x"}], tools=TOOLS)
+    assert step.text == "ok"
+    assert shell.recover_auth_calls == 1
+
+
+def test_401_twice_gives_up_without_looping():
+    shell = FakeShell(
+        config={"llm_tool_mode": "native"},
+        responses=[_unauthorized(), _unauthorized()])
+    client = LLMClient(shell)
+    step = client.step([{"role": "user", "content": "x"}], tools=TOOLS)
+    assert step.error == "http_401"
+    assert shell.recover_auth_calls == 1
+
+
+def test_401_recovery_runs_in_network_thread():
+    """La récupération fait du réseau bloquant : elle doit avoir lieu dans le
+    thread du pump (via build_chat_request), jamais sur le thread principal."""
+    shell = FakeShell(
+        config={"llm_tool_mode": "native"},
+        responses=[_unauthorized(), FakeSSEResponse(text_chunks("ok"))],
+        recover_auth_result=True)
+    main_thread = threading.current_thread()
+    seen = {}
+    original = shell.recover_llm_auth
+
+    def _tracked():
+        seen["thread"] = threading.current_thread()
+        return original()
+
+    shell.recover_llm_auth = _tracked
+    LLMClient(shell).step([{"role": "user", "content": "x"}], tools=TOOLS)
+    assert seen["thread"] is not main_thread
 
 
 def test_network_error_returned_as_step_error():

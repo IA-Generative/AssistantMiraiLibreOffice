@@ -73,6 +73,18 @@ class MainJobShell:
         rebuilt.get_method = lambda: "POST"
         return rebuilt
 
+    def recover_llm_auth(self):
+        """Tente de restaurer un credential LLM valide après un 401.
+
+        À n'appeler que depuis le thread réseau : la coquille y fait un refresh
+        /config et, si besoin, un ré-enrôlement — deux appels bloquants.
+        """
+        try:
+            return bool(self._job._recover_llm_auth())
+        except Exception as exc:
+            self.log(f"[llm-auth] recovery indisponible: {exc}")
+            return False
+
     def urlopen(self, request, timeout=None):
         """Ouvre la requête via le transport coquille (proxy + SSL + relais)."""
         context = self._job.get_ssl_context(getattr(request, "full_url", None))

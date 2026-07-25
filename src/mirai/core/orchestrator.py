@@ -40,7 +40,10 @@ class RunResult:
 
 
 ERROR_MESSAGES = {
-    "http_401": ("Votre jeton d'accès n'est plus valide. "
+    # Le renouvellement automatique du jeton (refresh /config, puis
+    # ré-enrôlement) a déjà été tenté avant d'en arriver là : ce message ne
+    # s'affiche que si le poste n'a pas pu se ré-authentifier tout seul.
+    "http_401": ("Votre poste n'est pas authentifié auprès du service IA. "
                  "Ouvrez les Réglages pour vous reconnecter."),
     "http_403": ("Accès refusé par le relais — la configuration se "
                  "resynchronise. Réessayez dans quelques instants."),

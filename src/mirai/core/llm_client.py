@@ -150,10 +150,20 @@ class LLMClient:
                 self.shell.set_config("llm_tool_mode_detected", "json")
             except Exception:
                 pass
-            result = self._run_step(messages, tools, on_text_delta, "json")
+            mode = "json"
+            result = self._run_step(messages, tools, on_text_delta, mode)
+
+        # 401 : jeton d'accès absent, expiré ou révoqué. Une seule reprise, avec
+        # la récupération exécutée DANS le thread réseau (recover_auth passe par
+        # _build_request) — elle fait du réseau bloquant, et sur le thread
+        # principal LibreOffice paraîtrait gelé (cf. sse_pump).
+        if result.error == "http_401":
+            self.shell.log("[llm] 401 — tentative de récupération du jeton d'accès")
+            result = self._run_step(messages, tools, on_text_delta, mode,
+                                    recover_auth=True)
         return result
 
-    def _run_step(self, messages, tools, on_text_delta, mode):
+    def _run_step(self, messages, tools, on_text_delta, mode, recover_auth=False):
         extra_body = None
         if tools and mode == "native":
             extra_body = {"tools": tools, "tool_choice": "auto"}
@@ -162,6 +172,10 @@ class LLMClient:
         # le modèle via le réseau. Exécutée dans le thread du pump, jamais sur
         # le thread principal — sinon LibreOffice paraît gelé (cf. sse_pump).
         def _build_request():
+            if recover_auth:
+                recover = getattr(self.shell, "recover_llm_auth", None)
+                if callable(recover):
+                    recover()
             return self.shell.build_chat_request(
                 messages, max_tokens=self.max_tokens, extra_body=extra_body)
 
