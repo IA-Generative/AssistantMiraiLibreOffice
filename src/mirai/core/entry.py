@@ -38,6 +38,7 @@ def open_palette(job, model):
     elif hasattr(model, "Sheets"):
         app = "calc"
     else:
+        shell.log(f"[palette] composant courant sans Text/Sheets : {type(model)}")
         try:
             job._show_message("MIrAI — Assistant",
                               "Ouvrez un document Writer ou Calc pour "
@@ -48,6 +49,7 @@ def open_palette(job, model):
 
     shell.telemetry("AssistantOpen", {"plugin.action": "assistant.open",
                                       "assistant.app": app})
+    shell.log(f"[palette] ouverture demandée app={app}")
 
     callbacks = {
         "settings": lambda: _apply_settings_result(job, job.settings_box("Settings")),
@@ -55,5 +57,12 @@ def open_palette(job, model):
         "documentation": lambda: _open_documentation(job),
     }
 
-    from ..ui.palette import open_or_focus
-    return open_or_focus(job.ctx, shell, app, callbacks)
+    try:
+        from ..ui.palette import open_or_focus
+        palette = open_or_focus(job.ctx, shell, app, callbacks)
+        shell.log("[palette] ouverte")
+        return palette
+    except Exception:
+        import traceback
+        shell.log("[palette] ÉCHEC d'ouverture :\n" + traceback.format_exc())
+        return None
