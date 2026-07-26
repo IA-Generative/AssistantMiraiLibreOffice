@@ -387,6 +387,8 @@ class AssistantPalette:
         self.active_tab = self._restore_tab(shell)
         self._bottom_height = 0        # ajusté par le redimensionnement
         self._current_exchange = []    # tour en cours, affiché en tête du fil
+        self._width = 0                # largeur courante (0 = pas encore mesurée)
+        self._height = 0
         self._base_bottom_h = 0        # hauteur de zone basse au premier layout
         self._natural_height = 0       # hauteur totale au premier layout
         self._min_width = 0            # largeur qui garde les chips sur UNE ligne

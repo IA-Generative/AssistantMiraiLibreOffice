@@ -583,6 +583,14 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
 
 28. **`Sizeable` ne suffit pas, et un layout qui ignore la largeur imposée échoue en silence.** Le redimensionnement n'agrandissait pas les champs parce que `_layout()` n'acceptait aucun paramètre : l'appel `_layout(width=…)` levait un `TypeError` avalé par le `try/except` du listener. Règle : la fonction de layout doit accepter une largeur **imposée** (celle du peer) et retomber sur la largeur naturelle sinon ; sans quoi la poignée de redimensionnement agrandit le cadre et rien d'autre. Prévoir aussi la garde anti-réentrance — `_layout()` appelle `setPosSize()`, qui re-déclenche `windowResized`.
 
+29. **🚨 L'IHM n'était couverte par AUCUN test — et 465 tests verts ont laissé passer une palette qui ne s'ouvrait plus.** Une ligne (`self._width` lu avant d'être initialisé) a suffi : `AttributeError` dans `_layout()`, capté par le `try/except` d'`open_palette`, donc **aucun message à l'écran** — juste une fenêtre qui n'apparaît pas. Toute la suite portait sur le moteur ; rien ne CONSTRUISAIT la palette.
+    **Parade** : `tests/unit/core/test_palette_build.py` monte la palette entière sur des contrôles factices. Il ne juge pas le rendu (impossible hors LibreOffice) mais attrape la famille de pannes qui empêche l'ouverture : attribut manquant, méthode inexistante, mauvaise signature, listener non branché. Trois exigences pour que ce harnais serve :
+    - **des modèles de contrôle à état réel** (`Text`/`Label` = vraies chaînes) : un MagicMock rend `.Text` incomparable et les assertions sur le contenu affiché deviennent vides de sens ;
+    - **le contrôle et son modèle doivent être le MÊME objet** des deux côtés (`getControl(name).model is model`), sinon une écriture via `_models[…]` ne se voit pas via `getControl()` ;
+    - **injecter `DirectDispatcher`** : avec le vrai dispatcher, le service AsyncCallback est un MagicMock qui accepte les tâches sans jamais les exécuter — on testerait un affichage qui n'est jamais mis à jour.
+    Compléter aussi `uno_stubs` au fur et à mesure : une interface absente (ici `XKeyListener`) donne un MagicMock comme classe de base et un « metaclass conflict » à l'import, très loin de la cause réelle.
+    **Leçon générale** : un `try/except` autour de l'ouverture d'une fenêtre transforme toute erreur de construction en « il ne se passe rien ». Si une couche est protégée par un catch large, elle DOIT être couverte par un test de construction — sinon la protection sert à cacher les régressions.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

@@ -21,6 +21,7 @@ class _XJob:             pass
 class _XActionListener:  pass
 class _XItemListener:    pass
 class _XMouseListener:   pass
+class _XKeyListener:     pass
 class _XWindowListener:  pass
 class _XTopWindowListener: pass
 class _XNamed:           pass
@@ -69,6 +70,7 @@ def install():
     com_sun_star_awt.XActionListener  = _XActionListener
     com_sun_star_awt.XItemListener    = _XItemListener
     com_sun_star_awt.XMouseListener   = _XMouseListener
+    com_sun_star_awt.XKeyListener     = _XKeyListener
     com_sun_star_awt.XWindowListener  = _XWindowListener
     com_sun_star_awt.XTopWindowListener = _XTopWindowListener
     com_sun_star_awt.XCallback         = _XCallback
