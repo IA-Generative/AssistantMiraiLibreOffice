@@ -298,6 +298,43 @@ def log_to_file(message):
         pass
 
 
+def is_main_thread():
+    """Vrai si l'appelant est le thread principal du processus."""
+    return threading.current_thread() is threading.main_thread()
+
+
+def pump_events(toolkit):
+    """Pompe la file d'événements VCL — UNIQUEMENT depuis le thread principal.
+
+    `processEventsToIdle()` appelé depuis un thread de fond ne « ralentit » pas
+    LibreOffice : il l'ABORTE. La séquence observée est toujours la même —
+    `DispatchUserEvents` → `std::terminate()` → le gestionnaire de signal tente
+    d'ouvrir la boîte de récupération d'urgence, qui réclame le SolarMutex que
+    le thread fautif détient encore. Résultat : interblocage total, le thread
+    principal reste figé dans `SalYieldMutex::doAcquire` et l'application ne
+    répond plus à un seul clic.
+
+    Vécu le 2026-07-26 pendant l'enrôlement SSO : `stream_request` (qui pompe)
+    lancé hors du thread principal.
+
+    Hors thread principal, on ne pompe donc pas — on trace et on rend la main.
+    L'appelant n'a rien à changer : c'est un no-op sûr, jamais un abort.
+    """
+    if toolkit is None:
+        return False
+    if not is_main_thread():
+        log_to_file(
+            "[threading] processEventsToIdle ignoré : appel depuis "
+            f"{threading.current_thread().name!r} et non le thread principal"
+        )
+        return False
+    try:
+        toolkit.processEventsToIdle()
+        return True
+    except Exception:
+        return False
+
+
 def generate_trace_id():
     """Generate a random 16-byte trace ID in hexadecimal format."""
     return uuid.uuid4().hex[:32]
@@ -2680,10 +2717,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             self._thinking_container = dlg
             self._thinking_dots_count = 0
 
-            try:
-                toolkit.processEventsToIdle()
-            except Exception:
-                pass
+            pump_events(toolkit)
         except Exception:
             pass
 
@@ -2962,7 +2996,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     fill_w = (WIDTH - MARGIN * 2) * (step_idx + 1) // TOTAL_STEPS
                     dialog.getControl("wiz_bar_fill").setPosSize(
                         MARGIN, 0, fill_w, 4, SIZE)
-                    toolkit.processEventsToIdle()
+                    pump_events(toolkit)
                 except Exception as e:
                     log_to_file(f"Wizard update step error: {str(e)}")
 
@@ -3001,7 +3035,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                                 (WIDTH - BTN_W) // 2, btn_y, BTN_W, BTN_H, POSSIZE)
                     except Exception:
                         pass
-                    toolkit.processEventsToIdle()
+                    pump_events(toolkit)
                 except Exception as e:
                     log_to_file(f"Wizard custom step error: {str(e)}")
 
@@ -3643,7 +3677,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         f"En attente de la connexion{dots}\n\n"
                         "Connectez-vous dans le navigateur puis revenez."
                     )
-                    wiz_toolkit.processEventsToIdle()
+                    pump_events(wiz_toolkit)
                 except Exception:
                     pass
 
@@ -3707,7 +3741,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         wait_label.getModel().Label = "Annulation..."
                     else:
                         wait_label.getModel().Label = f"Authentification Keycloak{dots}"
-                    wait_toolkit.processEventsToIdle()
+                    pump_events(wait_toolkit)
                 except Exception:
                     pass
 
@@ -3748,10 +3782,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             wiz_state["cancelled"] = False
             step_snap = wiz_state["step"]
             while wiz_state["step"] == step_snap:
-                try:
-                    wiz_toolkit.processEventsToIdle()
-                except Exception:
-                    pass
+                pump_events(wiz_toolkit)
                 time.sleep(0.1)
             _wiz_dispose()
 
@@ -3831,7 +3862,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             wiz_dialog.getControl("wiz_text").getModel().Label = (
                                 f"Enregistrement en cours{dots}"
                             )
-                            wiz_toolkit.processEventsToIdle()
+                            pump_events(wiz_toolkit)
                         except Exception:
                             pass
                         time.sleep(0.4)
@@ -3875,10 +3906,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         )
 
                     while wiz_state["step"] == step_snap:
-                        try:
-                            wiz_toolkit.processEventsToIdle()
-                        except Exception:
-                            pass
+                        pump_events(wiz_toolkit)
                         time.sleep(0.1)
 
                     _wiz_dispose()
@@ -5629,10 +5657,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     _dots_tick += 1
                     if _dots_tick % 6 == 0:  # ~every 300ms
                         self._update_thinking_dots()
-                    try:
-                        toolkit.processEventsToIdle()
-                    except Exception:
-                        pass
+                    pump_events(toolkit)
                     continue
 
                 if item is _DONE:
@@ -5673,10 +5698,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     self._close_thinking()
 
                 append_callback(item)
-                try:
-                    toolkit.processEventsToIdle()
-                except Exception:
-                    pass
+                pump_events(toolkit)
         finally:
             self._close_thinking()
 
@@ -5986,7 +6008,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     wait_dialog["label"].getModel().Label = f"Bloc {chunk_idx + 1} / {total}..."
                     wait_dialog["bg"].getModel().Text = ""
                 if wait_dialog["toolkit"]:
-                    wait_dialog["toolkit"].processEventsToIdle()
+                    pump_events(wait_dialog["toolkit"])
             except Exception:
                 pass
 
@@ -6009,7 +6031,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     except Exception:
                         pass
                 if wait_dialog["toolkit"]:
-                    wait_dialog["toolkit"].processEventsToIdle()
+                    pump_events(wait_dialog["toolkit"])
             except Exception:
                 pass
 
@@ -6217,10 +6239,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         bg.getModel().Text = wait_buffer["text"]
                     except Exception:
                         pass
-                try:
-                    toolkit.processEventsToIdle()
-                except Exception:
-                    pass
+                pump_events(toolkit)
                 time.sleep(0.05)
             except Exception:
                 pass
@@ -6241,7 +6260,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 except Exception:
                     pass
                 if wait_dialog.get("toolkit"):
-                    wait_dialog["toolkit"].processEventsToIdle()
+                    pump_events(wait_dialog["toolkit"])
                 time.sleep(0.01)
             except Exception:
                 pass
@@ -9018,7 +9037,7 @@ EDITED VERSION:
                 try:
                     dots = "." * ((i % 3) + 1)
                     label.getModel().Label = f"Contacte MIrAI{dots}"
-                    toolkit.processEventsToIdle()
+                    pump_events(toolkit)
                 except Exception:
                     pass
                 time.sleep(delay)
@@ -9609,10 +9628,7 @@ EDITED VERSION:
                         _y = ps.Height / 2 - 55
                         dialog.setPosSize(_x, _y, 0, 0, POS)
                     dialog.setVisible(True)
-                    try:
-                        toolkit.processEventsToIdle()
-                    except Exception:
-                        pass
+                    pump_events(toolkit)
                     log_to_file("Reload config dialog shown")
                     return dialog, label, btn, toolkit
                 except Exception as e:
@@ -9650,7 +9666,7 @@ EDITED VERSION:
                     if label:
                         label.getModel().Label = f"Connexion à Mirai{dots}"
                     if toolkit:
-                        toolkit.processEventsToIdle()
+                        pump_events(toolkit)
                 except Exception:
                     pass
                 time.sleep(0.2)
