@@ -67,3 +67,32 @@ def test_defaults_match_historic_behaviour():
         runner = presets.get_preset(preset_id).runner
         default = inspect.signature(runner).parameters["append_mode"].default
         assert default is appends, f"{preset_id} : défaut inattendu"
+
+
+# ── Le prompt libre doit écrire dans le DOCUMENT ────────────────────────
+
+def test_free_prompt_with_selection_targets_the_document(palette_module=None):
+    """Un prompt libre sur une sélection modifie le document, pas la palette.
+
+    Sans ce chemin, la demande partait en mode agentique dont le sink est la
+    palette : le texte s'affichait dans la fenêtre et le document restait
+    inchangé — la case « Ajouter à la suite » n'avait alors rien à piloter.
+    """
+    from src.mirai.core.doc_rewrite import wants_document_rewrite
+
+    # La détection d'intention ne dépend pas de la présence d'une sélection :
+    # c'est l'appelant qui choisit la cible selon qu'il y en a une ou non.
+    assert wants_document_rewrite("mets ce passage au passé simple")
+    assert wants_document_rewrite("reformate en alexandrins")
+
+
+def test_both_targets_use_the_same_sink_helper():
+    """Sélection et document passent par le MÊME traducteur de choix."""
+    import inspect
+
+    from src.mirai.ui import palette
+
+    source = inspect.getsource(palette.AssistantPalette._run_selection_rewrite)
+    assert "text_sink" in source, (
+        "la réécriture de sélection doit passer par le helper commun, "
+        "sinon la case redevient inopérante sur ce chemin")

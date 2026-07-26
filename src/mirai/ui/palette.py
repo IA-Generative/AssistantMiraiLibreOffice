@@ -1367,15 +1367,22 @@ class AssistantPalette:
     def _document_snapshot(self, ctx, preset, prompt_text):
         """Lit d'avance ce dont le run aura besoin. Thread principal uniquement."""
         snapshot = {"selection": "", "paragraphs": [], "styles": [],
-                    "rewrite": False}
+                    "rewrite": False, "rewrite_selection": False}
         try:
             snapshot["selection"] = _selection_string(ctx) or ""
         except Exception:
             pass
-        if (preset is None and ctx.app == "writer"
-                and not snapshot["selection"].strip()
-                and doc_rewrite.wants_document_rewrite(prompt_text)
-                and not self._model_can_chain_tools()):
+        wants_edit = (preset is None and ctx.app == "writer"
+                      and doc_rewrite.wants_document_rewrite(prompt_text)
+                      and not self._model_can_chain_tools())
+        if wants_edit and snapshot["selection"].strip():
+            # Une demande de modification AVEC sélection porte sur elle. Sans
+            # ce chemin, le prompt libre partait en mode agentique dont le sink
+            # est la palette : le texte s'affichait dans la fenêtre et le
+            # document restait inchangé.
+            snapshot["rewrite_selection"] = True
+            return snapshot
+        if wants_edit and not snapshot["selection"].strip():
             try:
                 from ..core.tools.writer_tools import _paragraphs, paragraph_style
                 items = _paragraphs(ctx)
@@ -1397,6 +1404,9 @@ class AssistantPalette:
         try:
             if preset is not None and preset.mode == "pipeline":
                 self._run_pipeline(preset, prompt_text, ctx, shown)
+            elif snapshot.get("rewrite_selection"):
+                self._run_selection_rewrite(ctx, prompt_text,
+                                            snapshot["selection"])
             elif snapshot.get("rewrite"):
                 self._run_document_rewrite(ctx, prompt_text,
                                            snapshot["paragraphs"],
@@ -1470,6 +1480,55 @@ class AssistantPalette:
             self._stream_response("⚠ " + (result.text or result.reason))
         elif not isinstance(sink, PaletteSink):
             self._stream_response(result.text or "Modification appliquée.")
+
+    def _run_selection_rewrite(self, ctx, instruction, selection):
+        """Applique une demande libre À LA SÉLECTION, par un chemin sûr.
+
+        Même principe que la réécriture du document : Python tient le texte, le
+        LLM n'est qu'une fonction texte, et le résultat est écrit par le sink
+        choisi dans la palette — remplacement, ou ajout entre marqueurs si la
+        case « Ajouter à la suite » est cochée.
+        """
+        from ..core.presets import text_sink
+
+        self.journal_line(f"⚙ Modification de la sélection ({len(selection)} car.)")
+        self._append_response("MIrAI : ")
+        sink = self.dispatcher.call(
+            lambda: text_sink(ctx, self.append_mode,
+                              "\n\n---début-du-texte-modifié---\n",
+                              "\n---fin-du-texte-modifié---\n"),
+            timeout=10)
+
+        llm = LLMClient(self.shell)
+        self.dispatcher.call(lambda: ctx.undo_begin("Modifier la sélection"),
+                             timeout=10)
+        try:
+            step = llm.step(
+                [{"role": "system", "content": prompts.LEGACY_TEXT_SYSTEM},
+                 {"role": "user",
+                  "content": (f"TEXTE :\n{selection}\n\n"
+                              f"DEMANDE : {instruction}\n\n"
+                              "Réponds UNIQUEMENT avec le texte modifié, sans "
+                              "introduction ni commentaire.")}],
+                on_text_delta=self._stream_response,
+                cancel_event=self._cancel,
+                progress=self._progress)
+            self._delta_buffer.flush()
+            if step.error:
+                self._stream_response("⚠ " + error_message(step.error))
+                return
+            if self._cancelled():
+                return
+            self.dispatcher.call(
+                lambda: sink.finish(step.text, step.streamed), timeout=30)
+        finally:
+            self.dispatcher.call(ctx.undo_end, timeout=10)
+
+        how = "ajouté après la sélection" if self.append_mode else "remplacée"
+        self.journal_line(f"✓ Sélection {how}")
+        summary = f"Sélection {how}. Ctrl+Z pour annuler."
+        self.conversation.append("user", instruction, ctx.app)
+        self.conversation.append("assistant", summary, ctx.app)
 
     def _run_document_rewrite(self, ctx, instruction, originals, styles=None):
         """Réécrit le document : Python lit, le LLM rédige, Python applique.
