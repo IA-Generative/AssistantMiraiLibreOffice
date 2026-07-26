@@ -6,7 +6,7 @@
 
 ## En une phrase
 
-La suite de tests est **verte** (433 tests : 427 unitaires + 6 d'intégration), la palette
+La suite de tests est **verte** (461 tests : 455 unitaires + 6 d'intégration), la palette
 **s'ouvre en LibreOffice réel**, la chaîne d'authentification `/llm/v1` est vérifiée de bout
 en bout **contre les deux tiers** — DM local Ollama et DM Scaleway avec SSO Keycloak réel —
 et **10 des 22 constats** de qualification sont corrigés, les trois urgences comprises. Le
@@ -23,8 +23,27 @@ reste est listé plus bas, avec sa raison.
 | `78b4248` | Tests d'intégration réparés, hôtes internes retirés, doc alignée | 414 ✅ |
 | `cb29f24` | Qualité : ruff, `03-test-local.sh` étendu, code mort supprimé | 414 ✅ |
 | `882685d` | IHM : statut coloré + indicateur de sélection en direct | 427 ✅ |
+| `323efd3` | **Threading** : `pump_events()` — pomper hors thread principal ne peut plus aborter | 433 ✅ |
+| `44efa5b` | **IHM (étapes 15→18)** : onglets, suggestions, redimensionnement, menu | 453 ✅ |
+| `df3a13d` | **Outils** : `writer_replace_paragraphs` + prompt « AGIS, NE DÉCRIS PAS » | 461 ✅ |
 
 Tags posés : `exp-jetable-v2-baseline`, `exp-jetable-v2-worker`.
+
+## Session de recette du 2026-07-26 (matin) — quatre défauts trouvés à l'usage
+
+Aucun n'était visible en test automatisé : il a fallu se servir du plugin.
+
+| Symptôme | Cause réelle | Correction |
+|---|---|---|
+| « le plugin est bloqué » | `processEventsToIdle` depuis un thread → `std::terminate` → la boîte de récupération réclame le SolarMutex que le thread mourant détient | garde `pump_events()`, 18 sites, + 6 tests dont un contrôle AST |
+| croix de fenêtre inopérante | aucun `XTopWindowListener` — un dialogue non modal émet `windowClosing` et attend qu'on agisse ; Échap n'était branché que sur le champ de prompt | listener de fermeture + Échap sur tous les contrôles |
+| bouton figé sur « Arrêter » | le service `AsyncCallback` était recréé à chaque `post()` sans référence gardée, donc collecté avant de délivrer ; aggravé par un mélange écriture directe / postée | service unique conservé, un seul chemin d'écriture |
+| polices deux fois trop grosses | 9-10 pt là où le plan visait 7-8 ; le layout mesuré corrige les positions, pas la taille perçue | 6-7 pt |
+| « restructure le document en 2 paragraphes » sans effet | **le catalogue d'outils était incomplet** : `writer_get_document_map` numérotait des paragraphes que rien ne savait réécrire. Le modèle répondait du texte — `iterations=1`, `ok=true`, document intact | `writer_replace_paragraphs` + consigne « AGIS, NE DÉCRIS PAS » + bascule automatique sur l'onglet qui reçoit la réponse |
+
+Les cinq sont capitalisés dans le plan (pièges **n°23 à 25**) avec leur signature
+de diagnostic, et la « règle de complétude du catalogue » ouvre désormais la
+checklist « ajouter un tool » d'`ARCHITECTURE.md`.
 
 ## Le changement structurant : l'exécution non bloquante
 
@@ -146,6 +165,9 @@ Ollama → `HTTP 200`, réponse `QUALIF-OK`, bloc `usage` renvoyé spontanément
   vérifié par construction et par tests, **pas à l'œil**.
 - L'indicateur de sélection en direct, l'annulation, le rendu visuel des chips sur une seule
   ligne : le code est là et testé unitairement, l'aspect n'a pas été constaté à l'écran.
+- Les **étapes 15 à 18** (zone basse à onglets, suggestions, redimensionnement,
+  Documentation au menu) n'avaient pas été traitées dans la nuit : arbitrage de
+  temps au profit des correctifs de qualification. Elles sont **faites** depuis.
 - ~~Le parcours SSO complet~~ → **fait le 2026-07-26 contre le DM Scaleway** : login
   Keycloak réel, `POST /enroll` accepté, paire relais reçue, `llmToken` minté et persisté,
   puis appel LLM réel sur `llama-3.3-70b-instruct` renvoyant la réponse attendue avec son

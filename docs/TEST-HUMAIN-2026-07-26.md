@@ -138,21 +138,24 @@ d'appuyer dix fois.
 
 ☐ Conforme ☐ Non conforme — *observations :* ______________________________
 
-### 3.3 Reformuler · 3.4 Continuer · 3.5 Raccourcir · 3.6 Allonger
+### 3.3 Simplifier · 3.4 Raccourcir · 3.5 Allonger
 
 **Faites :** même méthode pour chacun de ces boutons, sur une sélection.
 
 **Vous devez voir :** un résultat cohérent avec l'intitulé du bouton. « Raccourcir » et
-« Allonger » **remplacent** votre sélection ; les autres **ajoutent** du texte après elle.
+« Allonger » **remplacent** votre sélection ; « Simplifier » **ajoute** du texte après elle.
 
 | Bouton | Conforme | Non conforme | Observations |
 |---|---|---|---|
-| Reformuler | ☐ | ☐ | |
-| Continuer | ☐ | ☐ | |
+| Simplifier | ☐ | ☐ | |
 | Raccourcir | ☐ | ☐ | |
 | Allonger | ☐ | ☐ | |
 
-### 3.7 Sans rien sélectionner
+> Il n'y a que quatre boutons : « Continuer » et « Modifier » ont été retirés
+> volontairement — le champ de saisie libre les remplace avantageusement
+> (scénario 3.8).
+
+### 3.6 Sans rien sélectionner
 
 **Faites :** cliquez simplement dans un paragraphe (sans sélectionner), ouvrez l'assistant,
 cliquez sur **Résumer**.
@@ -162,12 +165,28 @@ comportement attendu, pas un défaut.
 
 ☐ Conforme ☐ Non conforme — *observations :* ______________________________
 
-### 3.8 Une demande libre
+### 3.7 Une demande libre
 
 **Faites :** sélectionnez un paragraphe, ouvrez l'assistant, tapez dans le champ de saisie :
 `Réécris ce passage sur un ton plus formel`, puis **Entrée**.
 
 **Vous devez voir :** la demande est prise en compte et le résultat correspond.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 3.8 Une demande qui porte sur tout le document
+
+**Faites :** ouvrez un document de plusieurs paragraphes. **Ne sélectionnez rien.**
+Ouvrez l'assistant et tapez : `Restructure ce document en deux paragraphes`, puis
+**Entrée**.
+
+**Vous devez voir :** le **document lui-même** est réorganisé en deux paragraphes.
+L'assistant doit AGIR, pas se contenter de vous décrire ce qu'il ferait. Un seul
+**Ctrl+Z** annule l'ensemble.
+
+> C'est le scénario qui a révélé un défaut : l'assistant répondait un texte
+> expliquant la restructuration en laissant le document intact. Si vous revoyez
+> ce comportement, notez-le — c'est important.
 
 ☐ Conforme ☐ Non conforme — *observations :* ______________________________
 
@@ -296,6 +315,66 @@ Aucun plantage, aucun message d'erreur.
 
 ---
 
+## 6bis — La zone du bas et la taille de la fenêtre
+
+### 6bis.1 Les trois onglets
+
+**Faites :** en bas de la fenêtre, cliquez successivement sur **Historique**,
+**Suggestions**, puis **Actions**.
+
+**Vous devez voir :** le contenu change **dans le même cadre** — la fenêtre ne
+s'agrandit pas. L'onglet actif est écrit en bleu. *Historique* montre vos échanges,
+*Suggestions* des propositions adaptées à ce qui est sélectionné, *Actions* le détail
+de ce que l'assistant a fait.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 6bis.2 L'onglet actif est mémorisé
+
+**Faites :** placez-vous sur **Suggestions**, fermez la fenêtre, rouvrez-la.
+
+**Vous devez voir :** l'onglet **Suggestions** est toujours actif.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 6bis.3 Les suggestions s'adaptent
+
+**Faites :** allez sur l'onglet **Suggestions**. Sélectionnez une phrase courte, puis
+un long passage, puis rien du tout. Rouvrez l'onglet à chaque fois.
+
+**Vous devez voir :** les propositions changent — un long passage suggère de résumer,
+une phrase courte de développer.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 6bis.4 Redimensionner la fenêtre
+
+**Faites :** attrapez un coin de la fenêtre et agrandissez-la.
+
+**Vous devez voir :** **seule la zone du bas grandit** ; les boutons du haut restent
+sur **une seule ligne**. Rétrécissez : rien ne doit se chevaucher ni être tronqué.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 6bis.5 La taille est mémorisée
+
+**Faites :** redimensionnez, fermez la fenêtre, rouvrez-la.
+
+**Vous devez voir :** la fenêtre retrouve sa taille et sa position.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 6bis.6 Fermer avec la croix
+
+**Faites :** cliquez la **croix** de la fenêtre. Rouvrez, puis fermez avec **Échap**.
+
+**Vous devez voir :** la fenêtre se ferme dans les deux cas. Essayez aussi Échap après
+avoir cliqué dans la zone du bas — cela doit marcher aussi.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+---
+
 ## 7 — Quand ça se passe mal
 
 L'assistant doit **toujours** vous dire ce qui ne va pas. Un bouton qui ne fait rien du tout
@@ -409,9 +488,10 @@ Précisez aussi votre **système** (macOS / Windows / Linux) et la **version de 
 | Menu du clic droit | 4 | | |
 | Actions Calc | 4 | | |
 | Pendant le travail | 3 | | |
+| Zone du bas et fenêtre | 6 | | |
 | Quand ça se passe mal | 3 | | |
 | Menu MIrAI | 8 | | |
-| **Total** | **37** | | |
+| **Total** | **43** | | |
 
 **Testeur :** ____________________  **Date :** ____________________
 
