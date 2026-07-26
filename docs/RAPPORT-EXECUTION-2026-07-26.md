@@ -6,10 +6,11 @@
 
 ## En une phrase
 
-La suite de tests est **verte** (427 tests : 421 unitaires + 6 d'intégration), la palette
-**s'ouvre en LibreOffice réel** avec la chaîne d'authentification `/llm/v1` fonctionnelle
-contre le DM local, et **9 des 22 constats** de qualification sont corrigés — les trois
-urgences en font partie. Le reste est listé plus bas, avec sa raison.
+La suite de tests est **verte** (433 tests : 427 unitaires + 6 d'intégration), la palette
+**s'ouvre en LibreOffice réel**, la chaîne d'authentification `/llm/v1` est vérifiée de bout
+en bout **contre les deux tiers** — DM local Ollama et DM Scaleway avec SSO Keycloak réel —
+et **10 des 22 constats** de qualification sont corrigés, les trois urgences comprises. Le
+reste est listé plus bas, avec sa raison.
 
 ## Ce qui a été livré, commit par commit
 
@@ -68,7 +69,7 @@ Ce qui rend le changement vérifiable plutôt que déclaratif :
 | R-06 | majeur | Une action inconnue est journalisée avec son contexte et signalée à l'utilisateur. | `16d000c` |
 | R-07 | **bloquant** | Le `except Exception: pass` qui enveloppait tout `handle_calc_action` journalise et affiche désormais l'erreur. | `16d000c` |
 | S-01 | majeur | Hôtes internes remplacés par des placeholders ; `config.default.dgx.json` rejoint les profils gitignorés avec un `.example` versionné ; **le build refuse de produire un OXT si un tel nom réapparaît** dans un fichier suivi par git — vérifié en le réintroduisant volontairement. | `78b4248` |
-| T-01 | **bloquant** | Plus aucun `processEventsToIdle` dans le cœur ; le run vit dans un worker. Le chemin fautif (`_bg_ai_suggestions` → `stream_request`) appartient au cœur legacy, non atteint par la palette. | `2cb3912` |
+| T-01 | **bloquant** | Deux niveaux. (1) Plus aucun `processEventsToIdle` dans le cœur ; le run vit dans un worker. (2) **Le chemin legacy s'est manifesté en vrai** le 2026-07-26 pendant un enrôlement SSO : abort + interblocage sur le SolarMutex (voir « Incident » ci-dessous). Une garde `pump_events()` rend désormais tout pompage hors thread principal inoffensif et tracé, dans la coquille comprise. | `2cb3912`, `323efd3` |
 
 **Corrigés en documentation (3)**
 
@@ -145,11 +146,53 @@ Ollama → `HTTP 200`, réponse `QUALIF-OK`, bloc `usage` renvoyé spontanément
   vérifié par construction et par tests, **pas à l'œil**.
 - L'indicateur de sélection en direct, l'annulation, le rendu visuel des chips sur une seule
   ligne : le code est là et testé unitairement, l'aspect n'a pas été constaté à l'écran.
-- Le parcours SSO complet (Keycloak absent du tier local ; `DM_AUTH_VERIFY_ACCESS_TOKEN=false`
-  a été utilisé pour valider la chaîne technique).
-- Le tier Scaleway au-delà de sa disponibilité (`/config` en 200, 0,25 s).
+- ~~Le parcours SSO complet~~ → **fait le 2026-07-26 contre le DM Scaleway** : login
+  Keycloak réel, `POST /enroll` accepté, paire relais reçue, `llmToken` minté et persisté,
+  puis appel LLM réel sur `llama-3.3-70b-instruct` renvoyant la réponse attendue avec son
+  bloc `usage`. Trace : `[llm-auth] vector=llmToken expires_in=3595s proxy_mode=True
+  relay_creds=yes enrolled=True`.
+- Reste non vérifié : un run déclenché **depuis la palette** jusqu'à l'insertion dans le
+  document.
 
 C'est précisément l'objet de `docs/TEST-HUMAIN-2026-07-26.md`.
+
+## Incident du 2026-07-26 — le crash « latent » ne l'était pas
+
+Après bascule sur le DM Scaleway, l'enrôlement SSO réussit puis **LibreOffice cesse de
+répondre au moindre clic**. Le prélèvement de pile (`sample <pid>`) donne l'enchaînement
+sans ambiguïté :
+
+```
+thread Python → processEventsToIdle() → DispatchUserEvents → std::terminate() → abort
+  → gestionnaire de signal → boîte de récupération d'urgence → SolarMutex
+```
+
+Le thread fautif meurt **en tenant le SolarMutex** ; le thread principal reste bloqué dans
+`SalYieldMutex::doAcquire`. Ce n'est donc pas une lenteur, c'est un interblocage définitif.
+
+**Signature de diagnostic** (utile car le symptôme ne désigne jamais le coupable) :
+l'application est vivante — `STAT=S`, ~1 % de CPU —, le journal s'arrête net au milieu d'une
+opération, et le thread principal apparaît dans `doAcquire` sous un `_handleMouseDownEvent`.
+Le thread `pythread_wrapper` porte alors le `processEventsToIdle` fautif.
+
+**Ce que ça dit de la qualification.** T-01 avait été classé « crash latent, non corrigé car
+il vit dans le code que l'étape de nettoyage doit supprimer ». C'était une erreur de
+jugement : un défaut reste **atteignable tant qu'il n'est pas supprimé**, et le nettoyage
+n'était pas au programme de cette campagne. Une garde bon marché aurait évité un diagnostic
+à chaud.
+
+**Correction.** Un helper `pump_events(toolkit)` vérifie le thread avant de pomper :
+inchangé sur le thread principal, no-op **journalisé** ailleurs. 18 sites convertis, aucun
+appel direct ne subsiste. La garde s'est déclenchée dès la première exécution :
+
+```
+[threading] processEventsToIdle ignoré : appel depuis 'Thread-5' et non le thread principal
+```
+
+L'enrôlement aboutit alors normalement et LibreOffice reste réactif.
+`tests/unit/test_pump_events_safety.py` (6 tests) verrouille la garde, dont un contrôle AST
+qui interdit tout appel direct hors du helper. Le plan porte désormais le **piège n°23**
+avec la signature de diagnostic complète.
 
 ## Budgets de qualité
 

@@ -74,6 +74,14 @@ def make_dialog(uno_ctx, title, width, height):
         model.BackgroundColor = TOKENS["bg"]
     except Exception:
         pass
+    # Fenêtre redimensionnable : `Sizeable` ne fait qu'autoriser la poignée —
+    # c'est un XWindowListener qui doit ensuite replacer les contrôles, sinon
+    # le cadre grandit et le contenu reste figé.
+    for prop, value in (("Sizeable", True), ("Moveable", True), ("Closeable", True)):
+        try:
+            setattr(model, prop, value)
+        except Exception:
+            pass          # propriété non supportée par ce toolkit : sans gravité
     return dialog, model
 
 

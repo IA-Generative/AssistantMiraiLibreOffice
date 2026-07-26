@@ -139,6 +139,10 @@ def test_lo05_fetch_v2_calls_schedule_update():
     payload = _enriched_v2(features={}, update=directive)
     job._urlopen = MagicMock(return_value=_json_response(payload))
 
+    # Le rafraîchissement de configuration lancé par __init__ peut encore être
+    # en vol et appeler _fetch_config lui aussi : on ne compte QUE les appels
+    # déclenchés par ce test, sinon l'assertion dépend de la charge machine.
+    job._schedule_update.reset_mock()
     job._fetch_config(force=True)
 
     job._schedule_update.assert_called_once_with(directive)

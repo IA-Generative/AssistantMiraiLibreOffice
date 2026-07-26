@@ -9,6 +9,7 @@ Usage — call install() before importing anything from src.mirai.entrypoint:
     from src.mirai.entrypoint import MainJob
 """
 import sys
+import time
 from unittest.mock import MagicMock
 
 
@@ -143,4 +144,18 @@ def make_job(config_dir=None):
     ctx.ServiceManager = service_manager
     ctx.getServiceManager.return_value = service_manager
 
-    return MainJob(ctx)
+    job = MainJob(ctx)
+
+    # `MainJob.__init__` lance un rafraîchissement de configuration en tâche de
+    # fond. Il réécrit config.json et peut rappeler `_fetch_config` — donc
+    # entrer en course avec le test : selon la charge de la machine, une
+    # assertion `assert_called_once` voit deux appels, ou une valeur qu'on vient
+    # d'écrire est écrasée. On laisse ce thread finir, puis on le désarme.
+    # C'est le seul moyen d'avoir une suite déterministe ; les tests qui
+    # veulent exercer le rafraîchissement l'appellent explicitement.
+    deadline = time.time() + 2.0
+    while getattr(job, "_fetching_config", False) and time.time() < deadline:
+        time.sleep(0.01)
+    job._fetching_config = False
+    job._schedule_config_refresh = MagicMock()
+    return job

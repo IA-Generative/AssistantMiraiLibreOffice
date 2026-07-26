@@ -560,6 +560,12 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     **Parade posée** : un helper unique `pump_events(toolkit)` (`entrypoint.py`) qui vérifie `threading.current_thread() is threading.main_thread()` avant de pomper — no-op tracé sinon. 18 sites convertis, aucun appel direct ne subsiste. Verrouillé par `tests/unit/test_pump_events_safety.py`, dont un garde-fou AST qui interdit tout appel direct hors du helper.
     **Leçon de méthode** : un défaut qualifié « crash latent » parce qu'il vit dans du code qu'on prévoit de supprimer reste **atteignable tant qu'il n'est pas supprimé**. Poser une garde bon marché coûte moins cher qu'un diagnostic à chaud — d'autant que le symptôme (« le plugin est bloqué ») ne désigne jamais le coupable.
 
+24. **Trois défauts d'IHM qui ne se voient qu'en usage réel** (2026-07-26, session de recette sur le tier Scaleway) :
+    - **La croix de la fenêtre ne ferme rien.** Un `UnoControlDialog` non modal émet `windowClosing` et *attend qu'on agisse* : sans `XTopWindowListener`, le bouton de fermeture est inerte. Corollaire : brancher le `XKeyListener` d'Échap sur le seul champ de prompt ne suffit pas — dès que le focus est ailleurs (une chip, la zone de réponse), la fenêtre devient impossible à fermer au clavier aussi. Brancher Échap sur TOUS les contrôles focalisables.
+    - **Le service `AsyncCallback` doit être CONSERVÉ, pas recréé à chaque appel.** Créé en variable locale, il perd sa dernière référence au retour de `post()` et peut disparaître avant d'avoir délivré l'événement. Symptôme trompeur : une mise à jour d'affichage sur deux se perd — ici le bouton restait sur « Arrêter » après la fin du run, alors que `busy` valait bien `False`. Garder une instance unique dans le dispatcher.
+    - **Ne jamais mélanger écriture directe et écriture postée sur le même contrôle.** Mettre le libellé à « Arrêter » en direct (thread principal) puis le remettre via `post()` fait diverger l'affichage de l'état réel dès que le post se perd. Un seul chemin : tout poster, y compris depuis le thread principal.
+    - **Polices : viser 6-8 pt, pas 9-10.** Sur Retina les tailles rendent bien plus grand qu'attendu ; 10 pt paraît le double du raisonnable. Le layout mesuré corrige les POSITIONS, pas la taille perçue du texte.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

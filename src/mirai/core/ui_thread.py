@@ -39,9 +39,10 @@ _CALLBACK_BASES = (unohelper.Base, XCallback) if XCallback is not None else ()
 class _Task(*_CALLBACK_BASES):
     """Une unité de travail livrée au thread principal par AsyncCallback."""
 
-    def __init__(self, fn, result_queue=None):
+    def __init__(self, fn, result_queue=None, on_done=None):
         self._fn = fn
         self._result_queue = result_queue
+        self._on_done = on_done      # purge la référence gardée par le dispatcher
 
     def notify(self, _data=None):
         self.run()
@@ -53,6 +54,9 @@ class _Task(*_CALLBACK_BASES):
                 self._fn()
             except Exception:
                 pass
+            finally:
+                if self._on_done is not None:
+                    self._on_done(self)
             return
         try:
             self._result_queue.put(("ok", self._fn()))
@@ -81,6 +85,7 @@ class MainThreadDispatcher:
         self._log = log
         self._closed = False
         self._pending = []          # garde les _Task en vie jusqu'à leur notify
+        self._callback_service = None   # créé une fois, conservé (voir _async_callback)
 
     # ── cycle de vie ────────────────────────────────────────────────────
 
@@ -88,6 +93,7 @@ class MainThreadDispatcher:
         """Rend le dispatcher inerte. Idempotent, appelable de n'importe où."""
         self._closed = True
         self._pending.clear()
+        self._callback_service = None
 
     @property
     def closed(self) -> bool:
@@ -99,7 +105,7 @@ class MainThreadDispatcher:
         """Planifie fn sur le thread principal sans attendre. True si accepté."""
         if self._closed:
             return False
-        task = _Task(fn)
+        task = _Task(fn, on_done=self._forget)
         callback = self._async_callback()
         if callback is None:
             # Pas d'AsyncCallback : exécution directe. Correct quand on est
@@ -156,15 +162,27 @@ class MainThreadDispatcher:
     # ── interne ─────────────────────────────────────────────────────────
 
     def _async_callback(self):
-        # On ne teste PAS la disponibilité de l'interface XCallback : hors
-        # LibreOffice elle n'existe pas, mais le service peut être simulé.
-        # Le seul juge fiable est la création du service elle-même.
+        """Rend le service AsyncCallback, créé une seule fois et CONSERVÉ.
+
+        Le garder est nécessaire, pas seulement économique : un service créé
+        en variable locale perd sa dernière référence dès le retour de `post()`
+        et peut disparaître **avant d'avoir délivré** l'événement. Le symptôme
+        est déroutant — une mise à jour d'affichage sur deux se perd, par
+        exemple un bouton qui reste sur « Arrêter » après la fin du run.
+
+        On ne teste PAS la disponibilité de l'interface XCallback : hors
+        LibreOffice elle n'existe pas, mais le service peut être simulé. Le
+        seul juge fiable est la création du service elle-même.
+        """
+        if self._callback_service is not None:
+            return self._callback_service
         if self.uno_ctx is None:
             return None
         try:
-            return self.uno_ctx.getServiceManager().createInstanceWithContext(
-                "com.sun.star.awt.AsyncCallback", self.uno_ctx
-            )
+            self._callback_service = (
+                self.uno_ctx.getServiceManager().createInstanceWithContext(
+                    "com.sun.star.awt.AsyncCallback", self.uno_ctx))
+            return self._callback_service
         except Exception as exc:
             self._note(f"AsyncCallback indisponible ({exc})")
             return None

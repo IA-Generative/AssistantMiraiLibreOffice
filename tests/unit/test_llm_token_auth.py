@@ -7,6 +7,7 @@ en 401 sans aucun chemin de sortie automatique.
 
 Aucun LibreOffice requis — les modules UNO sont bouchonnés.
 """
+import base64
 import json
 import os
 import tempfile
@@ -21,6 +22,14 @@ install()
 
 BOOTSTRAP = "https://dm.example.test"
 PROXY_URL = BOOTSTRAP + "/llm/v1"
+
+
+def _jwt(claims):
+    """JWT non signé, suffisant : le code ne lit que la charge utile."""
+    head = base64.urlsafe_b64encode(b'{"alg":"none"}').rstrip(b"=").decode()
+    body = base64.urlsafe_b64encode(
+        json.dumps(claims).encode()).rstrip(b"=").decode()
+    return f"{head}.{body}.sig"
 
 
 def _write_config(config_dir, data):
@@ -141,6 +150,50 @@ class TestEnsureDeviceManagementStateGuard(_JobCase):
             "enrolled": True, "relay_client_id": "id", "relay_client_key": "key",
             "relay_key_expires_at": int(time.time()) - 10}), 1)
 
+
+class TestAbsorbingStateHasAnExit(_JobCase):
+    """L'état absorbant doit TOUJOURS avoir une porte de sortie.
+
+    Rappel du piège : `enrolled=True` n'atteste que d'un HTTP 201 passé, pas
+    d'une paire relais active. Un poste dans cet état reçoit 401 « Missing
+    credentials » sur 100 % de ses appels — et si le drapeau court-circuite le
+    ré-enrôlement, plus rien ne peut l'en sortir.
+
+    Deux issues existent, selon qu'une session Keycloak est encore valable :
+    ré-enrôlement silencieux en tâche de fond, ou assistant d'enrôlement.
+    Ces tests vérifient qu'au moins l'une des deux s'ouvre toujours.
+    """
+
+    def _needs_wizard(self, config):
+        _write_config(self.config_dir, config)
+        return self.job._needs_first_enrollment()
+
+    def test_absorbing_state_without_session_opens_the_wizard(self):
+        """Ni paire relais ni session : seul l'assistant peut sauver le poste."""
+        self.assertTrue(self._needs_wizard({"enrolled": True}))
+
+    def test_absorbing_state_with_expired_session_opens_the_wizard(self):
+        """Un jeton périmé ne permet pas le ré-enrôlement silencieux."""
+        expired = _jwt({"email": "a@b.c", "exp": int(time.time()) - 3600})
+        self.assertTrue(self._needs_wizard({
+            "enrolled": True, "access_token": expired}))
+
+    def test_absorbing_state_with_live_session_recovers_silently(self):
+        """Session valide : le ré-enrôlement de fond suffit, pas d'assistant.
+
+        Il dérive l'e-mail du jeton — inutile d'importuner l'utilisateur.
+        """
+        fresh = _jwt({"email": "a@b.c", "exp": int(time.time()) + 3600})
+        self.assertFalse(self._needs_wizard({
+            "enrolled": True, "access_token": fresh}))
+
+    def test_healthy_device_is_left_alone(self):
+        self.assertFalse(self._needs_wizard({
+            "enrolled": True, "relay_client_id": "id",
+            "relay_client_key": "key"}))
+
+    def test_fresh_device_needs_enrollment(self):
+        self.assertTrue(self._needs_wizard({}))
 
 class TestLlmTokenExpiry(_JobCase):
     """D5 : le llmToken est court (TTL DM 3600 s) — son expiration fait foi."""

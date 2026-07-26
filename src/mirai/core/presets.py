@@ -545,8 +545,6 @@ def _edit_prompt(user_text):
 
 
 PRESETS = [
-    Preset(id="extend", label="✍️ Continuer", apps=("writer",), mode="pipeline",
-           legacy_span="ExtendSelection", needs_selection=True, runner=run_extend),
     Preset(id="summarize", label="📝 Résumer", apps=("writer",), mode="pipeline",
            legacy_span="SummarizeSelection", needs_selection=True,
            runner=run_summarize),
@@ -557,11 +555,6 @@ PRESETS = [
            legacy_span="ResizeSelection", needs_selection=True, runner=run_shorten),
     Preset(id="lengthen", label="📏+ Allonger", apps=("writer",), mode="pipeline",
            legacy_span="ResizeSelection", needs_selection=True, runner=run_lengthen),
-    Preset(id="edit", label="✏️ Modifier", apps=("writer",), mode="agentic",
-           legacy_span="EditSelection", needs_input=True,
-           input_hint="Décrivez la modification souhaitée puis cliquez sur Modifier",
-           build_extra=_edit_extra, sink_spec="auto_edit",
-           prompt_template=_edit_prompt),
     Preset(id="transform", label="🔄 Transformer", apps=("calc",), mode="pipeline",
            legacy_span="TransformToColumn", needs_selection=True, needs_input=True,
            input_hint="Décrivez la transformation (ex. « traduire en anglais »)",

@@ -35,8 +35,13 @@ try:
 except Exception:
     _XSelectionChangeListener = None
 
+try:
+    from com.sun.star.awt import XTopWindowListener as _XTopWindowListener
+except Exception:
+    _XTopWindowListener = None
+
 from ..core import presets as presets_module
-from ..core import selection_info
+from ..core import selection_info, suggestions
 from ..core.context import ToolContext
 from ..core.conversation import ConversationStore
 from ..core.llm_client import LLMClient
@@ -73,6 +78,12 @@ _open_palette = [None]   # singleton de session
 FLUSH_INTERVAL_S = 0.12   # cadence maximale des mises à jour d'affichage
 FLUSH_CHARS = 80          # ou dès qu'on a accumulé ce nombre de caractères
 
+# Zone basse : trois contenus, un seul rectangle. L'identifiant sert aussi de
+# nom de contrôle (« response » porte l'historique, déjà créé plus haut).
+TABS = (("response", "Historique"),
+        ("suggestions", "Suggestions"),
+        ("journal", "Actions"))
+
 # Le retour d'un run doit se VOIR : une ligne de statut colorée selon l'issue,
 # pas un texte discret dans une zone grise. C'est la leçon du « il ne se passe
 # rien » — l'action partait bien, mais rien ne le signalait à l'écran.
@@ -81,6 +92,81 @@ STATUS_COLORS = {
     "error":   dsfr.TOKENS["error"],
     "success": dsfr.TOKENS["success"],
 }
+
+
+class _WindowCloser(unohelper.Base,
+                    *([_XTopWindowListener] if _XTopWindowListener else [])):
+    """Ferme la palette quand l'utilisateur clique la croix de la fenêtre.
+
+    Un `UnoControlDialog` non modal ne se ferme PAS tout seul : la croix émet
+    `windowClosing` et attend que quelqu'un agisse. Sans ce listener, le bouton
+    de fermeture est inopérant — la fenêtre reste à l'écran quoi qu'on fasse.
+
+    `windowActivated` sert de filet à l'indicateur de sélection : en Writer le
+    listener de sélection ne se déclenche pas toujours sur un simple
+    déplacement du curseur ; revenir sur la palette relit la cible.
+    """
+
+    def __init__(self, palette):
+        self._palette = palette
+
+    def windowClosing(self, _event):
+        self._palette.close()
+
+    def windowActivated(self, _event):
+        self._palette.refresh_selection_label()
+
+    # Le reste de l'interface : rien à faire, mais UNO exige les méthodes.
+    def windowOpened(self, _event):
+        pass
+
+    def windowClosed(self, _event):
+        pass
+
+    def windowMinimized(self, _event):
+        pass
+
+    def windowNormalized(self, _event):
+        pass
+
+    def windowDeactivated(self, _event):
+        pass
+
+    def disposing(self, _event):
+        pass
+
+
+try:
+    from com.sun.star.awt import XWindowListener as _XWindowListener
+except Exception:
+    _XWindowListener = None
+
+
+class _ResizeWatcher(unohelper.Base,
+                     *([_XWindowListener] if _XWindowListener else [])):
+    """Relance le layout sur la taille RÉELLE du peer après redimensionnement.
+
+    Sans cela, `Sizeable` agrandit le cadre mais les contrôles restent à leur
+    place : la fenêtre grandit, son contenu non.
+    """
+
+    def __init__(self, palette):
+        self._palette = palette
+
+    def windowResized(self, event):
+        self._palette.on_resized(event.Width, event.Height)
+
+    def windowMoved(self, _event):
+        pass
+
+    def windowShown(self, _event):
+        pass
+
+    def windowHidden(self, _event):
+        pass
+
+    def disposing(self, _event):
+        pass
 
 
 class _SelectionWatcher(unohelper.Base,
@@ -136,6 +222,27 @@ def _writer_targets(model):
         except Exception:
             paragraph = ""
     return selected, paragraph
+
+
+def _calc_selection_sample(model, max_values=40):
+    """(nombre de cellules, échantillon de valeurs) — jamais d'exception."""
+    try:
+        selection = model.CurrentController.Selection
+        area = selection.getRangeAddress()
+        rows = abs(area.EndRow - area.StartRow) + 1
+        cols = abs(area.EndColumn - area.StartColumn) + 1
+        sheet = model.CurrentController.ActiveSheet
+        values = []
+        for row in range(area.StartRow, area.EndRow + 1):
+            for col in range(area.StartColumn, area.EndColumn + 1):
+                if len(values) >= max_values:
+                    return rows * cols, values
+                text = sheet.getCellByPosition(col, row).getString()
+                if text:
+                    values.append(text)
+        return rows * cols, values
+    except Exception:
+        return 0, []
 
 
 def _friendly_error(exc):
@@ -277,7 +384,14 @@ class AssistantPalette:
         self.app = app                      # "writer" | "calc" à l'ouverture
         self.callbacks = callbacks          # settings / about / documentation
         self.busy = False
-        self.journal_visible = False
+        self.active_tab = self._restore_tab(shell)
+        self._bottom_height = 0        # ajusté par le redimensionnement
+        self._base_bottom_h = 0        # hauteur de zone basse au premier layout
+        self._natural_height = 0       # hauteur totale au premier layout
+        self._min_width = 0            # largeur qui garde les chips sur UNE ligne
+        self._scale = 1.0
+        self._laying_out = False       # garde anti-réentrance (_layout → setPosSize)
+        self._resize_watcher = None
         self.registry = register_all(ToolRegistry())
         self.conversation = ConversationStore(shell.user_config_dir())
         self.dialog = None
@@ -309,7 +423,7 @@ class AssistantPalette:
                 "Label": f"  MIrAI — Assistant ({app_label})",
                 "BackgroundColor": dsfr.TOKENS["primary"],
                 "TextColor": dsfr.TOKENS["text_inverted"],
-                "FontName": font, "FontHeight": 10, "FontWeight": 150.0,
+                "FontName": font, "FontHeight": 7, "FontWeight": 150.0,
                 "VerticalAlign": 1,
             })
         self._models["header"] = header_model
@@ -327,14 +441,14 @@ class AssistantPalette:
             dialog, model, "selection", "FixedText", 0, 0, 100, 18, {
                 "Label": "",
                 "TextColor": dsfr.TOKENS["text_mention"],
-                "FontName": font, "FontHeight": 8,
+                "FontName": font, "FontHeight": 7,
             })
         self._models["selection"] = selection_model
 
         prompt_control, prompt_model = dsfr.add_control(
             dialog, model, "prompt", "Edit", 0, 0, 100, 56, {
                 "MultiLine": True, "AutoVScroll": True,
-                "FontName": font, "FontHeight": 9,
+                "FontName": font, "FontHeight": 7,
                 "TextColor": dsfr.TOKENS["text_body"],
                 # Champ DSFR : fond contraste + bordure sombre, bien visible
                 "BackgroundColor": dsfr.TOKENS["bg_contrast"],
@@ -347,7 +461,7 @@ class AssistantPalette:
             dialog, model, "status", "FixedText", 0, 0, 100, 18, {
                 "Label": "",
                 "TextColor": dsfr.TOKENS["text_mention"],
-                "FontName": font, "FontHeight": 8,
+                "FontName": font, "FontHeight": 7,
             })
         self._models["status"] = status_model
 
@@ -359,51 +473,56 @@ class AssistantPalette:
         _, response_model = dsfr.add_control(
             dialog, model, "response", "Edit", 0, 0, 100, 200, {
                 "MultiLine": True, "ReadOnly": True, "VScroll": True,
-                "FontName": font, "FontHeight": 9,
+                "FontName": font, "FontHeight": 7,
                 "TextColor": dsfr.TOKENS["text_body"],
                 "BackgroundColor": dsfr.TOKENS["bg_alt"],
                 "Border": 2, "BorderColor": dsfr.TOKENS["border"],
             })
         self._models["response"] = response_model
 
-        toggle_control, toggle_model = dsfr.add_control(
-            dialog, model, "journal_toggle", "FixedText", 0, 0, 160, 16, {
-                "Label": "▸ Voir les actions",
-                "TextColor": dsfr.TOKENS["primary"],
-                "FontName": font, "FontHeight": 8,
-            })
-        self._models["journal_toggle"] = toggle_model
-        toggle_handler = dsfr.ClickHandler(
-            toggle_model, on_click=self._toggle_journal,
-            fg=dsfr.TOKENS["primary"], fg_hover=dsfr.TOKENS["primary_hover"])
-        toggle_control.addMouseListener(toggle_handler)
-        self._handlers.append(toggle_handler)
+        # Zone basse : UN seul rectangle, trois contenus superposés qu'on
+        # bascule par setVisible(). Réempiler trois zones distinctes ferait
+        # exploser la hauteur — c'est justement ce qu'on corrige ici.
+        for name, color, background in (
+            ("suggestions", dsfr.TOKENS["text_body"], dsfr.TOKENS["bg_accent"]),
+            ("journal", dsfr.TOKENS["text_mention"], dsfr.TOKENS["bg_accent"]),
+        ):
+            control, control_model = dsfr.add_control(
+                dialog, model, name, "Edit", 0, 0, 100, 100, {
+                    "MultiLine": True, "ReadOnly": True, "VScroll": True,
+                    "FontName": font, "FontHeight": 7,
+                    "TextColor": color, "BackgroundColor": background,
+                    "Border": 2, "BorderColor": dsfr.TOKENS["border"],
+                })
+            self._models[name] = control_model
+            control.setVisible(False)
 
-        journal_control, journal_model = dsfr.add_control(
-            dialog, model, "journal", "Edit", 0, 0, 100, 100, {
-                "MultiLine": True, "ReadOnly": True, "VScroll": True,
-                "FontName": font, "FontHeight": 8,
-                "TextColor": dsfr.TOKENS["text_mention"],
-                "BackgroundColor": dsfr.TOKENS["bg_accent"],
-                "Border": 2, "BorderColor": dsfr.TOKENS["border"],
-            })
-        self._models["journal"] = journal_model
-        journal_control.setVisible(False)
+        # Onglets : des FixedText cliquables (pas de UnoControlTabPageContainer,
+        # capricieux et peu stylable). L'onglet actif porte la couleur accent.
+        for tab_id, label in TABS:
+            name = f"tab_{tab_id}"
+            control, tab_model = dsfr.add_control(
+                dialog, model, name, "FixedText", 0, 0, 90, 16, {
+                    "Label": label,
+                    "TextColor": dsfr.TOKENS["text_mention"],
+                    "FontName": font, "FontHeight": 7,
+                })
+            self._models[name] = tab_model
+            handler = dsfr.ClickHandler(
+                tab_model, on_click=(lambda t=tab_id: self.select_tab(t)),
+                fg=dsfr.TOKENS["text_mention"], fg_hover=dsfr.TOKENS["primary_hover"])
+            control.addMouseListener(handler)
+            self._handlers.append(handler)
 
-        self._footer_specs = [
-            ("link_settings", "Réglages", self.callbacks.get("settings")),
-            ("link_about", "À propos", self.callbacks.get("about")),
-            ("link_doc", "Documentation", self.callbacks.get("documentation")),
-            ("link_clear", "🗑 Nouvelle conversation", self._on_clear),
-        ]
-        for name, label, callback in self._footer_specs:
-            dsfr.add_link(dialog, model, name, label, 0, 0, 120, 16, font,
-                          callback or (lambda: None))
+        # Réglages / À propos / Documentation vivent UNIQUEMENT dans le menu
+        # 🤖 MIrAI : la fenêtre ne garde que ce qui sert à travailler.
+        dsfr.add_link(dialog, model, "link_clear", "🗑 Nouvelle conversation",
+                      0, 0, 120, 16, font, self._on_clear)
         _, hint_model = dsfr.add_control(
             dialog, model, "hint", "FixedText", 0, 0, 120, 16, {
-                "Label": "Échap : fermer",
+                "Label": "Entrée : envoyer · Échap : fermer",
                 "TextColor": dsfr.TOKENS["text_mention"],
-                "FontName": font, "FontHeight": 7, "Align": 2,
+                "FontName": font, "FontHeight": 6, "Align": 2,
             })
         self._models["hint"] = hint_model
 
@@ -428,7 +547,85 @@ class AssistantPalette:
         prompt_control.addKeyListener(key_handler)
         self._handlers.append(key_handler)
 
+        # Échap doit fermer quel que soit le contrôle qui a le focus : le
+        # brancher sur le seul champ de prompt laissait la fenêtre coincée dès
+        # que le focus était ailleurs (une chip, la zone de réponse…).
+        escape_handler = _KeyHandler(lambda: None, self.close)
+        self._handlers.append(escape_handler)
+        for name in ("response", "journal", "send", *self._chip_names):
+            try:
+                dialog.getControl(name).addKeyListener(escape_handler)
+            except Exception:
+                pass          # contrôle absent selon l'application — sans gravité
+
+        # La croix de la fenêtre : sans listener, elle ne ferme RIEN.
+        self._attach_window_closer()
+
         self._render_conversation()
+
+    def _attach_window_closer(self):
+        """Branche fermeture et redimensionnement sur le peer (après createPeer)."""
+        if _XTopWindowListener is not None:
+            try:
+                closer = _WindowCloser(self)
+                self.dialog.addTopWindowListener(closer)
+                self._handlers.append(closer)   # référence vivante (GC)
+                self._window_closer = closer
+            except Exception as exc:
+                self.shell.log(f"[palette] listener de fenêtre indisponible : {exc}")
+        if _XWindowListener is not None:
+            try:
+                resizer = _ResizeWatcher(self)
+                self.dialog.addWindowListener(resizer)
+                self._handlers.append(resizer)
+                self._resize_watcher = resizer
+            except Exception as exc:
+                self.shell.log(f"[palette] redimensionnement indisponible : {exc}")
+
+    # ── Redimensionnement ───────────────────────────────────────────────
+
+    def on_resized(self, width, height):
+        """Réagit à un redimensionnement : toute la hauteur gagnée va en bas.
+
+        Les bornes empêchent d'écraser la ligne de chips (largeur minimale
+        calculée au premier layout) ou de faire disparaître la zone basse.
+        """
+        if self._laying_out:
+            return                     # _layout() appelle setPosSize : pas de boucle
+        width = max(width, self._min_width or 0)
+        extra = height - self._natural_height
+        self._bottom_height = max(int(70 * self._scale), self._base_bottom_h + extra)
+        self._width = width
+        self._laying_out = True
+        try:
+            self._layout(width=width)
+        finally:
+            self._laying_out = False
+        self._save_geometry()
+
+    def _save_geometry(self):
+        """Mémorise position et taille pour la prochaine ouverture."""
+        try:
+            ps = self.dialog.getPosSize()
+            self.shell.set_config(
+                "assistant_window_rect", f"{ps.X},{ps.Y},{ps.Width},{ps.Height}")
+        except Exception:
+            pass          # préférence d'affichage : jamais bloquant
+
+    def _restore_geometry(self):
+        """Restaure la géométrie mémorisée, si elle est encore plausible."""
+        try:
+            raw = str(self.shell.get_config("assistant_window_rect", "") or "")
+            x, y, width, height = (int(part) for part in raw.split(","))
+        except Exception:
+            return
+        if width < 200 or height < 150:
+            return                     # valeur aberrante : on garde le défaut
+        try:
+            self.dialog.setPosSize(x, y, width, height, 15)
+            self.on_resized(width, height)
+        except Exception:
+            pass
 
     # ── Layout mesuré ───────────────────────────────────────────────────
     def _preferred(self, name):
@@ -498,38 +695,43 @@ class AssistantPalette:
                     width - 2 * margin - send_w - gap, line_h)
         y += send_h + int(8 * scale)
 
-        # Fil de conversation
-        response_h = int(120 * scale)
-        self._place("response", margin, y, width - 2 * margin, response_h)
-        y += response_h + gap
+        # Zone basse : les trois contenus occupent EXACTEMENT le même
+        # rectangle ; seul l'onglet actif est visible. Toute la hauteur gagnée
+        # au redimensionnement lui revient — le reste garde sa taille.
+        bottom_h = max(int(70 * scale), self._bottom_height or int(120 * scale))
+        for tab_id, _label in TABS:
+            self._place(tab_id, margin, y, width - 2 * margin, bottom_h)
+            try:
+                self.dialog.getControl(tab_id).setVisible(tab_id == self.active_tab)
+            except Exception:
+                pass
+        y += bottom_h + int(4 * scale)
 
-        # Toggle + journal repliable
-        toggle_pref = self._preferred("journal_toggle")
-        toggle_w = int((toggle_pref.Width if toggle_pref else 140) + 10 * scale)
-        self._place("journal_toggle", margin, y, toggle_w, line_h)
-        y += line_h + int(4 * scale)
-        if self.journal_visible:
-            journal_h = int(70 * scale)
-            self._place("journal", margin, y, width - 2 * margin, journal_h)
-            self.dialog.getControl("journal").setVisible(True)
-            y += journal_h + gap
-        else:
-            self.dialog.getControl("journal").setVisible(False)
-
-        # Pied : liens mesurés + hint aligné à droite
+        # Onglets en bas à gauche, « Nouvelle conversation » et hint à droite.
         x = margin
-        for name, _label, _cb in self._footer_specs:
+        for tab_id, _label in TABS:
+            name = f"tab_{tab_id}"
             pref = self._preferred(name)
-            w = int((pref.Width if pref else 90) + 6 * scale)
+            w = int((pref.Width if pref else 70) + 8 * scale)
             self._place(name, x, y, w, line_h)
-            x += w + int(10 * scale)
+            x += w + int(8 * scale)
+        clear_pref = self._preferred("link_clear")
+        clear_w = int((clear_pref.Width if clear_pref else 120) + 6 * scale)
+        self._place("link_clear", max(x, width - margin - clear_w), y, clear_w, line_h)
+        y += line_h + int(4 * scale)
+
         hint_pref = self._preferred("hint")
         hint_w = int((hint_pref.Width if hint_pref else 90) + 6 * scale)
-        hint_x = max(x, width - margin - hint_w)
-        self._place("hint", hint_x, y, width - margin - hint_x, line_h)
+        self._place("hint", width - margin - hint_w, y, hint_w, line_h)
         y += line_h + margin
 
         self._height = y
+        self._scale = scale
+        if not self._natural_height:
+            # Premier layout : il fixe les bornes du redimensionnement.
+            self._natural_height = y
+            self._base_bottom_h = bottom_h
+            self._min_width = width
         ps = self.dialog.getPosSize()
         self.dialog.setPosSize(ps.X, ps.Y, width, self._height, 15)
 
@@ -543,6 +745,8 @@ class AssistantPalette:
         # Après createPeer : le contrôleur est prêt à accepter un listener.
         self.attach_selection_watcher()
         self.refresh_selection_label()
+        self.select_tab(self.active_tab)
+        self._restore_geometry()
 
     def close(self):
         """Ferme la palette et neutralise tout run encore en vol.
@@ -554,9 +758,16 @@ class AssistantPalette:
         """
         if self._cancel is not None:
             self._cancel.set()
-        # Retirer le listener AVANT dispose() : l'ordre inverse laisse
+        # Retirer les listeners AVANT dispose() : l'ordre inverse laisse
         # LibreOffice notifier un contrôle détruit.
         self.detach_selection_watcher()
+        closer = getattr(self, "_window_closer", None)
+        if closer is not None:
+            self._window_closer = None
+            try:
+                self.dialog.removeTopWindowListener(closer)
+            except Exception:
+                pass          # peer déjà parti : rien à retirer
         self.dispatcher.close()
         try:
             self.dialog.setVisible(False)
@@ -647,12 +858,61 @@ class AssistantPalette:
             pass
         return ""
 
-    def _toggle_journal(self):
-        self.journal_visible = not self.journal_visible
-        self._models["journal_toggle"].Label = (
-            "▾ Masquer les actions" if self.journal_visible
-            else "▸ Voir les actions")
+    # ── Zone basse à onglets ────────────────────────────────────────────
+
+    @staticmethod
+    def _restore_tab(shell):
+        """Onglet actif de la session précédente, « Historique » par défaut."""
+        try:
+            stored = str(shell.get_config("assistant_active_tab", "") or "")
+        except Exception:
+            stored = ""
+        return stored if stored in dict(TABS) else "response"
+
+    def select_tab(self, tab_id):
+        """Bascule la zone basse. L'onglet actif est mémorisé en configuration."""
+        if tab_id not in dict(TABS):
+            return
+        self.active_tab = tab_id
+        if tab_id == "suggestions":
+            self.refresh_suggestions()
+        for other, _label in TABS:
+            model = self._models.get(f"tab_{other}")
+            if model is None:
+                continue
+            active = other == tab_id
+            model.TextColor = (dsfr.TOKENS["primary"] if active
+                               else dsfr.TOKENS["text_mention"])
+            model.FontWeight = 150.0 if active else 100.0
+        try:
+            self.shell.set_config("assistant_active_tab", tab_id)
+        except Exception:
+            pass          # préférence d'affichage : jamais bloquant
         self._layout()
+
+    def refresh_suggestions(self):
+        """Recalcule les propositions pour la cible courante."""
+        try:
+            self._models["suggestions"].Text = suggestions.render(
+                self._current_suggestions())
+        except Exception as exc:
+            self.shell.log(f"[palette] suggestions indisponibles : {exc}")
+
+    def _current_suggestions(self):
+        """Décrit la situation au moteur de suggestions (aucun appel LLM)."""
+        desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+            "com.sun.star.frame.Desktop", self.uno_ctx)
+        model = desktop.getCurrentComponent()
+        if model is None:
+            return suggestions.suggest(self.app)
+        if hasattr(model, "Text"):
+            selected, paragraph = _writer_targets(model)
+            return suggestions.suggest(
+                "writer", selected_text=selected, has_paragraph=bool(paragraph.strip()))
+        if hasattr(model, "Sheets"):
+            count, values = _calc_selection_sample(model)
+            return suggestions.suggest("calc", cell_count=count, values=values)
+        return suggestions.suggest(self.app)
 
     def _render_conversation(self):
         entries = self.conversation.load()
@@ -777,7 +1037,7 @@ class AssistantPalette:
         self.busy = True
         self._cancel = threading.Event()
         self._delta_buffer.reset()
-        self._models["send"].Label = "Arrêter"
+        self._set_send_label(running=True)
         self.set_status("L'assistant travaille…")
         shown = prompt_text if preset is None else (
             preset.label + ((" — " + prompt_text) if prompt_text else ""))
@@ -813,8 +1073,7 @@ class AssistantPalette:
             self.busy = False
             self._cancel = None
             self._worker = None
-            self.dispatcher.post(
-                lambda: self._models["send"].__setattr__("Label", "Envoyer  ⏎"))
+            self._set_send_label(running=False)
 
     def _run_pipeline(self, preset, prompt_text, ctx, shown):
         """Preset piloté par Python : le LLM n'est qu'une fonction texte.
@@ -877,6 +1136,17 @@ class AssistantPalette:
         self.dispatcher.post(
             lambda: self._models["prompt"].__setattr__("Text", ""))
         self.set_status("Terminé", tone="success")
+
+    def _set_send_label(self, running):
+        """Bascule Envoyer ⇄ Arrêter.
+
+        Toujours par le dispatcher, même depuis le thread principal : mélanger
+        écriture directe et écriture postée fait diverger l'affichage de l'état
+        réel — le bouton restait sur « Arrêter » après la fin du run.
+        """
+        label = "Arrêter" if running else "Envoyer  ⏎"
+        self.dispatcher.post(
+            lambda: self._models["send"].__setattr__("Label", label))
 
     def _cancelled(self):
         return self._cancel is not None and self._cancel.is_set()
