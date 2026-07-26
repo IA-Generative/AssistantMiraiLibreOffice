@@ -45,7 +45,13 @@ try:
 except Exception:
     _XItemListener = None
 
-from ..core import doc_rewrite, prompts, selection_info, suggestions
+from ..core import (
+    capabilities,
+    doc_rewrite,
+    prompts,
+    selection_info,
+    suggestions,
+)
 from ..core import presets as presets_module
 from ..core.context import ToolContext
 from ..core.conversation import ConversationStore
@@ -1267,6 +1273,24 @@ class AssistantPalette:
             daemon=True, name="mirai-run")
         self._worker.start()
 
+    def _model_can_chain_tools(self):
+        """Le modèle sait-il enchaîner lecture → écriture ?
+
+        Verdict MESURÉ par le menu « Tester le modèle », mis en cache par couple
+        (endpoint, modèle). En l'absence de mesure on répond NON : le chemin
+        déterministe aboutit toujours, là où le mode agentique peut laisser le
+        document intact sans que rien ne le signale. Mieux vaut un défaut
+        prudent qu'une action silencieusement sans effet.
+        """
+        try:
+            verdict = capabilities.load_cached(
+                self.shell,
+                self.shell.get_config("llm_base_urls", ""),
+                self.shell.get_config("llm_default_models", ""))
+        except Exception:
+            return False
+        return bool(verdict and verdict.supports_agentic)
+
     def _document_sink(self, ctx):
         """Destination du texte : remplacer la sélection, ou l'ajouter après.
 
@@ -1291,7 +1315,8 @@ class AssistantPalette:
             pass
         if (preset is None and ctx.app == "writer"
                 and not snapshot["selection"].strip()
-                and doc_rewrite.wants_document_rewrite(prompt_text)):
+                and doc_rewrite.wants_document_rewrite(prompt_text)
+                and not self._model_can_chain_tools()):
             try:
                 from ..core.tools.writer_tools import _paragraphs, paragraph_style
                 items = _paragraphs(ctx)

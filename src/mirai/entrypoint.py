@@ -9986,7 +9986,8 @@ EDITED VERSION:
     # doivent aboutir dans TOUS les contextes, Writer comme Calc, avec ou sans
     # sélection, et même sans document ouvert.
     _SHELL_ACTIONS = ("settings", "proxy_settings", "AboutDialog",
-                      "Documentation", "OpenmiraiWebsite", "MenuSeparator")
+                      "Documentation", "OpenmiraiWebsite", "MenuSeparator",
+                      "TestModel")
 
     def _handle_shell_action(self, action):
         """Traite les actions non textuelles. Retourne True si prise en charge."""
@@ -10011,6 +10012,10 @@ EDITED VERSION:
             elif action == "OpenmiraiWebsite":
                 self._send_telemetry("OpenmiraiWebsite", {"action": "open_website"})
                 self._open_url_config("portal_url")
+            elif action == "TestModel":
+                # Import paresseux : le moteur n'est chargé qu'à l'usage.
+                from .core.entry import test_model_capabilities
+                test_model_capabilities(self)
         except Exception as exc:
             # Une action de coquille qui échoue doit se VOIR : jusqu'ici la
             # panne était avalée et l'utilisateur concluait « ça ne marche pas ».

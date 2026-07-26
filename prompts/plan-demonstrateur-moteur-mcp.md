@@ -651,6 +651,22 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     - **un mot isolé n'est pas un ordre** : « bonjour », « merci » ne doivent pas déclencher une réécriture. Un plancher de trois mots suffit.
     **Règle générale** : quand une classification sépare un ensemble infini d'un ensemble fini, énumérer le fini. Et choisir le défaut du côté où l'erreur coûte le moins — ici réécrire à tort (annulable d'un Ctrl+Z) plutôt que de ne rien faire (indiagnosticable pour l'utilisateur).
 
+45. **🚨 Les capacités d'un modèle en matière d'outils se MESURENT — trois capacités distinctes, souvent confondues.** Le sondage existant (`llm_tool_mode: auto`) ne répondait qu'à une question : *le relais accepte-t-il un corps portant `tools` ?* Deux autres, décisives, n'étaient pas posées :
+    - **B — le modèle APPELLE-t-il un outil** quand la tâche l'exige ?
+    - **C — enchaîne-t-il lecture → écriture** sur plusieurs tours ?
+    C'est **C** qui décide du chemin d'exécution. Un modèle qui lit le document puis répond du texte laisse le document intact, le run se termine en `ok=true`, et l'utilisateur voit « il ne se passe rien ».
+    **Mesures réelles (Ollama, 2026-07-26) — trois modèles, trois comportements :**
+
+    | modèle | accepte | appelle | enchaîne |
+    |---|---|---|---|
+    | `llama3.2` | ✓ | ✓ | **✓** (écrit dès le 1er tour) |
+    | `gemma4:12b` | ✓ | ✓ | **✗** (lit puis s'arrête) |
+    | `mistral` | ✓ | **✗** | ✗ (répond du texte) |
+
+    `gemma4` reproduit exactement le comportement de `llama-3.3-70b` en production : **on ne peut rien supposer**, même d'un modèle réputé « compatible tool calling ».
+    **Mise en œuvre** (`core/capabilities.py`) : sonde en deux allers-retours, verdict mis en cache **par couple (endpoint, modèle)** — pas par poste. Déclenchée **explicitement** depuis le menu « 🔬 Tester le modèle » : deux appels réseau ne doivent pas surgir au milieu du travail. Le verdict choisit ensuite agentique ou pipeline déterministe, **à la place d'une heuristique sur le prompt** (piège n°44), et il est **annoncé à l'utilisateur** en langage clair : « ce modèle sait lire le document mais n'enchaîne pas avec l'écriture — les modifications passeront par un chemin direct ».
+    **Défaut prudent** : sans mesure, on répond NON à la question C. Le chemin déterministe aboutit toujours ; le mode agentique peut échouer en silence. Entre les deux, choisir celui dont l'échec est visible.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

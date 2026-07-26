@@ -107,6 +107,15 @@ Principe clé (petits modèles) : **la prose longue ne transite jamais en
 argument JSON** — elle est streamée en réponse finale vers un *sink*
 (`sinks.py` : PaletteSink, WriterInsertSink, WriterReplaceSink, CalcCellSink).
 
+**Les capacités du modèle sont MESURÉES, pas supposées** (`core/capabilities.py`).
+Trois capacités distinctes : le relais accepte `tools` (A), le modèle appelle un
+outil (B), il enchaîne lecture → écriture (C). Seul A était sondé ; c'est C qui
+décide du chemin. Mesuré sur Ollama : llama3.2 = A✓B✓C✓, gemma4:12b = A✓B✓C✗,
+mistral = A✓B✗C✗. La sonde (2 allers-retours) est déclenchée depuis le menu
+« Tester le modèle », son verdict mis en cache par couple (endpoint, modèle) et
+annoncé à l'utilisateur. Sans mesure, on suppose C faux — le chemin déterministe
+aboutit toujours, le mode agentique peut échouer en silence.
+
 **Le tool calling est une commodité, jamais une garantie.** Sur un modèle de
 taille moyenne, une demande de réécriture du document donnait `iterations=2` :
 lecture appelée, écriture jamais. Trois renforts de prompt n'y ont rien changé.

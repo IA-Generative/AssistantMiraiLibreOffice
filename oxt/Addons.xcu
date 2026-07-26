@@ -42,6 +42,17 @@
               <value>_self</value>
             </prop>
           </node>
+          <node oor:name="M35" oor:op="replace">
+            <prop oor:name="Title">
+              <value xml:lang="en-US">🔬 Tester le modèle</value>
+            </prop>
+            <prop oor:name="URL">
+              <value>service:fr.gouv.interieur.mirai.do?TestModel&amp;src=menu</value>
+            </prop>
+            <prop oor:name="Target" oor:type="xs:string">
+              <value>_self</value>
+            </prop>
+          </node>
           <node oor:name="M4" oor:op="replace">
             <prop oor:name="Title">
               <value xml:lang="en-US">📚 Documentation</value>
