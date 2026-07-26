@@ -56,6 +56,12 @@
      recompose tout l'affichage. Le coût par flush doit être proportionnel au
      fragment, pas à l'historique — et un rendu ne relit JAMAIS une source
      persistée (l'historique du fil est en cache, invalidé quand il change).
+   - **Pompe** : `AsyncCallback` posté depuis un worker ne réveille PAS la
+     boucle d'événements ; la tâche attend le prochain geste de l'utilisateur.
+     Les tâches passent donc par une file, drainée par une pompe qui tourne sur
+     le thread principal et **se réarme elle-même** — armée au démarrage du run
+     (depuis le thread principal), éteinte à sa fin. 0,1 % de CPU au repos.
+     Il n'existe pas de timer UNO : `com.sun.star.awt.Timer` renvoie `null`.
    - **Filet d'état** : les mises à jour de fin de run sont postées, donc
      perdables. `heal_if_stuck()` (sur `windowActivated`) restaure l'interface
      si elle est « occupée » sans worker vivant. Toute machine à états pilotée

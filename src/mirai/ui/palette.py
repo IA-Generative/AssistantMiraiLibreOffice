@@ -917,9 +917,11 @@ class AssistantPalette:
         self._cancel = None
         self._worker = None
         self._stop_pulse()
+        self.dispatcher.drain()      # rattraper ce qui n'a pas été délivré
         self._set_input_enabled(True)
         self._set_send_label(running=False)
         self.set_status("Terminé", tone="success")
+        self.dispatcher.drain()
 
     def refresh_selection_label(self):
         """Recalcule le libellé de cible. Thread principal uniquement."""
@@ -1220,6 +1222,10 @@ class AssistantPalette:
         # occupé ». Tout ce qui est lisible d'avance l'est donc maintenant.
         snapshot = self._document_snapshot(ctx, preset, prompt_text)
 
+        # La pompe doit être armée depuis le thread principal — c'est ici, et
+        # nulle part ailleurs, que ce démarrage est fiable.
+        self.dispatcher.start_pump()
+
         self._worker = threading.Thread(
             target=self._run_in_worker,
             args=(preset, prompt_text, ctx, shown, snapshot),
@@ -1297,6 +1303,9 @@ class AssistantPalette:
             self._clear_status_tooltip()
             self._set_input_enabled(True)
             self._set_send_label(running=False)
+            # Dernier drain, puis extinction : la pompe ne doit pas tourner
+            # au repos.
+            self.dispatcher.post(self.dispatcher.stop_pump)
             self.shell.log("[palette] run: terminé, interface restaurée")
 
     def _run_pipeline(self, preset, prompt_text, ctx, shown):

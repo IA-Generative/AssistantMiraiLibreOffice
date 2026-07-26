@@ -86,13 +86,18 @@ class MainThreadDispatcher:
         self._closed = False
         self._pending = []          # garde les _Task en vie jusqu'à leur notify
         self._callback_service = None   # créé une fois, conservé (voir _async_callback)
+        self._queue = queue.Queue()     # tâches en attente du thread principal
+        self._pump = None               # tâche de pompe en vol (auto-réarmée)
+        self._pumping = False
 
     # ── cycle de vie ────────────────────────────────────────────────────
 
     def close(self):
         """Rend le dispatcher inerte. Idempotent, appelable de n'importe où."""
         self._closed = True
+        self._pumping = False
         self._pending.clear()
+        self._pump = None
         self._callback_service = None
 
     @property
@@ -102,25 +107,23 @@ class MainThreadDispatcher:
     # ── primitives ──────────────────────────────────────────────────────
 
     def post(self, fn) -> bool:
-        """Planifie fn sur le thread principal sans attendre. True si accepté."""
+        """Planifie fn sur le thread principal sans attendre. True si accepté.
+
+        La tâche part dans une FILE, drainée par la pompe (voir `start_pump`).
+        Poster directement un AsyncCallback depuis un thread de fond ne suffit
+        pas : l'événement est mis en attente mais ne RÉVEILLE pas la boucle
+        d'événements de LibreOffice. Au repos, il n'est délivré qu'au prochain
+        geste de l'utilisateur — d'où une interface qui semble figée alors que
+        le travail est terminé depuis longtemps.
+        """
         if self._closed:
             return False
-        task = _Task(fn, on_done=self._forget)
-        callback = self._async_callback()
-        if callback is None:
-            # Pas d'AsyncCallback : exécution directe. Correct quand on est
-            # déjà sur le thread principal, et seul repli possible sinon.
-            task.run()
+        if is_main_thread():
+            # Déjà au bon endroit : inutile de faire un détour par la file.
+            _Task(fn).run()
             return True
-        self._pending.append(task)
-        try:
-            callback.addCallback(task, None)
-            return True
-        except Exception as exc:
-            self._note(f"post: addCallback a échoué ({exc}) — exécution directe")
-            self._forget(task)
-            task.run()
-            return True
+        self._queue.put(fn)
+        return True
 
     def call(self, fn, timeout: float = 30.0):
         """Exécute fn sur le thread principal et rend son résultat.
@@ -136,28 +139,81 @@ class MainThreadDispatcher:
         if callback is None:
             return fn()
 
-        result_queue = queue.Queue(maxsize=1)
-        task = _Task(fn, result_queue)
-        self._pending.append(task)
-        try:
-            callback.addCallback(task, None)
-        except Exception as exc:
-            self._note(f"call: addCallback a échoué ({exc}) — exécution directe")
-            self._forget(task)
+        if is_main_thread():
             return fn()
 
+        result_queue = queue.Queue(maxsize=1)
+
+        def _run_and_report():
+            try:
+                result_queue.put(("ok", fn()))
+            except Exception as exc:      # noqa: BLE001 — relayée à l'appelant
+                result_queue.put(("error", exc))
+
+        self._queue.put(_run_and_report)
         try:
             status, payload = result_queue.get(timeout=timeout)
         except queue.Empty:
-            self._forget(task)
             raise DispatcherTimeout(
                 f"le thread principal n'a pas répondu en {timeout:g} s "
-                "(boîte de dialogue modale ouverte ?)"
+                "(pompe arrêtée, ou boîte de dialogue modale ouverte ?)"
             ) from None
-        self._forget(task)
         if status == "error":
             raise payload
         return payload
+
+    # ── pompe ───────────────────────────────────────────────────────────
+
+    def start_pump(self):
+        """Démarre le drain de la file. À APPELER DEPUIS LE THREAD PRINCIPAL.
+
+        La pompe s'exécute sur le thread principal, vide la file, puis se
+        RÉARME elle-même via AsyncCallback. Le réarmement partant du thread
+        principal, il est délivré de façon fiable — contrairement à un
+        addCallback émis depuis un worker, qui attend le prochain réveil de la
+        boucle. Elle ne tourne que pendant un run : `stop_pump()` l'éteint.
+        """
+        if self._pumping or self._closed:
+            return
+        self._pumping = True
+        self._arm_pump()
+
+    def stop_pump(self):
+        """Arrête la pompe après un dernier drain."""
+        self._pumping = False
+        self.drain()
+
+    def drain(self):
+        """Exécute les tâches en attente. Thread principal uniquement."""
+        while True:
+            try:
+                fn = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                fn()
+            except Exception:
+                pass          # une mise à jour d'affichage ratée n'est pas fatale
+
+    def _arm_pump(self):
+        callback = self._async_callback()
+        if callback is None:
+            self._pumping = False
+            self.drain()
+            return
+        task = _Task(self._pump_once)
+        self._pump = task           # référence vivante jusqu'au notify
+        try:
+            callback.addCallback(task, None)
+        except Exception as exc:
+            self._note(f"pompe : réarmement impossible ({exc})")
+            self._pumping = False
+
+    def _pump_once(self):
+        """Un tour de pompe : drainer, puis se réarmer si le run continue."""
+        self.drain()
+        if self._pumping and not self._closed:
+            self._arm_pump()
 
     # ── interne ─────────────────────────────────────────────────────────
 
@@ -232,6 +288,15 @@ class DirectDispatcher:
         if self._closed:
             raise DispatcherClosed("dispatcher fermé")
         return fn()
+
+    def start_pump(self):
+        pass          # exécution immédiate : rien à pomper
+
+    def stop_pump(self):
+        pass
+
+    def drain(self):
+        pass
 
 
 def is_main_thread() -> bool:

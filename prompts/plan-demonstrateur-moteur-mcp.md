@@ -624,7 +624,15 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
 40. **🚨 Distinguer « thread principal bloqué » de « mises à jour non délivrées » — deux gels, deux causes.** `sample <pid>` tranche en dix secondes :
     - le thread principal est dans `SalYieldMutex::doAcquire` ⇒ **interblocage**, quelqu'un détient le SolarMutex (voir piège n°23) ;
     - le thread principal est dans `Application::Yield` / `DoYield` et **aucun thread Python n'apparaît** ⇒ le run est TERMINÉ, mais les mises à jour de fin — postées via `AsyncCallback` — n'ont pas été délivrées. L'interface reste figée dans l'état « en cours » : champ grisé, bouton « Arrêter », alors que plus rien ne tourne.
-    **Parade pour le second cas** : un filet `heal_if_stuck()` branché sur `windowActivated` — si l'état est « occupé » sans worker vivant, on restaure. Coût nul, et un blocage définitif devient une gêne d'une seconde. **Toute machine à états pilotée par des messages asynchrones a besoin d'un tel filet** : la perte d'un message ne doit jamais laisser l'interface dans un état dont elle ne peut plus sortir.
+    **Parade pour le second cas** : un filet `heal_if_stuck()` branché sur `windowActivated` — si l'état est « occupé » sans worker vivant, on restaure. Coût nul, et un blocage définitif devient une gêne d'une seconde. **Toute machine à états pilotée par des messages asynchrones a besoin d'un tel filet** : la perte d'un message ne doit jamais laisser l'interface dans un état dont elle ne peut plus sortir. ⚠ Le filet ne remplace pas la correction de fond — voir piège n°41, la vraie cause est que les messages ne sont pas délivrés du tout.
+
+41. **🚨 `AsyncCallback` posté depuis un thread de fond ne RÉVEILLE PAS la boucle d'événements de LibreOffice.** C'est la cause racine des « gels » observés, et elle a résisté à trois correctifs successifs (service conservé, instantané préchargé, filet auto-réparant) parce qu'aucun ne s'attaquait au vrai mécanisme. La tâche est bien mise en file, mais elle n'est délivrée qu'au prochain **événement système** — un mouvement de souris, une touche. Au repos, l'interface reste figée dans l'état « en cours » alors que le journal dit `run: terminé, interface restaurée` : le code a bien tourné, l'affichage n'a pas suivi.
+    **Diagnostic** : ajouter une trace en fin de run. Si elle apparaît alors que l'interface reste figée, ce n'est ni un blocage ni une exception — ce sont les messages qui ne passent pas.
+    **Il n'existe pas de timer UNO** : `com.sun.star.awt.Timer` renvoie `null` (vérifié sur LO 25.8) ; seul `AsyncCallback` est disponible.
+    **Parade — la pompe auto-entretenue** : une file thread-safe alimentée par les workers, et un drain qui s'exécute sur le thread principal puis **se réarme lui-même** via `addCallback`. Le réarmement partant du thread principal, il est délivré de façon fiable — contrairement à un armement venu d'un worker. Trois règles :
+    - la pompe est **armée depuis le thread principal** (dans le gestionnaire qui lance le run), jamais depuis le worker ;
+    - elle ne tourne que **pendant un run** (`stop_pump()` en fin de run) — mesuré à 0,1 % de CPU au repos ;
+    - `post()` et `call()` court-circuitent la file quand on est déjà sur le thread principal : pas de détour, pas d'interblocage.
 
 ## Risques principaux
 
