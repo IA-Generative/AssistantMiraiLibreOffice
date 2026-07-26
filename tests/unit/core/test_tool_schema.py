@@ -63,9 +63,38 @@ def test_enum_rejected():
     assert not ok and "mode" in err
 
 
-def test_bounds():
-    ok, err, _ = validate_args(SCHEMA, {"text": "x", "count": 99})
-    assert not ok and "maximum" in err
+def test_out_of_bounds_is_clamped_not_rejected():
+    """Incident réel : « ✗ Lecture du document — paramètre 'max_chars' : maximum
+    20000 ». Le modèle avait demandé une lecture plus large que le plafond ;
+    l'appel entier était refusé, il perdait un tour et abandonnait souvent.
+    Ces bornes protègent l'appel, elles n'expriment pas une exigence métier :
+    on ramène dans les clous, comme `maxLength` tronque déjà les chaînes.
+    """
+    ok, err, args = validate_args(SCHEMA, {"text": "x", "count": 99})
+    assert ok and err == ""
+    assert args["count"] == 10
+
+    ok, _, args = validate_args(SCHEMA, {"text": "x", "count": 0})
+    assert ok and args["count"] == 1
+
+
+def test_clamping_lands_inside_fractional_bounds():
+    """int(borne) trahirait : int(0.5) == 0, soit toujours sous le minimum."""
+    schema = {"type": "object", "properties": {
+        "n": {"type": "integer", "minimum": 0.5, "maximum": 9.5},
+        "r": {"type": "number", "minimum": 0.5, "maximum": 9.5}}}
+
+    _, _, args = validate_args(schema, {"n": 0, "r": 0})
+    assert args["n"] == 1 and args["r"] == 0.5
+
+    _, _, args = validate_args(schema, {"n": 99, "r": 99})
+    assert args["n"] == 9 and args["r"] == 9.5
+
+
+def test_clamping_does_not_rescue_a_wrong_type():
+    """La tolérance porte sur l'amplitude, pas sur la nature de la valeur."""
+    ok, err, _ = validate_args(SCHEMA, {"text": "x", "count": "beaucoup"})
+    assert not ok and "count" in err
 
 
 def test_array_items_coerced():

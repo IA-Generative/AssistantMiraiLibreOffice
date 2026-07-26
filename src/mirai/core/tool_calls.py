@@ -4,11 +4,14 @@ ToolSpec/ToolCall/ToolResult sont l'unique format interne, quel que soit le
 format de fil (tool calling OpenAI natif ou repli JSON). Le validateur couvre
 un SOUS-ENSEMBLE documenté de JSON Schema (stdlib uniquement, pas de pip) :
 type, properties, required, items, enum, default, maxLength, minimum, maximum.
-Coercitions volontaires ("3" → 3, "true" → True) : les petits modèles émettent
-souvent des scalaires sous forme de chaînes.
+Coercitions volontaires ("3" → 3, "true" → True, 50000 → 20000 sous un plafond
+de 20000) : les petits modèles émettent souvent des scalaires sous forme de
+chaînes, et demandent des tailles de lecture « au maximum ». Un dépassement de
+borne se rattrape ; il ne justifie pas de leur faire perdre un tour.
 """
 
 import dataclasses
+import math
 
 
 @dataclasses.dataclass
@@ -104,12 +107,21 @@ def _validate_value(schema, value, path):
         if max_length is not None and len(value) > int(max_length):
             value = value[: int(max_length)]
     if expected_type in ("integer", "number"):
+        # RAMENER dans les bornes plutôt que rejeter. Ces bornes protègent
+        # l'appel (taille de lecture, plafonds), elles n'expriment pas une
+        # exigence métier : un modèle qui demande 50 000 caractères veut « le
+        # plus possible », pas échouer. Rejeter lui faisait perdre un tour —
+        # et souvent abandonner. Même traitement que `maxLength`, qui tronque
+        # déjà les chaînes trop longues au lieu de les refuser.
+        # Arrondir vers l'INTÉRIEUR : ceil pour un plancher, floor pour un
+        # plafond. Un simple int(borne) retomberait hors bornes dès que la
+        # borne est fractionnaire (int(0.5) == 0, sous un minimum de 0.5).
         minimum = schema.get("minimum")
         maximum = schema.get("maximum")
         if minimum is not None and value < minimum:
-            return False, f"paramètre '{path}' : minimum {minimum}", value
+            value = math.ceil(minimum) if expected_type == "integer" else minimum
         if maximum is not None and value > maximum:
-            return False, f"paramètre '{path}' : maximum {maximum}", value
+            value = math.floor(maximum) if expected_type == "integer" else maximum
     if expected_type == "array":
         item_schema = schema.get("items")
         if item_schema:
