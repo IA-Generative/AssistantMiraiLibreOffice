@@ -123,6 +123,12 @@ class MainThreadDispatcher:
             _Task(fn).run()
             return True
         self._queue.put(fn)
+        # Relancer la pompe si elle s'est éteinte faute de travail. L'armement
+        # depuis un worker n'est pas garanti d'être délivré immédiatement — il
+        # le sera au premier réveil de la boucle — mais tant qu'un run produit
+        # du trafic régulier (fragments, jauge), la pompe reste vivante.
+        if not self._pumping:
+            self._arm_pump_from_worker()
         return True
 
     def call(self, fn, timeout: float = 30.0):
@@ -195,6 +201,14 @@ class MainThreadDispatcher:
             except Exception:
                 pass          # une mise à jour d'affichage ratée n'est pas fatale
 
+    def _arm_pump_from_worker(self):
+        """Tentative d'armement depuis un thread de fond (best effort)."""
+        self._pumping = True
+        try:
+            self._arm_pump()
+        except Exception:
+            self._pumping = False
+
     def _arm_pump(self):
         callback = self._async_callback()
         if callback is None:
@@ -210,10 +224,18 @@ class MainThreadDispatcher:
             self._pumping = False
 
     def _pump_once(self):
-        """Un tour de pompe : drainer, puis se réarmer si le run continue."""
+        """Un tour de pompe : drainer, puis se réarmer S'IL RESTE DU TRAVAIL.
+
+        Se réarmer inconditionnellement monopolise la boucle d'événements :
+        LibreOffice passe son temps à traiter des tours de pompe à vide et ne
+        répond plus à la souris ni au clavier. La pompe s'éteint donc dès que
+        la file est vide ; c'est `post()` qui la relance à la tâche suivante.
+        """
         self.drain()
-        if self._pumping and not self._closed:
-            self._arm_pump()
+        if self._closed or self._queue.empty():
+            self._pumping = False
+            return
+        self._arm_pump()
 
     # ── interne ─────────────────────────────────────────────────────────
 

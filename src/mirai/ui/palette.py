@@ -783,6 +783,19 @@ class AssistantPalette:
         self._place("hint", width - margin - hint_w, y, hint_w, line_h)
         y += line_h + margin
 
+        # Trace de géométrie : un onglet « vide » est le plus souvent un
+        # contrôle hors champ ou masqué, pas un contenu manquant.
+        try:
+            visible = [t for t, _ in TABS
+                       if self.dialog.getControl(t).isVisible()]
+            bottom_y = y - bottom_h - int(4 * scale)
+            self.shell.log(
+                f"[palette] layout: fenêtre {width}x{y}, zone basse "
+                f"y={bottom_y} h={bottom_h}, actif={self.active_tab}, "
+                f"visibles={visible}")
+        except Exception:
+            pass
+
         self._height = y
         self._scale = scale
         if not self._natural_height:
