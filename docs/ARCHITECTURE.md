@@ -87,6 +87,14 @@ Principe clé (petits modèles) : **la prose longue ne transite jamais en
 argument JSON** — elle est streamée en réponse finale vers un *sink*
 (`sinks.py` : PaletteSink, WriterInsertSink, WriterReplaceSink, CalcCellSink).
 
+**Le tool calling est une commodité, jamais une garantie.** Sur un modèle de
+taille moyenne, une demande de réécriture du document donnait `iterations=2` :
+lecture appelée, écriture jamais. Trois renforts de prompt n'y ont rien changé.
+Dès qu'une action DOIT aboutir, elle est pilotée depuis Python — le LLM n'est
+alors qu'une fonction texte et le résultat est appliqué par le code
+(`core/doc_rewrite.py`, même patron que les presets pipeline). Le mode agentique
+reste pour l'exploration et les demandes ouvertes.
+
 **Règle de portée : l'IHM annonce, le modèle n'infère pas.** L'orchestrateur
 préfixe chaque demande d'une ligne de PORTÉE calculée sur le document —
 sélection courante, ou « aucune sélection ⇒ document entier, de [P1] au

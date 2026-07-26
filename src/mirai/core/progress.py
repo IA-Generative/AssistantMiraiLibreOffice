@@ -22,6 +22,12 @@ SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 CHARS_PER_TOKEN = 4        # approximation usuelle, suffisante pour une jauge
 
+# Le raisonnement est conservé pour l'infobulle de survol : on garde la FIN,
+# c'est là que se trouve l'état d'avancement de la pensée du modèle. Plafonné,
+# car une infobulle de plusieurs milliers de caractères est illisible et
+# certains toolkits la tronquent brutalement.
+REASONING_TOOLTIP_CHARS = 900
+
 
 class NullProgress:
     """Jauge inerte — utilisée hors interface (tests, appels programmatiques)."""
@@ -31,6 +37,10 @@ class NullProgress:
 
     def on_reasoning(self, _text):
         pass
+
+    @property
+    def reasoning(self):
+        return ""
 
     def exact_tokens(self, _count):
         pass
@@ -52,6 +62,7 @@ class RunProgress:
         self._frame = 0
         self._chars = 0
         self._reasoning_chars = 0
+        self._reasoning = ""
         self._exact = None
         self._phase = "Connexion…"
 
@@ -64,7 +75,10 @@ class RunProgress:
 
     def on_reasoning(self, text):
         with self._lock:
-            self._reasoning_chars += len(text or "")
+            chunk = text or ""
+            self._reasoning_chars += len(chunk)
+            # On ne garde que la fin : c'est l'état courant de la réflexion.
+            self._reasoning = (self._reasoning + chunk)[-REASONING_TOOLTIP_CHARS:]
             self._phase = "Réflexion"
 
     def exact_tokens(self, count):
@@ -89,6 +103,12 @@ class RunProgress:
     def is_exact(self):
         with self._lock:
             return self._exact is not None
+
+    @property
+    def reasoning(self):
+        """Dernières lignes du raisonnement, pour l'infobulle de survol."""
+        with self._lock:
+            return self._reasoning
 
     @property
     def phase(self):

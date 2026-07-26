@@ -40,12 +40,12 @@ try:
 except Exception:
     _XTopWindowListener = None
 
+from ..core import doc_rewrite, prompts, selection_info, suggestions
 from ..core import presets as presets_module
-from ..core import selection_info, suggestions
 from ..core.context import ToolContext
 from ..core.conversation import ConversationStore
 from ..core.llm_client import LLMClient
-from ..core.orchestrator import Orchestrator, RunObserver
+from ..core.orchestrator import Orchestrator, RunObserver, error_message
 from ..core.progress import RunProgress
 from ..core.registry import ToolRegistry
 from ..core.sinks import PaletteSink, WriterReplaceSink
@@ -793,12 +793,23 @@ class AssistantPalette:
     # depuis le worker : elles postent systématiquement, ce qui garantit que
     # l'écriture dans les contrôles VCL a bien lieu sur le thread principal.
 
-    def set_status(self, message, tone="neutral"):
-        """Ligne de statut, colorée selon l'issue — le retour doit se VOIR."""
+    def set_status(self, message, tone="neutral", tooltip=None):
+        """Ligne de statut, colorée selon l'issue — le retour doit se VOIR.
+
+        `tooltip` alimente l'infobulle native : pendant que le modèle réfléchit,
+        survoler le statut affiche le fil de sa réflexion. C'est le seul moyen
+        de le montrer sans encombrer une fenêtre déjà dense — et il n'y a rien
+        à cliquer, donc rien à découvrir.
+        """
         def _apply():
-            self._models["status"].Label = message
-            self._models["status"].TextColor = STATUS_COLORS.get(
-                tone, STATUS_COLORS["neutral"])
+            status = self._models["status"]
+            status.Label = message
+            status.TextColor = STATUS_COLORS.get(tone, STATUS_COLORS["neutral"])
+            if tooltip is not None:
+                try:
+                    status.HelpText = tooltip
+                except Exception:
+                    pass          # modèle sans HelpText : sans gravité
         self.dispatcher.post(_apply)
 
     def set_journal_text(self, text):
@@ -1119,6 +1130,7 @@ class AssistantPalette:
             self._cancel = None
             self._worker = None
             self._stop_pulse()
+            self._clear_status_tooltip()
             self._set_input_enabled(True)
             self._set_send_label(running=False)
 
@@ -1136,7 +1148,17 @@ class AssistantPalette:
         self.conversation.append("assistant", message, ctx.app)
 
     def _run_agentic(self, preset, prompt_text, ctx):
-        """Run piloté par le LLM, qui appelle les outils du registre."""
+        """Run piloté par le LLM, qui appelle les outils du registre.
+
+        Exception : une demande de réécriture du document entier emprunte un
+        chemin DÉTERMINISTE (voir `_run_document_rewrite`). Les modèles de
+        taille moyenne lisent le document puis répondent du texte sans jamais
+        appeler l'outil d'écriture ; on cesse donc d'en dépendre.
+        """
+        if preset is None and self._should_rewrite_document(ctx, prompt_text):
+            self._run_document_rewrite(ctx, prompt_text)
+            return
+
         orchestrator = Orchestrator(
             LLMClient(self.shell), self.registry, ctx,
             observer=_JournalObserver(self),
@@ -1155,6 +1177,72 @@ class AssistantPalette:
             self._stream_response("⚠ " + (result.text or result.reason))
         elif not isinstance(sink, PaletteSink):
             self._stream_response(result.text or "Modification appliquée.")
+
+    def _should_rewrite_document(self, ctx, prompt_text):
+        """Vrai si : Writer, aucune sélection, et une demande de modification."""
+        if ctx.app != "writer":
+            return False
+        if not doc_rewrite.wants_document_rewrite(prompt_text):
+            return False
+        selection = self.dispatcher.call(
+            lambda: _selection_string(ctx), timeout=10)
+        return not (selection or "").strip()
+
+    def _run_document_rewrite(self, ctx, instruction):
+        """Réécrit le document : Python lit, le LLM rédige, Python applique.
+
+        Aucun tool call n'est demandé au modèle — c'est ce qui rend l'opération
+        fiable là où le mode agentique échouait silencieusement.
+        """
+        from ..core.tools.writer_tools import _paragraphs, replace_paragraphs
+
+        self._progress.set_phase("Lecture du document")
+        originals = self.dispatcher.call(
+            lambda: [p.getString() for p in _paragraphs(ctx)], timeout=20)
+        if not originals:
+            self._append_response("MIrAI : ", "Le document est vide.")
+            return
+
+        self._progress.set_phase("Rédaction")
+        self._append_response("MIrAI : ")
+        llm = LLMClient(self.shell)
+        step = llm.step(
+            [{"role": "system", "content": prompts.LEGACY_TEXT_SYSTEM},
+             {"role": "user",
+              "content": doc_rewrite.build_rewrite_prompt(originals, instruction)}],
+            on_text_delta=self._stream_response,
+            cancel_event=self._cancel,
+            progress=self._progress)
+        self._delta_buffer.flush()
+
+        if step.error:
+            self._stream_response("⚠ " + error_message(step.error))
+            return
+        if self._cancelled():
+            return
+
+        rewritten = doc_rewrite.parse_rewritten(step.text)
+        if not rewritten:
+            self._stream_response(
+                "\n⚠ Réponse inexploitable — le document n'a pas été modifié.")
+            return
+
+        self._progress.set_phase("Application au document")
+        result = self.dispatcher.call(
+            lambda: replace_paragraphs(
+                ctx, {"start": 1, "end": len(originals),
+                      "text": "\n".join(rewritten)}),
+            timeout=30)
+        self.dispatcher.call(ctx.undo_end, timeout=10)
+
+        if not result.ok:
+            self._stream_response(f"\n⚠ {result.error}")
+            return
+        summary = (f"Document réécrit : {len(originals)} → {len(rewritten)} "
+                   f"paragraphe(s). Ctrl+Z pour annuler.")
+        self._stream_response("\n" + summary)
+        self.conversation.append("user", instruction, ctx.app)
+        self.conversation.append("assistant", summary, ctx.app)
 
     def _prepare_agentic_run(self, preset, prompt_text, ctx):
         """Résout prompt, contexte supplémentaire et destination de la sortie."""
@@ -1221,11 +1309,22 @@ class AssistantPalette:
                 progress = self._progress
                 if progress is None:
                     return
-                self.set_status(progress.render(), tone="neutral")
+                reasoning = progress.reasoning
+                line = progress.render()
+                if reasoning:
+                    # Signaler qu'il y a quelque chose à survoler : sans indice,
+                    # personne ne pense à passer la souris sur un statut.
+                    line += "  ⓘ"
+                self.set_status(line, tone="neutral", tooltip=reasoning)
 
         thread = threading.Thread(target=_tick, daemon=True, name="mirai-pulse")
         self._pulse = (thread, stop)
         thread.start()
+
+    def _clear_status_tooltip(self):
+        """Le raisonnement d'un run terminé n'a plus rien à dire."""
+        self.dispatcher.post(
+            lambda: self._models["status"].__setattr__("HelpText", ""))
 
     def _stop_pulse(self):
         pulse = self._pulse

@@ -127,3 +127,38 @@ def test_null_progress_accepts_everything():
     progress.on_reasoning("y")
     progress.exact_tokens(5)
     progress.set_phase("peu importe")
+
+
+# ── Raisonnement consultable au survol ──────────────────────────────────
+
+def test_reasoning_is_kept_for_the_tooltip():
+    progress = RunProgress()
+    progress.on_reasoning("Je commence par lire le document. ")
+    progress.on_reasoning("Puis je le découpe en deux.")
+
+    assert "lire le document" in progress.reasoning
+    assert "découpe en deux" in progress.reasoning
+
+
+def test_reasoning_keeps_the_end_not_the_beginning():
+    """Une infobulle doit montrer où EN EST la réflexion, pas son préambule."""
+    from src.mirai.core.progress import REASONING_TOOLTIP_CHARS
+
+    progress = RunProgress()
+    progress.on_reasoning("DÉBUT" + "x" * (REASONING_TOOLTIP_CHARS * 2))
+    progress.on_reasoning("FIN")
+
+    reasoning = progress.reasoning
+    assert len(reasoning) <= REASONING_TOOLTIP_CHARS
+    assert reasoning.endswith("FIN")
+    assert "DÉBUT" not in reasoning
+
+
+def test_reasoning_is_empty_without_reasoning():
+    progress = RunProgress()
+    progress.on_text("du texte")
+    assert progress.reasoning == ""
+
+
+def test_null_progress_exposes_an_empty_reasoning():
+    assert NullProgress().reasoning == ""
