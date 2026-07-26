@@ -319,11 +319,11 @@ Aucun plantage, aucun message d'erreur.
 
 ### 6bis.1 Les trois onglets
 
-**Faites :** en bas de la fenêtre, cliquez successivement sur **Historique**,
+**Faites :** en bas de la fenêtre, cliquez successivement sur **Conversation**,
 **Suggestions**, puis **Actions**.
 
 **Vous devez voir :** le contenu change **dans le même cadre** — la fenêtre ne
-s'agrandit pas. L'onglet actif est écrit en bleu. *Historique* montre vos échanges,
+s'agrandit pas. L'onglet actif est écrit en bleu. *Conversation* montre vos échanges (les plus récents en haut),
 *Suggestions* des propositions adaptées à ce qui est sélectionné, *Actions* le détail
 de ce que l'assistant a fait.
 

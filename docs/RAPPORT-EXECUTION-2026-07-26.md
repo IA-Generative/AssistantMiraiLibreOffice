@@ -6,7 +6,7 @@
 
 ## En une phrase
 
-La suite de tests est **verte** (461 tests : 455 unitaires + 6 d'intégration), la palette
+La suite de tests est **verte** (528 tests : 522 unitaires + 6 d'intégration), la palette
 **s'ouvre en LibreOffice réel**, la chaîne d'authentification `/llm/v1` est vérifiée de bout
 en bout **contre les deux tiers** — DM local Ollama et DM Scaleway avec SSO Keycloak réel —
 et **10 des 22 constats** de qualification sont corrigés, les trois urgences comprises. Le
@@ -29,7 +29,36 @@ reste est listé plus bas, avec sa raison.
 
 Tags posés : `exp-jetable-v2-baseline`, `exp-jetable-v2-worker`.
 
-## Session de recette du 2026-07-26 (matin) — quatre défauts trouvés à l'usage
+## Session de recette du 2026-07-26 — treize défauts trouvés à l'usage
+
+Aucun n'était visible en test automatisé. Ils se répartissent en trois familles,
+et c'est cette répartition qui est instructive pour la suite.
+
+**Famille 1 — le marshalling vers le thread principal (5 défauts, 4 tentatives).**
+La cause racine a résisté longtemps : `AsyncCallback` posté depuis un thread de
+fond **ne réveille pas** la boucle d'événements de LibreOffice. La tâche attend
+le prochain geste de l'utilisateur. D'où des interfaces figées alors que le
+journal disait `run: terminé`. Trois correctifs ont visé à côté (service
+conservé, instantané préchargé, filet auto-réparant) avant que l'instrumentation
+de fin de run ne désigne le vrai mécanisme. La parade — une pompe qui draine une
+file et se réarme depuis le thread principal — a elle-même provoqué un gel
+immédiat à sa première version, faute de condition d'arrêt.
+
+**Famille 2 — l'écart entre « la donnée est là » et « l'utilisateur la voit »
+(4 défauts).** Un catalogue d'outils sans pendant écriture, un onglet
+qu'aucun chemin n'alimente, un modèle écrit sans repeindre le contrôle, une
+infobulle qui n'affiche que ce que le modèle n'émet pas. À chaque fois le code
+« marchait » et l'utilisateur ne voyait rien.
+
+**Famille 3 — la mise en forme du document (2 défauts).** Écrire sur une plage
+multi-paragraphes applique le style du premier à tout ; et préserver les styles
+ne suffit pas s'il faut aussi exclure les titres de la plage réécrite.
+
+Les deux derniers relèvent de l'ergonomie pure : ordre du fil, taille de police.
+
+### Détail
+
+
 
 Aucun n'était visible en test automatisé : il a fallu se servir du plugin.
 
@@ -39,6 +68,12 @@ Aucun n'était visible en test automatisé : il a fallu se servir du plugin.
 | croix de fenêtre inopérante | aucun `XTopWindowListener` — un dialogue non modal émet `windowClosing` et attend qu'on agisse ; Échap n'était branché que sur le champ de prompt | listener de fermeture + Échap sur tous les contrôles |
 | bouton figé sur « Arrêter » | le service `AsyncCallback` était recréé à chaque `post()` sans référence gardée, donc collecté avant de délivrer ; aggravé par un mélange écriture directe / postée | service unique conservé, un seul chemin d'écriture |
 | polices deux fois trop grosses | 9-10 pt là où le plan visait 7-8 ; le layout mesuré corrige les positions, pas la taille perçue | 6-7 pt |
+| interface figée en fin de run | `AsyncCallback` depuis un worker ne réveille pas la boucle d'événements | pompe auto-entretenue armée depuis le thread principal, éteinte dès la file vide |
+| gel immédiat (régression) | la pompe se réarmait à vide et monopolisait la boucle | condition d'arrêt liée au travail restant — 0,0 % CPU au repos |
+| zone de texte vide à l'écran | `model.Text` porte la donnée mais ne repeint pas un contrôle doté d'un peer | helper `_set_text` : modèle **et** `control.setText()` |
+| onglet Actions toujours vide | seul le mode agentique alimentait le journal | tous les chemins y écrivent |
+| titre écrasé par le corps | préserver le style de chaque paragraphe ne suffit pas : il faut exclure les titres de la plage | `doc_rewrite.body_range()` |
+| configuration corrompue sous écriture concurrente | `set_config` écrivait en place | écriture atomique (tmp + fsync + replace) |
 | « restructure le document en 2 paragraphes » sans effet | **le catalogue d'outils était incomplet** : `writer_get_document_map` numérotait des paragraphes que rien ne savait réécrire. Le modèle répondait du texte — `iterations=1`, `ok=true`, document intact | `writer_replace_paragraphs` + consigne « AGIS, NE DÉCRIS PAS » + bascule automatique sur l'onglet qui reçoit la réponse |
 
 Les cinq sont capitalisés dans le plan (pièges **n°23 à 25**) avec leur signature
@@ -173,8 +208,11 @@ Ollama → `HTTP 200`, réponse `QUALIF-OK`, bloc `usage` renvoyé spontanément
   puis appel LLM réel sur `llama-3.3-70b-instruct` renvoyant la réponse attendue avec son
   bloc `usage`. Trace : `[llm-auth] vector=llmToken expires_in=3595s proxy_mode=True
   relay_creds=yes enrolled=True`.
-- Reste non vérifié : un run déclenché **depuis la palette** jusqu'à l'insertion dans le
-  document.
+- ~~Un run déclenché depuis la palette jusqu'à l'insertion dans le document~~ →
+  **fait** : `Document réécrit : 45 → 2 paragraphe(s) (titre conservé)`, tracé dans
+  le fil persisté.
+- La persistance du fil est vérifiée : `assistant_conversation.json`, 40 entrées,
+  4,2 Ko, restauré à la réouverture (plafond 20 échanges / 100 Ko, troncature FIFO).
 
 C'est précisément l'objet de `docs/TEST-HUMAIN-2026-07-26.md`.
 
@@ -266,6 +304,34 @@ consécutives.
    (les tests n'importent que `MainJob`), mais volumineux ; il n'a pas été entamé.
 5. Le démonstrateur n'a **pas** été exercé de bout en bout en interactif : voir la liste
    « non vérifié » ci-dessus.
+
+## Ce que cette journée apprend sur la méthode
+
+**Aucun de ces treize défauts n'a été trouvé par les tests.** Ils l'ont tous été
+en se servant du plugin, et diagnostiqués par la mesure — jamais par déduction.
+Trois outils ont fait tout le travail :
+
+- `sample <pid>` distingue en dix secondes un **interblocage** (thread principal
+  dans `SalYieldMutex::doAcquire`) d'un **thread principal au repos** avec des
+  messages non délivrés. Deux gels d'apparence identique, deux causes opposées.
+- **Une trace en fin de run.** Si `run: terminé` s'affiche alors que l'interface
+  reste figée, ce n'est ni un blocage ni une exception : ce sont les messages qui
+  ne passent pas. Cette seule ligne a fait gagner trois tentatives.
+- **La relecture après écriture.** `posé=1888, relu=1888` prouve que la donnée
+  est dans le contrôle ; il ne reste alors que le rendu. Sans elle, on cherche
+  indéfiniment du côté des données.
+
+Le corollaire vaut d'être écrit : **j'ai proposé quatre correctifs successifs au
+même symptôme avant de trouver la cause**, et l'un d'eux a aggravé la situation.
+Chaque fois qu'on corrige sans avoir mesuré, on ajoute du code sur un diagnostic
+faux. La règle qui en sort : *devant un symptôme d'interface, instrumenter les
+trois niveaux — donnée présente, contrôle visible, contenu écrit — avant de
+toucher au code.*
+
+Second enseignement : **une suite instable est un signal, pas une nuisance.** Les
+deux échecs intermittents rencontrés cachaient de vraies courses — un thread de
+rafraîchissement qui écrasait la configuration, et une écriture non atomique qui
+pouvait faire perdre les credentials en production.
 
 ## Ce que je ferais ensuite, dans cet ordre
 

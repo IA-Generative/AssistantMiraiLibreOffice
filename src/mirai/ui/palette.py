@@ -87,7 +87,10 @@ PULSE_INTERVAL_S = 0.2    # cadence d'animation de la jauge d'activité
 
 # Zone basse : trois contenus, un seul rectangle. L'identifiant sert aussi de
 # nom de contrôle (« response » porte l'historique, déjà créé plus haut).
-TABS = (("response", "Historique"),
+# « Conversation » et non « Historique » : cet onglet porte le FIL en cours,
+# restauré d'une session à l'autre. « Historique » laissait attendre une liste
+# de conversations passées, qui n'existe pas (une seule conversation en v1).
+TABS = (("response", "Conversation"),
         ("suggestions", "Suggestions"),
         ("journal", "Actions"))
 
@@ -1238,8 +1241,8 @@ class AssistantPalette:
         self._set_input_enabled(False)
         self._start_pulse()
         self._set_send_label(running=True)
-        # La réponse arrive dans l'Historique : si l'utilisateur regarde un
-        # autre onglet, il ne verrait RIEN se produire. On bascule donc pour lui.
+        # La réponse arrive dans l'onglet Conversation : si l'utilisateur
+        # regarde ailleurs, il ne verrait RIEN se produire. On bascule pour lui.
         if self.active_tab != "response":
             self.select_tab("response")
         self.set_status("L'assistant travaille…")
