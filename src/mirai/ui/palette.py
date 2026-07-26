@@ -100,6 +100,13 @@ TABS = (("response", "Conversation"),
         ("suggestions", "Suggestions"),
         ("journal", "Actions"))
 
+# La réflexion partage le même rectangle que les onglets, mais n'en a pas :
+# on y accède par le « ⓘ » de la ligne de statut, et on en sort de même. Une
+# infobulle de survol ne convenait pas — elle disparaît dès qu'on bouge, donc
+# impossible de LIRE un raisonnement, encore moins de le faire défiler.
+REASONING_PANE = "reasoning"
+BOTTOM_PANES = tuple(tab_id for tab_id, _ in TABS) + (REASONING_PANE,)
+
 # Le retour d'un run doit se VOIR : une ligne de statut colorée selon l'issue,
 # pas un texte discret dans une zone grise. C'est la leçon du « il ne se passe
 # rien » — l'action partait bien, mais rien ne le signalait à l'écran.
@@ -420,6 +427,7 @@ class AssistantPalette:
         self._current_exchange = []    # tour en cours, affiché en tête du fil
         self._history_cache = None     # historique relu seulement quand il change
         self._journal_lines = []       # onglet « Actions » du run courant
+        self._tab_before_reasoning = None   # onglet à restaurer en refermant
         self.append_mode = self._restore_append_mode(shell)
         self._progress = None          # jauge du run en cours
         self._pulse = None             # thread d'animation de la jauge
@@ -508,6 +516,20 @@ class AssistantPalette:
         # ajouter le résultat à la suite entre marqueurs pour comparer avant de
         # décider. On ne tranche pas — on laisse choisir, et le choix est
         # mémorisé d'une session à l'autre.
+        reasoning_control, reasoning_toggle = dsfr.add_control(
+            dialog, model, "reasoning_toggle", "FixedText", 0, 0, 20, 18, {
+                "Label": "",
+                "TextColor": dsfr.TOKENS["primary"],
+                "FontName": font, "FontHeight": 8,
+                "HelpText": "Voir ce que le modèle est en train de faire",
+            })
+        self._models["reasoning_toggle"] = reasoning_toggle
+        reasoning_handler = dsfr.ClickHandler(
+            reasoning_toggle, on_click=self.toggle_reasoning,
+            fg=dsfr.TOKENS["primary"], fg_hover=dsfr.TOKENS["primary_hover"])
+        reasoning_control.addMouseListener(reasoning_handler)
+        self._handlers.append(reasoning_handler)
+
         _, append_model = dsfr.add_control(
             dialog, model, "append_mode", "CheckBox", 0, 0, 150, 18, {
                 "Label": "Ajouter à la suite",
@@ -544,6 +566,7 @@ class AssistantPalette:
         for name, color, background in (
             ("suggestions", dsfr.TOKENS["text_body"], dsfr.TOKENS["bg_accent"]),
             ("journal", dsfr.TOKENS["text_mention"], dsfr.TOKENS["bg_accent"]),
+            (REASONING_PANE, dsfr.TOKENS["text_mention"], dsfr.TOKENS["bg_alt"]),
         ):
             control, control_model = dsfr.add_control(
                 dialog, model, name, "Edit", 0, 0, 100, 100, {
@@ -758,18 +781,24 @@ class AssistantPalette:
         append_x = width - margin - send_w - gap - append_w
         self._place("append_mode", append_x, y + (send_h - line_h) // 2,
                     append_w, line_h)
+        # « ⓘ » collé à la fin du statut : c'est là que le regard se pose
+        # pendant un run, et il ne prend de la place que s'il est actif.
+        toggle_w = int(18 * scale)
+        status_w = max(0, append_x - margin - gap - toggle_w)
         self._place("status", margin, y + (send_h - line_h) // 2,
-                    max(0, append_x - margin - gap), line_h)
+                    status_w, line_h)
+        self._place("reasoning_toggle", margin + status_w,
+                    y + (send_h - line_h) // 2, toggle_w, line_h)
         y += send_h + int(8 * scale)
 
         # Zone basse : les trois contenus occupent EXACTEMENT le même
         # rectangle ; seul l'onglet actif est visible. Toute la hauteur gagnée
         # au redimensionnement lui revient — le reste garde sa taille.
         bottom_h = max(int(70 * scale), self._bottom_height or int(120 * scale))
-        for tab_id, _label in TABS:
-            self._place(tab_id, margin, y, width - 2 * margin, bottom_h)
+        for pane in BOTTOM_PANES:
+            self._place(pane, margin, y, width - 2 * margin, bottom_h)
             try:
-                self.dialog.getControl(tab_id).setVisible(tab_id == self.active_tab)
+                self.dialog.getControl(pane).setVisible(pane == self.active_tab)
             except Exception:
                 pass
         y += bottom_h + int(4 * scale)
@@ -795,8 +824,8 @@ class AssistantPalette:
         # Trace de géométrie : un onglet « vide » est le plus souvent un
         # contrôle hors champ ou masqué, pas un contenu manquant.
         try:
-            visible = [t for t, _ in TABS
-                       if self.dialog.getControl(t).isVisible()]
+            visible = [p for p in BOTTOM_PANES
+                       if self.dialog.getControl(p).isVisible()]
             bottom_y = y - bottom_h - int(4 * scale)
             self.shell.log(
                 f"[palette] layout: fenêtre {width}x{y}, zone basse "
@@ -1001,8 +1030,13 @@ class AssistantPalette:
         return stored if stored in dict(TABS) else "response"
 
     def select_tab(self, tab_id):
-        """Bascule la zone basse. L'onglet actif est mémorisé en configuration."""
-        if tab_id not in dict(TABS):
+        """Bascule la zone basse. L'onglet actif est mémorisé en configuration.
+
+        `reasoning` est un contenu sans onglet : on n'y accède que par le « ⓘ »,
+        et on ne le mémorise pas — rouvrir la palette sur un raisonnement
+        périmé n'aurait aucun sens.
+        """
+        if tab_id not in BOTTOM_PANES:
             return
         self.active_tab = tab_id
         if tab_id == "suggestions":
@@ -1015,10 +1049,11 @@ class AssistantPalette:
             model.TextColor = (dsfr.TOKENS["primary"] if active
                                else dsfr.TOKENS["text_mention"])
             model.FontWeight = 150.0 if active else 100.0
-        try:
-            self.shell.set_config("assistant_active_tab", tab_id)
-        except Exception:
-            pass          # préférence d'affichage : jamais bloquant
+        if tab_id != REASONING_PANE:
+            try:
+                self.shell.set_config("assistant_active_tab", tab_id)
+            except Exception:
+                pass          # préférence d'affichage : jamais bloquant
         self._layout()
 
     def refresh_suggestions(self):
@@ -1057,6 +1092,30 @@ class AssistantPalette:
         self._journal_lines.append(text)
         joined = "\n".join(self._journal_lines)
         self.dispatcher.post(lambda: self._set_text("journal", joined))
+
+    def toggle_reasoning(self):
+        """Ouvre ou referme le panneau de réflexion.
+
+        Un clic l'affiche et l'y MAINTIENT — on peut lire et faire défiler ;
+        un second clic revient à l'onglet d'où l'on vient. C'est la différence
+        avec une infobulle de survol, qui s'évanouit au moindre mouvement.
+        """
+        if self.active_tab == REASONING_PANE:
+            self.select_tab(self._tab_before_reasoning or "response")
+            return
+        self._tab_before_reasoning = self.active_tab
+        self.select_tab(REASONING_PANE)
+
+    def set_reasoning(self, text):
+        """Alimente le panneau et fait apparaître le « ⓘ » s'il y a à voir."""
+        self._set_text(REASONING_PANE, text)
+        label = "ⓘ" if text else ""
+        model = self._models.get("reasoning_toggle")
+        if model is not None:
+            try:
+                model.Label = label
+            except Exception:
+                pass
 
     def reload_history(self):
         """Force la relecture du fil persisté au prochain rendu."""
@@ -1360,7 +1419,7 @@ class AssistantPalette:
             self._cancel = None
             self._worker = None
             self._stop_pulse()
-            self._clear_status_tooltip()
+            self._close_reasoning()
             self._set_input_enabled(True)
             self._set_send_label(running=False)
             # Dernier drain, puis extinction : la pompe ne doit pas tourner
@@ -1549,22 +1608,26 @@ class AssistantPalette:
                 progress = self._progress
                 if progress is None:
                     return
-                reasoning = progress.tooltip
-                line = progress.render()
-                if reasoning:
-                    # Signaler qu'il y a quelque chose à survoler : sans indice,
-                    # personne ne pense à passer la souris sur un statut.
-                    line += "  ⓘ"
-                self.set_status(line, tone="neutral", tooltip=reasoning)
+                self.set_reasoning(progress.tooltip)
+                self.set_status(progress.render(), tone="neutral")
 
         thread = threading.Thread(target=_tick, daemon=True, name="mirai-pulse")
         self._pulse = (thread, stop)
         thread.start()
 
-    def _clear_status_tooltip(self):
-        """Le raisonnement d'un run terminé n'a plus rien à dire."""
-        self.dispatcher.post(
-            lambda: self._models["status"].__setattr__("HelpText", ""))
+    def _close_reasoning(self):
+        """Fin de run : on quitte le panneau et le « ⓘ » s'efface.
+
+        Le contenu, lui, est conservé : l'utilisateur peut vouloir relire ce que
+        le modèle a fait juste après coup.
+        """
+        def _apply():
+            if self.active_tab == REASONING_PANE:
+                self.select_tab(self._tab_before_reasoning or "response")
+            model = self._models.get("reasoning_toggle")
+            if model is not None:
+                model.Label = ""
+        self.dispatcher.post(_apply)
 
     def _stop_pulse(self):
         pulse = self._pulse

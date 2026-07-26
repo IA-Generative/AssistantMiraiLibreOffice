@@ -667,6 +667,12 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     **Mise en œuvre** (`core/capabilities.py`) : sonde en deux allers-retours, verdict mis en cache **par couple (endpoint, modèle)** — pas par poste. Déclenchée **explicitement** depuis le menu « 🔬 Tester le modèle » : deux appels réseau ne doivent pas surgir au milieu du travail. Le verdict choisit ensuite agentique ou pipeline déterministe, **à la place d'une heuristique sur le prompt** (piège n°44), et il est **annoncé à l'utilisateur** en langage clair : « ce modèle sait lire le document mais n'enchaîne pas avec l'écriture — les modifications passeront par un chemin direct ».
     **Défaut prudent** : sans mesure, on répond NON à la question C. Le chemin déterministe aboutit toujours ; le mode agentique peut échouer en silence. Entre les deux, choisir celui dont l'échec est visible.
 
+46. **Une infobulle ne convient pas à un contenu qu'on veut LIRE.** Le raisonnement du modèle avait d'abord été mis en `HelpText` (survol) : élégant, mais inutilisable — l'infobulle s'évanouit au moindre mouvement de souris, on ne peut ni finir sa lecture ni faire défiler. **Règle** : le survol convient à une précision d'une ligne ; dès que le contenu peut dépasser quelques mots ou évoluer en direct, il faut une zone **persistante et défilable**, ouverte et fermée par un clic explicite.
+    **Mise en œuvre sans alourdir la fenêtre** : plutôt qu'un dialogue de plus, un quatrième contenu **dans le rectangle déjà partagé** par les onglets — mais **sans onglet**, puisqu'on y accède par le « ⓘ » de la ligne de statut. Trois détails qui font la différence :
+    - le « ⓘ » n'apparaît **que s'il y a quelque chose à lire**, et s'efface en fin de run ;
+    - le second clic **revient à l'onglet d'où l'on venait**, pas à un onglet arbitraire ;
+    - cet état n'est **pas mémorisé** entre sessions — rouvrir la palette sur un raisonnement périmé n'aurait aucun sens, contrairement à l'onglet courant qui, lui, se restaure.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

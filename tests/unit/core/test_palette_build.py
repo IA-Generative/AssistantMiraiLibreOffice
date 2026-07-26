@@ -356,3 +356,51 @@ def test_text_is_written_through_the_control(palette_module):
 def test_set_text_tolerates_a_missing_control(palette_module):
     palette = _build(palette_module)
     palette._set_text("inexistant", "x")   # ne doit pas lever
+
+
+# ── Panneau de réflexion (le « ⓘ ») ─────────────────────────────────────
+
+def test_reasoning_pane_is_created_without_a_tab(palette_module):
+    """Contenu de la zone basse, mais sans onglet : on y accède par le ⓘ."""
+    _build(palette_module)
+    names = palette_module._fake_dialog.model.names
+
+    assert palette_module.REASONING_PANE in names
+    assert "reasoning_toggle" in names
+    assert f"tab_{palette_module.REASONING_PANE}" not in names
+
+
+def test_toggle_opens_then_closes_and_restores_the_tab(palette_module):
+    """Un clic ouvre et MAINTIENT ; un second revient d'où l'on vient."""
+    palette = _build(palette_module)
+    palette.select_tab("journal")
+
+    palette.toggle_reasoning()
+    assert palette.active_tab == palette_module.REASONING_PANE
+
+    palette.toggle_reasoning()
+    assert palette.active_tab == "journal"
+
+
+def test_reasoning_pane_is_not_remembered_across_sessions(palette_module):
+    """Rouvrir la palette sur un raisonnement périmé n'aurait aucun sens."""
+    palette = _build(palette_module)
+    palette.select_tab("response")
+    palette.shell.set_config.reset_mock()
+
+    palette.toggle_reasoning()
+
+    saved = [c for c in palette.shell.set_config.call_args_list
+             if c.args and c.args[0] == "assistant_active_tab"]
+    assert saved == []
+
+
+def test_marker_appears_only_when_there_is_something_to_read(palette_module):
+    palette = _build(palette_module)
+
+    palette.set_reasoning("le modèle réfléchit…")
+    assert palette._models["reasoning_toggle"].Label == "ⓘ"
+    assert "réfléchit" in palette._models[palette_module.REASONING_PANE].Text
+
+    palette.set_reasoning("")
+    assert palette._models["reasoning_toggle"].Label == ""
