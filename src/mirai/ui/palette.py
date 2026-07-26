@@ -1580,8 +1580,20 @@ class AssistantPalette:
 
         rewritten = doc_rewrite.parse_rewritten(step.text)
         if not rewritten:
-            self._stream_response(
-                "\n⚠ Réponse inexploitable — le document n'a pas été modifié.")
+            # Dire CE QUI s'est passé : « inexploitable » n'oriente vers aucune
+            # action. Si le modèle a consommé son budget en raisonnement sans
+            # rien répondre — et que la reprise élargie du client n'a pas suffi —
+            # le remède est un autre modèle, pas un autre prompt.
+            if getattr(step, "starved_by_reasoning", False):
+                self.journal_line("✗ Budget épuisé par le raisonnement")
+                self._stream_response(
+                    "\n⚠ Ce modèle a consacré tout son budget à réfléchir sans "
+                    "produire de réponse. Le document n'a pas été modifié. "
+                    "Essayez un modèle qui raisonne moins (Paramètres), ou une "
+                    "demande portant sur une partie du document.")
+            else:
+                self._stream_response(
+                    "\n⚠ Réponse inexploitable — le document n'a pas été modifié.")
             return
 
         self._progress.set_phase("Application au document")

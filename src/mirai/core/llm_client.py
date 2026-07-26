@@ -33,6 +33,23 @@ class StepResult:
     streamed: bool = False    # True si le texte a déjà été poussé au sink
     error: str = ""           # "http_429", "network_error"… — étape interrompue
     raw_json: str = ""        # réponse JSON brute (mode json, ré-encodage fidèle)
+    reasoning_chars: int = 0  # raisonnement reçu — sert à diagnostiquer un
+                              # budget épuisé avant la réponse (cf. step())
+
+    @property
+    def starved_by_reasoning(self) -> bool:
+        """Le modèle a dépensé tout son budget à réfléchir, sans rien répondre.
+
+        Signature exacte : le flux s'arrête sur `length` (plafond atteint), du
+        raisonnement est arrivé, mais ni texte ni tool call. Les modèles à
+        raisonnement puisent la réflexion ET la réponse dans le MÊME
+        `max_tokens`, et la réponse vient en dernier : un raisonnement un peu
+        plus bavard que d'habitude la fait disparaître entièrement.
+        """
+        return (self.finish_reason == "length"
+                and self.reasoning_chars > 0
+                and not (self.text or "").strip()
+                and not self.tool_calls)
 
 
 def repair_json(text):
@@ -172,10 +189,36 @@ class LLMClient:
             result = self._run_step(messages, tools, on_text_delta, mode,
                                     recover_auth=True, cancel_event=cancel_event,
                                     progress=progress)
+
+        # Budget épuisé par le raisonnement : une seule reprise, plus large.
+        #
+        # Mesuré sur `gemma-4-26b-a4b-it` (relais Scaleway, 2026-07-26) : le
+        # modèle émet 8 000 à 14 300 caractères de raisonnement AVANT la moindre
+        # ligne de réponse, alors que raisonnement et réponse se partagent le
+        # même `max_tokens`. À 4 000 tokens (~16 000 caractères) ça passe le plus
+        # souvent, et ça échoue quand le modèle est un peu plus bavard —
+        # l'utilisateur voit un échec intermittent sur un prompt identique.
+        #
+        # On n'envoie PAS `reasoning_effort` pour couper la réflexion : trois
+        # modèles du relais sur cinq le refusent en HTTP 400 (llama-3.3,
+        # mistral-small, gpt-oss). Élargir le plafond est accepté partout.
+        if result.starved_by_reasoning and not cancelled:
+            widened = max(self.max_tokens * 3, 12000)
+            self.shell.log(
+                f"[llm] budget épuisé par le raisonnement "
+                f"({result.reasoning_chars} car., 0 de réponse) — "
+                f"reprise à max_tokens={widened}")
+            retried = self._run_step(messages, tools, on_text_delta, mode,
+                                     cancel_event=cancel_event,
+                                     progress=progress, max_tokens=widened)
+            # Ne jamais dégrader : on ne garde la reprise que si elle apporte
+            # ce qui manquait — du texte ou un tool call.
+            if (retried.text or "").strip() or retried.tool_calls:
+                return retried
         return result
 
     def _run_step(self, messages, tools, on_text_delta, mode, recover_auth=False,
-                  cancel_event=None, progress=None):
+                  cancel_event=None, progress=None, max_tokens=None):
         progress = progress or NullProgress()
         extra_body = None
         if tools and mode == "native":
@@ -190,7 +233,8 @@ class LLMClient:
                 if callable(recover):
                     recover()
             return self.shell.build_chat_request(
-                messages, max_tokens=self.max_tokens, extra_body=extra_body)
+                messages, max_tokens=max_tokens or self.max_tokens,
+                extra_body=extra_body)
 
         text_parts = []
         withhold = (mode == "json")   # rétention tant que ça ressemble à un tool call
@@ -198,6 +242,7 @@ class LLMClient:
         live = [False]
         fragments = {}                # index → {id, name, arguments}
         finish = [""]
+        reasoning_chars = [0]
 
         def _handle_text(content):
             text_parts.append(content)
@@ -253,6 +298,7 @@ class LLMClient:
             if reasoning:
                 # Le modèle « réfléchit » : rien à afficher dans le document,
                 # mais l'utilisateur doit voir que ça travaille.
+                reasoning_chars[0] += len(reasoning)
                 progress.on_reasoning(reasoning)
             if choice.get("finish_reason"):
                 finish[0] = choice["finish_reason"]
@@ -262,8 +308,10 @@ class LLMClient:
         if not outcome.ok:
             if isinstance(outcome.error, sse_pump.StreamHttpError):
                 return StepResult(error=f"http_{outcome.error.status}",
-                                  finish_reason=finish[0])
-            return StepResult(error="network_error", finish_reason=finish[0])
+                                  finish_reason=finish[0],
+                                  reasoning_chars=reasoning_chars[0])
+            return StepResult(error="network_error", finish_reason=finish[0],
+                              reasoning_chars=reasoning_chars[0])
 
         full_text = "".join(text_parts)
 
@@ -281,19 +329,24 @@ class LLMClient:
                     id=slot["id"] or f"call_{index}", name=slot["name"],
                     arguments=arguments, raw=slot["arguments"]))
             return StepResult(text=full_text, tool_calls=calls,
-                              finish_reason=finish[0], streamed=live[0])
+                              finish_reason=finish[0], streamed=live[0],
+                              reasoning_chars=reasoning_chars[0])
 
         if mode == "json" and tools:
             calls = parse_json_tool_calls(full_text)
             if calls:
                 return StepResult(tool_calls=calls, finish_reason=finish[0],
-                                  raw_json=calls[0].raw)
+                                  raw_json=calls[0].raw,
+                                  reasoning_chars=reasoning_chars[0])
             # Pas un tool call : texte final — jamais perdu même s'il était retenu
             clean = strip_think_blocks(full_text)
-            return StepResult(text=clean, finish_reason=finish[0], streamed=live[0])
+            return StepResult(text=clean, finish_reason=finish[0],
+                              streamed=live[0],
+                              reasoning_chars=reasoning_chars[0])
 
         return StepResult(text=strip_think_blocks(full_text),
-                          finish_reason=finish[0], streamed=live[0])
+                          finish_reason=finish[0], streamed=live[0],
+                          reasoning_chars=reasoning_chars[0])
 
     def encode_tool_exchange(self, step, results):
         """Ré-encode l'échange (appel + résultats) dans le format du fil actif."""

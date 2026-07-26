@@ -688,6 +688,21 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     **Critère de tri** — la tolérance porte sur l'**amplitude**, jamais sur la **nature** : `"beaucoup"` reste refusé, une valeur absente requise aussi, un `enum` hors liste aussi. Ces refus-là portent une information que le modèle peut exploiter pour se corriger. « 50 000 au lieu de 20 000 » n'en porte aucune.
     **Règle générale** : pour chaque contrainte d'un schéma, se demander *qui la subit et que peut-il en faire ?* Une borne qui protège l'appelant se **rattrape** ; une borne qui exprime une exigence métier se **signale**. Et quand deux contraintes voisines relèvent de la même intention, elles doivent se comporter pareil — l'incohérence se paie en tours perdus, pas en messages d'erreur.
 
+50. **🚨 Le raisonnement du modèle et sa réponse se partagent `max_tokens` — et la réponse vient EN DERNIER.** Panne mesurée sur le relais Scaleway : « ⚠ Réponse inexploitable — le document n'a pas été modifié », **de façon intermittente**, sur un prompt identique qui venait de fonctionner. Avec `llama-3.3-70b-instruct` ça marchait toujours ; avec `gemma-4-26b-a4b-it`, une fois sur deux.
+    **Le mécanisme**, établi en rejouant l'appel à plafond décroissant — la mesure qui tranche :
+
+    | `max_tokens` | `finish_reason` | raisonnement | réponse | résultat |
+    |---:|---|---:|---:|---|
+    | 4000 | `stop` | 9 074 car. | 1 093 | 2 paragraphes ✓ |
+    | 3000 | `stop` | 10 930 car. | 1 246 | 2 paragraphes ✓ |
+    | 2000 | `length` | 8 060 car. | **0** | ⚠ inexploitable |
+
+    Le modèle émet 8 000 à 14 300 caractères de réflexion **avant la moindre ligne de réponse**. À 4 000 tokens (~16 000 caractères) le compte passe le plus souvent ; quand la réflexion est un peu plus bavarde, elle consomme tout et la réponse n'est jamais émise. D'où l'intermittence, et d'où « ça marche avec un modèle, pas avec l'autre » : un modèle sans raisonnement ne peut structurellement pas rencontrer ce défaut.
+    **Le remède écarté** : couper la réflexion à la source par `reasoning_effort`. Mesuré sur cinq modèles du relais, **trois le refusent en HTTP 400** (llama-3.3, mistral-small, gpt-oss). L'envoyer systématiquement aurait transformé une panne intermittente sur un modèle en panne totale sur trois. Élargir le plafond, lui, est accepté partout.
+    **Le remède retenu** : détecter la signature exacte — `finish_reason == "length"` **et** du raisonnement reçu **et** ni texte ni tool call — puis **une seule** reprise à plafond triplé, conservée uniquement si elle apporte ce qui manquait. Jamais de dégradation, jamais de troisième tentative, pas de reprise si l'utilisateur a annulé.
+    **Règle générale** : un plafond de tokens n'est pas un plafond de réponse dès qu'un modèle raisonne. Tout budget dimensionné sur la taille de la sortie attendue est faux d'un facteur qui dépend du modèle — et le symptôme n'est pas une réponse tronquée mais une réponse **absente**.
+    **Sur la méthode** : le premier réflexe — « gemma n'enchaîne pas, c'est le piège n°45 » — était faux. Le chemin emprunté était le chemin déterministe, sans outils, où l'enchaînement ne joue aucun rôle. C'est la reproduction hors plugin, à plafond variable, qui a donné la cause. Corollaire du n°48 : **le symptôme ne désigne pas le chemin**.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

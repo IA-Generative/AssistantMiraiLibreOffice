@@ -35,6 +35,21 @@ def text_chunks(*texts, finish="stop"):
     return chunks
 
 
+def reasoning_chunks(*reasoning, content="", finish="length", key="reasoning"):
+    """Chunks SSE d'un modèle qui RÉFLÉCHIT avant de répondre.
+
+    Reproduit le fil observé sur `gemma-4-26b-a4b-it` : une longue série de
+    deltas de raisonnement, puis — seulement à la fin — le contenu utile.
+    Avec `finish="length"` et `content=""`, c'est la panne mesurée : le plafond
+    de tokens est atteint pendant la réflexion, la réponse n'existe jamais.
+    """
+    chunks = [{"choices": [{"delta": {key: r}}]} for r in reasoning]
+    if content:
+        chunks.append({"choices": [{"delta": {"content": content}}]})
+    chunks.append({"choices": [{"delta": {}, "finish_reason": finish}]})
+    return chunks
+
+
 def native_tool_call_chunks(name, arguments_json, call_id="call_abc"):
     """Chunks SSE simulant un tool call natif fragmenté."""
     half = max(1, len(arguments_json) // 2)
