@@ -1436,7 +1436,8 @@ class AssistantPalette:
         self.journal_line(f"⚙ {preset.label} — préparation")
         message = preset.runner(ctx, self.shell, prompt_text, None,
                                 cancel_event=self._cancel,
-                                dispatcher=self.dispatcher)
+                                dispatcher=self.dispatcher,
+                                append_mode=self.append_mode)
         self.journal_line(f"✓ {preset.label} — {message[:70]}")
         self._append_response("MIrAI : ", message)
         self.conversation.append("user", shown, ctx.app)
@@ -1527,8 +1528,19 @@ class AssistantPalette:
         self._progress.set_phase("Application au document")
 
         def _apply():
-            replace_paragraphs(ctx, {"start": first, "end": last,
-                                     "text": "\n".join(rewritten)})
+            if self.append_mode:
+                # L'original est conservé : le résultat s'ajoute après le
+                # dernier paragraphe traité, encadré par des marqueurs.
+                body_text = "\n".join(rewritten)
+                replace_paragraphs(ctx, {
+                    "start": last, "end": last,
+                    "text": "\n".join([originals[last - 1],
+                                       "---début-du-texte-réécrit---",
+                                       body_text,
+                                       "---fin-du-texte-réécrit---"])})
+            else:
+                replace_paragraphs(ctx, {"start": first, "end": last,
+                                         "text": "\n".join(rewritten)})
             ctx.undo_end()
 
         # `post` et non `call` : on n'a pas besoin du résultat, et attendre
@@ -1537,7 +1549,8 @@ class AssistantPalette:
         self.journal_line(
             f"✓ Écriture appliquée — {len(body)} → {len(rewritten)} paragraphe(s)")
         kept = " (titre conservé)" if headings else ""
-        summary = (f"Document réécrit : {len(body)} → {len(rewritten)} "
+        how = "ajouté à la suite" if self.append_mode else "réécrit"
+        summary = (f"Document {how} : {len(body)} → {len(rewritten)} "
                    f"paragraphe(s){kept}. Ctrl+Z pour annuler.")
         self._stream_response("\n" + summary)
         self.conversation.append("user", instruction, ctx.app)

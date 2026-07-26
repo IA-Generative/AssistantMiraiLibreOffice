@@ -673,6 +673,10 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     - le second clic **revient à l'onglet d'où l'on venait**, pas à un onglet arbitraire ;
     - cet état n'est **pas mémorisé** entre sessions — rouvrir la palette sur un raisonnement périmé n'aurait aucun sens, contrairement à l'onglet courant qui, lui, se restaure.
 
+47. **🚨 Un réglage d'interface doit être branché sur UN point de passage obligé, sinon il devient inopérant en silence.** La case « Ajouter à la suite » avait été branchée sur un seul chemin — celui du preset « Modifier ». Ce preset a été retiré des chips deux heures plus tard, et la case est restée à l'écran **sans plus rien commander** : cochée ou non, le résultat était identique. Aucun test ne l'a vu, parce que chaque preset construisait sa destination dans son coin.
+    **Remède structurel** : un helper UNIQUE (`presets.text_sink`) traduit le choix en destination, et tout preset le traverse obligatoirement. Deux tests d'architecture ferment la porte — l'un vérifie par introspection que **chaque** runner accepte le paramètre, l'autre que les défauts correspondent au comportement historique de chaque preset (Résumer et Simplifier ajoutent, Raccourcir et Allonger remplacent) pour les appels programmatiques qui ne transmettent pas de choix.
+    **Règle générale** : quand on ajoute un réglage visible, se demander *par où passent TOUS les cas qu'il doit gouverner ?* S'il y a plusieurs chemins, en créer un seul avant de brancher le réglage. Un réglage inopérant est pire qu'un réglage absent : l'utilisateur croit avoir agi.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

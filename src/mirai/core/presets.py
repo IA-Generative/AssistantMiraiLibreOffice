@@ -87,6 +87,21 @@ def _text_client(shell, max_tokens):
     return LLMClient(shell, max_tokens=max_tokens)
 
 
+def text_sink(ctx, append_mode, header, footer, tee=None, **kwargs):
+    """Où va le texte produit : à la suite entre marqueurs, ou en remplacement.
+
+    Les deux usages sont légitimes et les utilisateurs ne s'accordent pas :
+    remplacer va plus vite, ajouter permet de comparer avant de décider. Le
+    choix vient de la case « Ajouter à la suite » de la palette ; ce helper est
+    le SEUL endroit qui le traduit en destination, pour qu'aucun preset ne
+    puisse l'ignorer — c'est précisément ce qui était arrivé, la case ne
+    pilotant plus rien depuis le retrait du preset qui l'utilisait.
+    """
+    if append_mode:
+        return WriterInsertSink(ctx, header, footer, tee=tee, **kwargs)
+    return WriterReplaceSink(ctx, tee=tee)
+
+
 def _system(specific):
     """Système hérité de make_api_request : défaut + spécifique."""
     return LEGACY_TEXT_SYSTEM + " " + specific if specific else LEGACY_TEXT_SYSTEM
@@ -155,7 +170,7 @@ def run_extend(ctx, shell, user_text, tee, cancel_event=None,
 
 
 def run_summarize(ctx, shell, user_text, tee, cancel_event=None,
-                  dispatcher=None):
+                  dispatcher=None, append_mode=True):
     original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "SummarizeSelection",
                       {"action": "summarize_selection",
@@ -180,9 +195,9 @@ def run_summarize(ctx, shell, user_text, tee, cancel_event=None,
     max_tokens = int(shell.get_config("summarize_selection_max_tokens", 15000))
     llm = _text_client(shell, max_tokens)
 
-    sink = WriterInsertSink(
-        ctx, "\n\n---début-du-résumé---\n", "\n---fin-du-résumé---\n",
-        stop_phrases=STOP_PHRASES, tee=tee)
+    sink = text_sink(ctx, append_mode,
+                     "\n\n---début-du-résumé---\n", "\n---fin-du-résumé---\n",
+                     tee=tee, stop_phrases=STOP_PHRASES)
 
     ctx.undo_begin("Résumer")
     try:
@@ -200,7 +215,7 @@ def run_summarize(ctx, shell, user_text, tee, cancel_event=None,
 
 
 def run_simplify(ctx, shell, user_text, tee, cancel_event=None,
-                 dispatcher=None):
+                 dispatcher=None, append_mode=True):
     original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "SimplifySelection",
                       {"action": "simplify_selection",
@@ -234,10 +249,11 @@ def run_simplify(ctx, shell, user_text, tee, cancel_event=None,
         active_sink.insert_message(
             "[Le modèle a posé une question. Veuillez réessayer.]")
 
-    sink = WriterInsertSink(
-        ctx, "\n\n---reformulation-du-texte---\n", "\n---fin-de-reformulation---\n",
-        question_patterns=SIMPLIFY_QUESTION_PATTERNS, on_question=_on_question,
-        stop_phrases=STOP_PHRASES, tee=tee)
+    sink = text_sink(ctx, append_mode,
+                     "\n\n---reformulation-du-texte---\n",
+                     "\n---fin-de-reformulation---\n", tee=tee,
+                     question_patterns=SIMPLIFY_QUESTION_PATTERNS,
+                     on_question=_on_question, stop_phrases=STOP_PHRASES)
 
     ctx.undo_begin("Reformuler")
     try:
@@ -254,7 +270,8 @@ def run_simplify(ctx, shell, user_text, tee, cancel_event=None,
         ctx.undo_end()
 
 
-def _run_resize(ctx, shell, ratio, undo_label, tee, cancel_event=None):
+def _run_resize(ctx, shell, ratio, undo_label, tee, cancel_event=None,
+                append_mode=False):
     original = _target_selection_text(ctx)
     _legacy_telemetry(ctx, "ResizeSelection",
                       {"action": "resize_selection",
@@ -276,7 +293,9 @@ def _run_resize(ctx, shell, ratio, undo_label, tee, cancel_event=None):
         "sens ni la langue. Tu réponds uniquement avec le texte réécrit.")
     llm = _text_client(shell, max(1000, target * 4))
 
-    sink = WriterReplaceSink(ctx, tee=tee)
+    sink = text_sink(ctx, append_mode,
+                     "\n\n---début-du-texte-ajusté---\n",
+                     "\n---fin-du-texte-ajusté---\n", tee=tee)
     ctx.undo_begin(undo_label)
     try:
         step = llm.step([{"role": "system", "content": system_prompt},
@@ -293,19 +312,21 @@ def _run_resize(ctx, shell, ratio, undo_label, tee, cancel_event=None):
 
 
 def run_shorten(ctx, shell, user_text, tee, cancel_event=None,
-                dispatcher=None):
-    return _run_resize(ctx, shell, 0.65, "Raccourcir", tee, cancel_event)
+                dispatcher=None, append_mode=False):
+    return _run_resize(ctx, shell, 0.65, "Raccourcir", tee, cancel_event,
+                       append_mode=append_mode)
 
 
 def run_lengthen(ctx, shell, user_text, tee, cancel_event=None,
-                 dispatcher=None):
-    return _run_resize(ctx, shell, 1.4, "Allonger", tee, cancel_event)
+                 dispatcher=None, append_mode=False):
+    return _run_resize(ctx, shell, 1.4, "Allonger", tee, cancel_event,
+                       append_mode=append_mode)
 
 
 # ── Presets pipeline Calc ───────────────────────────────────────────────
 
 def run_transform(ctx, shell, user_text, tee, cancel_event=None,
-                  dispatcher=None):
+                  dispatcher=None, append_mode=True):
     sheet = ctx.controller.ActiveSheet
     area = ctx.controller.getSelection().getRangeAddress()
     col_range = range(area.StartColumn, area.EndColumn + 1)
@@ -386,7 +407,7 @@ def run_transform(ctx, shell, user_text, tee, cancel_event=None,
 
 
 def run_analyze(ctx, shell, user_text, tee, cancel_event=None,
-                dispatcher=None):
+                dispatcher=None, append_mode=True):
     sheet = ctx.controller.ActiveSheet
     area = ctx.controller.getSelection().getRangeAddress()
     _legacy_telemetry(ctx, "AnalyzeRange", {"context": "calc"})
