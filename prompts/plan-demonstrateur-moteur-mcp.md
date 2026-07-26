@@ -612,6 +612,10 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
 
 36. **Tous les modèles n'émettent pas de `reasoning_content`.** Une jauge qui n'affiche que le raisonnement reste vide sur la plupart des modèles — et l'indice de survol ne s'affiche jamais, ce qui donne l'impression que la fonction est cassée. L'infobulle doit retomber sur **le texte en cours de rédaction**, en annonçant ce qu'elle montre (« Réflexion du modèle : » / « Texte en cours : »). Vérifier ce que le modèle cible émet réellement AVANT de bâtir un affichage dessus.
 
+37. **Un onglet vide n'est pas forcément un bug d'affichage — vérifier d'abord qui l'alimente.** L'onglet « Actions » restait désespérément vide : le journal n'était alimenté que par le `RunObserver` du mode agentique. Un preset pipeline ou une réécriture déterministe n'y écrivaient rien, alors que c'est précisément là que l'utilisateur cherche ce qui vient de se passer. **Tout chemin d'exécution doit alimenter le journal**, pas seulement celui qui l'a inspiré. Corollaire de diagnostic : instrumenter le rendu (« fil rendu : N entrées, M caractères ») avant de conclure à un problème d'affichage — ici la trace a prouvé que l'historique, lui, était bien écrit.
+
+38. **Ne pas trancher un désaccord d'usage à la place des utilisateurs.** Remplacer la sélection ou ajouter le résultat à la suite entre marqueurs : les deux camps ont raison, selon qu'on veut aller vite ou comparer avant de décider. Plutôt qu'un arbitrage arbitraire, une case à cocher « Ajouter à la suite » à côté du bouton d'envoi, dont le choix est **mémorisé** en configuration (`assistant_append_mode`) — un réglage à refaire à chaque ouverture est un réglage qu'on n'utilise pas. Les marqueurs reprennent la forme historique (`---début-du-texte-modifié---`), déjà familière.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

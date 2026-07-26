@@ -40,6 +40,11 @@ try:
 except Exception:
     _XTopWindowListener = None
 
+try:
+    from com.sun.star.awt import XItemListener as _XItemListener
+except Exception:
+    _XItemListener = None
+
 from ..core import doc_rewrite, prompts, selection_info, suggestions
 from ..core import presets as presets_module
 from ..core.context import ToolContext
@@ -48,7 +53,7 @@ from ..core.llm_client import LLMClient
 from ..core.orchestrator import Orchestrator, RunObserver, error_message
 from ..core.progress import RunProgress
 from ..core.registry import ToolRegistry
-from ..core.sinks import PaletteSink, WriterReplaceSink
+from ..core.sinks import PaletteSink, WriterInsertSink, WriterReplaceSink
 from ..core.tools import register_all
 from ..core.ui_thread import DispatcherClosed, MainThreadDispatcher
 from . import dsfr
@@ -116,6 +121,7 @@ class _WindowCloser(unohelper.Base,
         self._palette.close()
 
     def windowActivated(self, _event):
+        self._palette.heal_if_stuck()
         self._palette.refresh_selection_label()
 
     # Le reste de l'interface : rien à faire, mais UNO exige les méthodes.
@@ -166,6 +172,20 @@ class _ResizeWatcher(unohelper.Base,
 
     def windowHidden(self, _event):
         pass
+
+    def disposing(self, _event):
+        pass
+
+
+class _AppendModeListener(unohelper.Base,
+                          *([_XItemListener] if _XItemListener else [])):
+    """Retient le choix « ajouter à la suite » dès que la case change."""
+
+    def __init__(self, palette):
+        self._palette = palette
+
+    def itemStateChanged(self, event):
+        self._palette.set_append_mode(bool(getattr(event, "Selected", 0)))
 
     def disposing(self, _event):
         pass
@@ -389,6 +409,9 @@ class AssistantPalette:
         self.active_tab = self._restore_tab(shell)
         self._bottom_height = 0        # ajusté par le redimensionnement
         self._current_exchange = []    # tour en cours, affiché en tête du fil
+        self._history_cache = None     # historique relu seulement quand il change
+        self._journal_lines = []       # onglet « Actions » du run courant
+        self.append_mode = self._restore_append_mode(shell)
         self._progress = None          # jauge du run en cours
         self._pulse = None             # thread d'animation de la jauge
         self._width = 0                # largeur courante (0 = pas encore mesurée)
@@ -471,6 +494,25 @@ class AssistantPalette:
                 "FontName": font, "FontHeight": 7,
             })
         self._models["status"] = status_model
+
+        # Deux écoles chez les utilisateurs : remplacer la sélection, ou
+        # ajouter le résultat à la suite entre marqueurs pour comparer avant de
+        # décider. On ne tranche pas — on laisse choisir, et le choix est
+        # mémorisé d'une session à l'autre.
+        _, append_model = dsfr.add_control(
+            dialog, model, "append_mode", "CheckBox", 0, 0, 150, 18, {
+                "Label": "Ajouter à la suite",
+                "State": 1 if self.append_mode else 0,
+                "FontName": font, "FontHeight": 7,
+                "TextColor": dsfr.TOKENS["text_mention"],
+                "HelpText": ("Coché : le résultat est inséré après la sélection, "
+                             "entre marqueurs, et l'original est conservé.\n"
+                             "Décoché : le résultat remplace la sélection."),
+            })
+        self._models["append_mode"] = append_model
+        append_handler = _AppendModeListener(self)
+        dialog.getControl("append_mode").addItemListener(append_handler)
+        self._handlers.append(append_handler)
 
         _, send_model = dsfr.add_primary_button(
             dialog, model, "send", "Envoyer  ⏎", 0, 0, 120, 32, font,
@@ -702,8 +744,13 @@ class AssistantPalette:
         send_w = int((send_pref.Width if send_pref else 100) + 22 * scale)
         send_h = int(line_h + 10 * scale)
         self._place("send", width - margin - send_w, y, send_w, send_h)
+        append_pref = self._preferred("append_mode")
+        append_w = int((append_pref.Width if append_pref else 130) + 24 * scale)
+        append_x = width - margin - send_w - gap - append_w
+        self._place("append_mode", append_x, y + (send_h - line_h) // 2,
+                    append_w, line_h)
         self._place("status", margin, y + (send_h - line_h) // 2,
-                    width - 2 * margin - send_w - gap, line_h)
+                    max(0, append_x - margin - gap), line_h)
         y += send_h + int(8 * scale)
 
         # Zone basse : les trois contenus occupent EXACTEMENT le même
@@ -853,6 +900,27 @@ class AssistantPalette:
         model = desktop.getCurrentComponent()
         return getattr(model, "CurrentController", None) if model else None
 
+    def heal_if_stuck(self):
+        """Répare une interface restée en état « occupé » sans run vivant.
+
+        Les mises à jour de fin de run sont postées via AsyncCallback ; si le
+        dernier lot n'est pas délivré, la fenêtre reste grisée avec « Arrêter »
+        alors que plus rien ne tourne. Ce filet est appelé à chaque activation
+        de la fenêtre : le coût est nul, et il transforme un blocage définitif
+        en gêne d'une seconde.
+        """
+        worker = self._worker
+        if not self.busy or (worker is not None and worker.is_alive()):
+            return
+        self.shell.log("[palette] interface bloquée en état occupé — réparation")
+        self.busy = False
+        self._cancel = None
+        self._worker = None
+        self._stop_pulse()
+        self._set_input_enabled(True)
+        self._set_send_label(running=False)
+        self.set_status("Terminé", tone="success")
+
     def refresh_selection_label(self):
         """Recalcule le libellé de cible. Thread principal uniquement."""
         if self.busy:
@@ -881,6 +949,23 @@ class AssistantPalette:
         return ""
 
     # ── Zone basse à onglets ────────────────────────────────────────────
+
+    @staticmethod
+    def _restore_append_mode(shell):
+        """Préférence « ajouter à la suite » de la session précédente."""
+        try:
+            return str(shell.get_config("assistant_append_mode", "")) == "1"
+        except Exception:
+            return False
+
+    def set_append_mode(self, enabled):
+        """Mémorise le choix — il ne doit pas être à refaire à chaque ouverture."""
+        self.append_mode = bool(enabled)
+        try:
+            self.shell.set_config("assistant_append_mode",
+                                  "1" if enabled else "0")
+        except Exception:
+            pass          # préférence d'affichage : jamais bloquant
 
     @staticmethod
     def _restore_tab(shell):
@@ -938,6 +1023,23 @@ class AssistantPalette:
 
     # ── Fil de conversation (main courante : le plus récent EN HAUT) ────
 
+    def journal_line(self, text):
+        """Ajoute une ligne au journal d'actions (onglet « Actions »).
+
+        Le journal n'était alimenté que par le mode agentique via RunObserver :
+        un preset ou une réécriture laissait l'onglet désespérément vide, alors
+        que c'est justement là que l'utilisateur cherche ce qui s'est passé.
+        """
+        self._journal_lines.append(text)
+        joined = "\n".join(self._journal_lines)
+        self.dispatcher.post(
+            lambda: self._models["journal"].__setattr__("Text", joined))
+
+    def reload_history(self):
+        """Force la relecture du fil persisté au prochain rendu."""
+        self._history_cache = None
+        self._render_conversation()
+
     def _render_conversation(self):
         """Recompose le fil : échange en cours d'abord, puis l'historique.
 
@@ -948,7 +1050,14 @@ class AssistantPalette:
         if self._current_exchange:
             blocks.append("\n".join(self._current_exchange))
 
-        entries = self.conversation.load()
+        # L'historique est mis en CACHE : cette méthode est rappelée à chaque
+        # fragment du flux (~8 fois par seconde). Relire le fichier JSON à
+        # chaque fois, c'est une entrée-sortie disque dans le worker et une
+        # grande chaîne postée au thread principal — de quoi saturer sa file
+        # d'événements et donner l'impression d'une interface figée.
+        if self._history_cache is None:
+            self._history_cache = self.conversation.load()
+        entries = self._history_cache
         # Les entrées arrivent dans l'ordre chronologique, par paires
         # (utilisateur, assistant) : on regroupe puis on inverse les groupes,
         # sans inverser l'intérieur d'un échange — une réponse au-dessus de sa
@@ -967,6 +1076,8 @@ class AssistantPalette:
             blocks.append("\n".join(group))
 
         text = "\n———\n".join(blocks)
+        self.shell.log(f"[palette] fil rendu : {len(entries)} entrée(s) "
+                       f"persistée(s), {len(text)} caractères")
         self.dispatcher.post(
             lambda: self._models["response"].__setattr__("Text", text))
 
@@ -991,6 +1102,7 @@ class AssistantPalette:
             return
         self.conversation.clear()
         self._current_exchange = []
+        self._history_cache = None
         self._models["response"].Text = ""
         self.set_journal_text("")
         self.set_status("Conversation effacée.")
@@ -1086,6 +1198,8 @@ class AssistantPalette:
         self._cancel = threading.Event()
         self._delta_buffer.reset()
         self._current_exchange = []    # nouvel échange : le précédent est persisté
+        self._history_cache = None     # le tour précédent a rejoint l'historique
+        self._journal_lines = []
         self._progress = RunProgress()
         self._set_input_enabled(False)
         self._start_pulse()
@@ -1111,6 +1225,20 @@ class AssistantPalette:
             args=(preset, prompt_text, ctx, shown, snapshot),
             daemon=True, name="mirai-run")
         self._worker.start()
+
+    def _document_sink(self, ctx):
+        """Destination du texte : remplacer la sélection, ou l'ajouter après.
+
+        Le choix appartient à l'utilisateur (case « Ajouter à la suite ») : les
+        deux usages sont légitimes — remplacer va plus vite, ajouter permet de
+        comparer avant de décider. Les marqueurs reprennent la forme historique.
+        """
+        if self.append_mode:
+            return WriterInsertSink(
+                ctx,
+                "\n\n---début-du-texte-modifié---\n",
+                "\n---fin-du-texte-modifié---\n")
+        return WriterReplaceSink(ctx)
 
     def _document_snapshot(self, ctx, preset, prompt_text):
         """Lit d'avance ce dont le run aura besoin. Thread principal uniquement."""
@@ -1140,6 +1268,7 @@ class AssistantPalette:
         `self.dispatcher` (post pour l'affichage, call pour le document).
         """
         snapshot = snapshot or {}
+        self.shell.log("[palette] run: début")
         try:
             if preset is not None and preset.mode == "pipeline":
                 self._run_pipeline(preset, prompt_text, ctx, shown)
@@ -1159,6 +1288,8 @@ class AssistantPalette:
             self.set_status(_friendly_error(exc), tone="error")
             self._append_response("MIrAI : ", f"⚠ {_friendly_error(exc)}")
         finally:
+            # Ordre important : libérer l'état AVANT de poster les mises à
+            # jour, pour qu'un filet déclenché entre-temps voie un run terminé.
             self.busy = False
             self._cancel = None
             self._worker = None
@@ -1166,6 +1297,7 @@ class AssistantPalette:
             self._clear_status_tooltip()
             self._set_input_enabled(True)
             self._set_send_label(running=False)
+            self.shell.log("[palette] run: terminé, interface restaurée")
 
     def _run_pipeline(self, preset, prompt_text, ctx, shown):
         """Preset piloté par Python : le LLM n'est qu'une fonction texte.
@@ -1173,9 +1305,11 @@ class AssistantPalette:
         Le runner touche le document ; il le fait via ctx.on_main. Son appel LLM
         reste dans ce worker.
         """
+        self.journal_line(f"⚙ {preset.label} — préparation")
         message = preset.runner(ctx, self.shell, prompt_text, None,
                                 cancel_event=self._cancel,
                                 dispatcher=self.dispatcher)
+        self.journal_line(f"✓ {preset.label} — {message[:70]}")
         self._append_response("MIrAI : ", message)
         self.conversation.append("user", shown, ctx.app)
         self.conversation.append("assistant", message, ctx.app)
@@ -1233,6 +1367,10 @@ class AssistantPalette:
         headings = [text for text, style in zip(originals, styles, strict=False)
                     if doc_rewrite.is_heading(style) and text.strip()]
 
+        self.journal_line(f"✓ Lecture du document — {len(originals)} paragraphe(s)")
+        if headings:
+            self.journal_line(f"↳ Titre conservé : « {headings[0][:50]} »")
+        self.journal_line(f"⚙ Réécriture des paragraphes {first} à {last}")
         self._progress.set_phase("Rédaction")
         self._append_response("MIrAI : ")
         llm = LLMClient(self.shell)
@@ -1268,6 +1406,8 @@ class AssistantPalette:
         # `post` et non `call` : on n'a pas besoin du résultat, et attendre
         # exposerait au délai d'AsyncCallback décrit plus haut.
         self.dispatcher.post(_apply)
+        self.journal_line(
+            f"✓ Écriture appliquée — {len(body)} → {len(rewritten)} paragraphe(s)")
         kept = " (titre conservé)" if headings else ""
         summary = (f"Document réécrit : {len(body)} → {len(rewritten)} "
                    f"paragraphe(s){kept}. Ctrl+Z pour annuler.")
@@ -1290,7 +1430,7 @@ class AssistantPalette:
                 selection = self.dispatcher.call(
                     lambda: _selection_string(ctx), timeout=10)
                 if selection.strip():
-                    sink = WriterReplaceSink(ctx)
+                    sink = self._document_sink(ctx)
         if sink is None:
             sink = PaletteSink(on_delta=self._stream_response)
         return extra, user_prompt, sink

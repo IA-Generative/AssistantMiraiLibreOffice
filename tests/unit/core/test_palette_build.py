@@ -83,6 +83,9 @@ class FakeControl:
     def addKeyListener(self, listener):
         self.listeners.append(listener)
 
+    def addItemListener(self, listener):
+        self.listeners.append(listener)
+
 
 class FakeDialog:
     def __init__(self):
@@ -259,7 +262,7 @@ def test_conversation_shows_most_recent_first(palette_module):
         {"role": "user", "text": "seconde question", "app": "writer"},
         {"role": "assistant", "text": "seconde réponse", "app": "writer"},
     ]
-    palette._render_conversation()
+    palette.reload_history()
 
     text = palette._models["response"].Text
     assert text.index("seconde question") < text.index("première question"), (
@@ -274,7 +277,57 @@ def test_current_exchange_stays_on_top(palette_module):
         {"role": "user", "text": "ancienne", "app": "writer"},
         {"role": "assistant", "text": "ancienne réponse", "app": "writer"},
     ]
+    palette.reload_history()
     palette._append_response("Vous : ", "en cours")
 
     text = palette._models["response"].Text
     assert text.index("en cours") < text.index("ancienne")
+
+
+# ── Mode « ajouter à la suite » ─────────────────────────────────────────
+
+def test_append_mode_checkbox_exists(palette_module):
+    """Les deux écoles coexistent : remplacer, ou ajouter entre marqueurs."""
+    _build(palette_module)
+    assert "append_mode" in palette_module._fake_dialog.model.names
+
+
+def test_append_mode_defaults_to_replacing(palette_module):
+    palette = _build(palette_module)
+    assert palette.append_mode is False
+
+
+def test_append_mode_is_remembered(palette_module):
+    palette = _build(palette_module)
+    palette.set_append_mode(True)
+
+    assert palette.append_mode is True
+    palette.shell.set_config.assert_called_with("assistant_append_mode", "1")
+
+
+def test_sink_follows_the_choice(palette_module):
+    from src.mirai.core.sinks import WriterInsertSink, WriterReplaceSink
+
+    palette = _build(palette_module)
+    ctx = MagicMock()
+
+    palette.append_mode = False
+    assert isinstance(palette._document_sink(ctx), WriterReplaceSink)
+
+    palette.append_mode = True
+    sink = palette._document_sink(ctx)
+    assert isinstance(sink, WriterInsertSink)
+    assert "début-du-texte-modifié" in sink.header_marker
+
+
+# ── Journal d'actions ───────────────────────────────────────────────────
+
+def test_journal_receives_lines_outside_agentic_mode(palette_module):
+    """L'onglet Actions restait vide sur les presets et la réécriture."""
+    palette = _build(palette_module)
+    palette.journal_line("⚙ Lecture du document")
+    palette.journal_line("✓ Écriture appliquée")
+
+    text = palette._models["journal"].Text
+    assert "Lecture du document" in text
+    assert "Écriture appliquée" in text
