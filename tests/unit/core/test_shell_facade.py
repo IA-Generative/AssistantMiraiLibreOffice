@@ -3,13 +3,16 @@
 import json
 import tempfile
 
-from tests.stubs.uno_stubs import install, make_job
-
 import pytest
+
+from tests.stubs.uno_stubs import install, make_job
 
 install()
 
-from src.mirai.core.shell_facade import MainJobShell, clamp_max_tokens
+from src.mirai.core.shell_facade import (  # noqa: E402  (install() doit précéder l'import)
+    MainJobShell,
+    clamp_max_tokens,
+)
 
 
 @pytest.fixture(autouse=True)

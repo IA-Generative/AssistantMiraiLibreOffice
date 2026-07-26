@@ -1,7 +1,6 @@
 """Boucle agentique : run texte, run avec tools, plafond d'itérations, undo,
 conversation, observer (journal d'actions), erreurs HTTP."""
 
-import dataclasses
 import tempfile
 
 from src.mirai.core.conversation import ConversationStore
@@ -24,7 +23,8 @@ class FakeLLM:
     def effective_mode(self):
         return "native"
 
-    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None):
+    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None,
+             progress=None):
         self.seen_messages.append(list(messages))
         self.seen_cancel_events.append(cancel_event)
         step = self._steps.pop(0)

@@ -40,7 +40,7 @@ def test_max_exchanges_cap():
 
 def test_max_bytes_cap():
     store, _ = _store(max_bytes=2000)
-    for i in range(10):
+    for _ in range(10):
         store.append("user", "x" * 400)
         store.append("assistant", "y" * 400)
     size = os.path.getsize(store.path)

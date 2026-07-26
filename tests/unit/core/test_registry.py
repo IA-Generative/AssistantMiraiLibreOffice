@@ -1,9 +1,8 @@
 """Registre de tools : list/call, inconnu, exception, undo, plafond, télémétrie."""
 
-from types import SimpleNamespace
 
 from src.mirai.core.registry import ToolRegistry
-from src.mirai.core.tool_calls import ToolSpec, ToolResult
+from src.mirai.core.tool_calls import ToolResult, ToolSpec
 from tests.stubs.fake_shell import FakeShell
 
 

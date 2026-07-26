@@ -3,8 +3,8 @@ moteur (vrai LLMClient + SSE scripté + faux document) — marqueurs, stop
 phrases, retry sur question, undo unique. Assertions portées des
 comportements de menu_actions/writer.py."""
 
-from src.mirai.core.context import ToolContext
 from src.mirai.core import presets
+from src.mirai.core.context import ToolContext
 from tests.stubs.fake_docs import FakeWriterDoc
 from tests.stubs.fake_shell import FakeShell, FakeSSEResponse, text_chunks
 

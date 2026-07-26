@@ -83,7 +83,8 @@ class ScriptedLLM:
     def effective_mode(self):
         return "native"
 
-    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None):
+    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None,
+             progress=None):
         self.cancel_events.append(cancel_event)
         step = self._steps.pop(0)
         if step.text and not step.tool_calls and on_text_delta:

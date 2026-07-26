@@ -46,6 +46,7 @@ from ..core.context import ToolContext
 from ..core.conversation import ConversationStore
 from ..core.llm_client import LLMClient
 from ..core.orchestrator import Orchestrator, RunObserver
+from ..core.progress import RunProgress
 from ..core.registry import ToolRegistry
 from ..core.sinks import PaletteSink, WriterReplaceSink
 from ..core.tools import register_all
@@ -77,6 +78,7 @@ _open_palette = [None]   # singleton de session
 
 FLUSH_INTERVAL_S = 0.12   # cadence maximale des mises à jour d'affichage
 FLUSH_CHARS = 80          # ou dès qu'on a accumulé ce nombre de caractères
+PULSE_INTERVAL_S = 0.2    # cadence d'animation de la jauge d'activité
 
 # Zone basse : trois contenus, un seul rectangle. L'identifiant sert aussi de
 # nom de contrôle (« response » porte l'historique, déjà créé plus haut).
@@ -387,6 +389,8 @@ class AssistantPalette:
         self.active_tab = self._restore_tab(shell)
         self._bottom_height = 0        # ajusté par le redimensionnement
         self._current_exchange = []    # tour en cours, affiché en tête du fil
+        self._progress = None          # jauge du run en cours
+        self._pulse = None             # thread d'animation de la jauge
         self._width = 0                # largeur courante (0 = pas encore mesurée)
         self._height = 0
         self._base_bottom_h = 0        # hauteur de zone basse au premier layout
@@ -1071,6 +1075,9 @@ class AssistantPalette:
         self._cancel = threading.Event()
         self._delta_buffer.reset()
         self._current_exchange = []    # nouvel échange : le précédent est persisté
+        self._progress = RunProgress()
+        self._set_input_enabled(False)
+        self._start_pulse()
         self._set_send_label(running=True)
         # La réponse arrive dans l'Historique : si l'utilisateur regarde un
         # autre onglet, il ne verrait RIEN se produire. On bascule donc pour lui.
@@ -1111,6 +1118,8 @@ class AssistantPalette:
             self.busy = False
             self._cancel = None
             self._worker = None
+            self._stop_pulse()
+            self._set_input_enabled(True)
             self._set_send_label(running=False)
 
     def _run_pipeline(self, preset, prompt_text, ctx, shown):
@@ -1133,7 +1142,8 @@ class AssistantPalette:
             observer=_JournalObserver(self),
             conversation=self.conversation,
             cancel_event=self._cancel,
-            dispatcher=self.dispatcher)
+            dispatcher=self.dispatcher,
+            progress=self._progress)
 
         extra, user_prompt, sink = self._prepare_agentic_run(preset, prompt_text, ctx)
         self._append_response("MIrAI : ")
@@ -1174,6 +1184,54 @@ class AssistantPalette:
         self.dispatcher.post(
             lambda: self._models["prompt"].__setattr__("Text", ""))
         self.set_status("Terminé", tone="success")
+
+    def _set_input_enabled(self, enabled):
+        """Grise le champ de saisie et les chips pendant un run.
+
+        Un champ qui reste actif pendant le travail invite à retaper une
+        demande qui sera refusée par le drapeau `busy` — sans que rien ne
+        l'explique. Le griser dit la même chose, visuellement.
+        """
+        def _apply():
+            for name in ("prompt", *self._chip_names):
+                model = self._models.get(name)
+                if model is None:
+                    continue
+                try:
+                    model.Enabled = enabled
+                except Exception:
+                    pass          # certains modèles n'exposent pas Enabled
+            prompt = self._models.get("prompt")
+            if prompt is not None:
+                try:
+                    prompt.BackgroundColor = (dsfr.TOKENS["bg_contrast"] if enabled
+                                              else dsfr.TOKENS["bg_alt"])
+                except Exception:
+                    pass
+        self.dispatcher.post(_apply)
+
+    def _start_pulse(self):
+        """Anime la jauge tant que le run dure — la seule preuve visible que
+        quelque chose se passe sur une opération longue."""
+        self._stop_pulse()
+        stop = threading.Event()
+
+        def _tick():
+            while not stop.wait(PULSE_INTERVAL_S):
+                progress = self._progress
+                if progress is None:
+                    return
+                self.set_status(progress.render(), tone="neutral")
+
+        thread = threading.Thread(target=_tick, daemon=True, name="mirai-pulse")
+        self._pulse = (thread, stop)
+        thread.start()
+
+    def _stop_pulse(self):
+        pulse = self._pulse
+        self._pulse = None
+        if pulse is not None:
+            pulse[1].set()
 
     def _set_send_label(self, running):
         """Bascule Envoyer ⇄ Arrêter.

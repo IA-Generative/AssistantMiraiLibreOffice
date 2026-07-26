@@ -72,6 +72,14 @@ def get_document_map(ctx, args):
         # paragraphes, le modèle ignorant combien il y en avait.
         body += (f"\n[FIN DU DOCUMENT — {index} paragraphes au total, "
                  f"de [P1] à [P{index}]]")
+    # Rappel d'action DANS le résultat de l'outil. Une consigne du prompt
+    # système se dilue ; celle-ci arrive juste avant que le modèle ne décide de
+    # son prochain coup. Sans elle, il lisait le document (iterations=2) puis
+    # répondait du texte, en laissant le document intact.
+    body += ("\n\nÉTAPE SUIVANTE OBLIGATOIRE : si la demande implique de "
+             "modifier le document, appelle MAINTENANT writer_replace_paragraphs "
+             "avec le texte réécrit. Ne réponds pas le texte modifié en clair — "
+             "il ne serait PAS appliqué au document.")
     return ToolResult(call_id="", ok=True, content=body or "(document vide)",
                       data={"paragraph_count": index, "truncated": truncated})
 

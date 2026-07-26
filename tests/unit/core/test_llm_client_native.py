@@ -1,12 +1,14 @@
 """Client LLM : assemblage natif fragmenté, rétention JSON, détection auto."""
 
 import io
-import threading
 import urllib.error
 
 from src.mirai.core.llm_client import LLMClient
 from tests.stubs.fake_shell import (
-    FakeShell, FakeSSEResponse, native_tool_call_chunks, text_chunks,
+    FakeShell,
+    FakeSSEResponse,
+    native_tool_call_chunks,
+    text_chunks,
 )
 
 TOOLS = [{"type": "function",
@@ -203,8 +205,8 @@ def test_encode_tool_exchange_native():
 
 
 def test_encode_tool_exchange_json():
-    from src.mirai.core.tool_calls import ToolCall, ToolResult
     from src.mirai.core.llm_client import StepResult
+    from src.mirai.core.tool_calls import ToolCall, ToolResult
     client = LLMClient(FakeShell(config={"llm_tool_mode": "json"}))
     raw = '{"tool_calls": [{"name": "t", "arguments": {}}]}'
     step = StepResult(tool_calls=[ToolCall(id="call_0", name="t", arguments={})],

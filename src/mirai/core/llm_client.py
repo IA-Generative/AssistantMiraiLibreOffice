@@ -16,6 +16,7 @@ import json
 import re
 
 from . import sse_pump
+from .progress import NullProgress
 from .text_filters import strip_think_blocks
 from .tool_calls import ToolCall
 
@@ -135,7 +136,8 @@ class LLMClient:
         detected = str(self.shell.get_config("llm_tool_mode_detected", "") or "")
         return "json" if detected == "json" else "native"
 
-    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None):
+    def step(self, messages, tools=None, on_text_delta=None, cancel_event=None,
+             progress=None):
         """Un aller LLM. Avec `tools`, peut retourner des tool_calls ;
         sans tools, streaming texte intégral (aucune rétention).
 
@@ -145,7 +147,7 @@ class LLMClient:
         """
         mode = self.effective_mode() if tools else "text"
         result = self._run_step(messages, tools, on_text_delta, mode,
-                                cancel_event=cancel_event)
+                                cancel_event=cancel_event, progress=progress)
 
         # Auto-détection : le relais rejette la requête portant des tools →
         # bascule définitive en mode JSON et re-tentative immédiate.
@@ -158,7 +160,7 @@ class LLMClient:
                 pass
             mode = "json"
             result = self._run_step(messages, tools, on_text_delta, mode,
-                                    cancel_event=cancel_event)
+                                    cancel_event=cancel_event, progress=progress)
 
         # 401 : jeton d'accès absent, expiré ou révoqué. Une seule reprise, avec
         # la récupération exécutée DANS le thread réseau (recover_auth passe par
@@ -168,11 +170,13 @@ class LLMClient:
         if result.error == "http_401" and not cancelled:
             self.shell.log("[llm] 401 — tentative de récupération du jeton d'accès")
             result = self._run_step(messages, tools, on_text_delta, mode,
-                                    recover_auth=True, cancel_event=cancel_event)
+                                    recover_auth=True, cancel_event=cancel_event,
+                                    progress=progress)
         return result
 
     def _run_step(self, messages, tools, on_text_delta, mode, recover_auth=False,
-                  cancel_event=None):
+                  cancel_event=None, progress=None):
+        progress = progress or NullProgress()
         extra_body = None
         if tools and mode == "native":
             extra_body = {"tools": tools, "tool_choice": "auto"}
@@ -219,6 +223,12 @@ class LLMClient:
 
         def _on_event(event):
             chunk = event.chunk
+            # Le relais peut envoyer un bloc `usage` en fin de flux — on le LIT
+            # s'il vient, sans jamais le réclamer : ajouter `stream_options` au
+            # corps ferait rejeter la requête par certains relais.
+            usage = chunk.get("usage")
+            if isinstance(usage, dict) and usage.get("completion_tokens"):
+                progress.exact_tokens(int(usage["completion_tokens"]))
             choices = chunk.get("choices") or []
             if not choices:
                 return
@@ -237,7 +247,13 @@ class LLMClient:
                     slot["arguments"] += function["arguments"]
             content = delta.get("content")
             if content:
+                progress.on_text(content)
                 _handle_text(content)
+            reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+            if reasoning:
+                # Le modèle « réfléchit » : rien à afficher dans le document,
+                # mais l'utilisateur doit voir que ça travaille.
+                progress.on_reasoning(reasoning)
             if choice.get("finish_reason"):
                 finish[0] = choice["finish_reason"]
 

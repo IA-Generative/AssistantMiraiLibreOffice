@@ -87,6 +87,22 @@ Principe clé (petits modèles) : **la prose longue ne transite jamais en
 argument JSON** — elle est streamée en réponse finale vers un *sink*
 (`sinks.py` : PaletteSink, WriterInsertSink, WriterReplaceSink, CalcCellSink).
 
+**Règle de portée : l'IHM annonce, le modèle n'infère pas.** L'orchestrateur
+préfixe chaque demande d'une ligne de PORTÉE calculée sur le document —
+sélection courante, ou « aucune sélection ⇒ document entier, de [P1] au
+dernier ». Ce qui va de soi pour l'utilisateur n'est visible nulle part pour le
+modèle. Le rappel d'action vit en outre DANS le résultat de l'outil de lecture,
+là où il arrive juste avant la décision, plutôt que dilué dans le préambule.
+Diagnostic : `assistant.iterations` = 1 ⇒ aucun outil appelé ; = 2 ⇒ lecture
+sans écriture.
+
+**Jauge d'activité — `core/progress.py`.** Pendant un run : champ de saisie et
+chips grisés, rotor braille rafraîchi ~200 ms, phase courante (Réflexion /
+Rédaction / Action sur le document), compteur de jetons et chronomètre. Le
+compteur est une estimation locale (caractères ÷ 4) **marquée `~`**, remplacée
+par la valeur exacte si le relais envoie spontanément un bloc `usage` — jamais
+réclamé, car `stream_options` fait rejeter la requête par certains relais.
+
 **Règle d'écriture : jamais de `setString` sur une plage multi-paragraphes.**
 LibreOffice applique alors le style du PREMIER paragraphe à tout le bloc — un
 document titre + corps repart intégralement en style titre. On écrit donc

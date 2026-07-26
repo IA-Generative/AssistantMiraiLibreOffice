@@ -96,7 +96,7 @@ class FakeDoc:
 
     def __init__(self, paragraphs, styles=None):
         styles = list(styles or ["Standard"] * len(paragraphs))
-        self.items = [FakeParagraph(t, s) for t, s in zip(paragraphs, styles)]
+        self.items = [FakeParagraph(t, s) for t, s in zip(paragraphs, styles, strict=True)]
         self.Text = FakeText(self)
 
     @property

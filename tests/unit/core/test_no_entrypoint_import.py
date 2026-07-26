@@ -27,7 +27,7 @@ def _python_files():
 def test_core_and_ui_never_mention_entrypoint():
     offenders = []
     for path in _python_files():
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             if "entrypoint" in fh.read():
                 offenders.append(os.path.relpath(path, _REPO_ROOT))
     assert offenders == [], (
@@ -43,7 +43,7 @@ def test_tools_never_import_ui():
             if not name.endswith(".py"):
                 continue
             path = os.path.join(root, name)
-            with open(path, "r", encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 content = fh.read()
             if "from ..ui" in content or "mirai.ui" in content:
                 offenders.append(os.path.relpath(path, _REPO_ROOT))
@@ -63,7 +63,7 @@ def test_core_and_ui_never_pump_events():
     # règle doit rester permise, seul un accès réel à l'attribut est fautif.
     offenders = []
     for path in _python_files():
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             tree = ast.parse(fh.read(), filename=path)
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute) and node.attr == "processEventsToIdle":

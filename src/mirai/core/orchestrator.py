@@ -10,6 +10,7 @@ import dataclasses
 import time
 
 from . import prompts
+from .progress import NullProgress
 
 
 class RunObserver:
@@ -71,7 +72,8 @@ class Orchestrator:
     """
 
     def __init__(self, llm, registry, ctx, observer=None, conversation=None,
-                 max_iterations=None, cancel_event=None, dispatcher=None):
+                 max_iterations=None, cancel_event=None, dispatcher=None,
+                 progress=None):
         self.llm = llm
         self.registry = registry
         self.ctx = ctx
@@ -79,6 +81,7 @@ class Orchestrator:
         self.conversation = conversation
         self.cancel_event = cancel_event
         self.dispatcher = dispatcher
+        self.progress = progress or NullProgress()
         if max_iterations is None:
             try:
                 max_iterations = int(ctx.shell.get_config(
@@ -100,7 +103,8 @@ class Orchestrator:
         messages = [{"role": "system", "content": system_prompt}]
         if self.conversation is not None:
             messages.extend(self.conversation.context_messages())
-        messages.append({"role": "user", "content": user_prompt})
+        messages.append({"role": "user",
+                         "content": self._with_scope(user_prompt)})
         tools = self.registry.openai_tools(self.ctx.app)
 
         self.observer.on_run_start(self.llm.effective_mode())
@@ -112,7 +116,8 @@ class Orchestrator:
                                      reason="cancelled", text="Arrêté.")
                 step = self.llm.step(messages, tools=tools,
                                      on_text_delta=sink.stream_delta,
-                                     cancel_event=self.cancel_event)
+                                     cancel_event=self.cancel_event,
+                                     progress=self.progress)
                 if step.error:
                     message = error_message(step.error)
                     self.observer.on_error(step.error, message)
@@ -123,6 +128,7 @@ class Orchestrator:
                     return RunResult(ok=False, iterations=iteration + 1,
                                      reason="cancelled", text="Arrêté.")
                 if step.tool_calls:
+                    self.progress.set_phase("Action sur le document")
                     self.observer.on_tool_calls(step.tool_calls)
                     results = self._execute_tool_calls(step.tool_calls)
                     messages.extend(self.llm.encode_tool_exchange(step, results))
@@ -152,6 +158,42 @@ class Orchestrator:
                 "assistant.ok": str(result.ok).lower(),
                 "assistant.duration_ms": str(int((time.monotonic() - started) * 1000)),
             })
+
+    def _with_scope(self, user_prompt):
+        """Préfixe la demande par sa PORTÉE, lue sur le document.
+
+        Une consigne générale du prompt système se dilue : le modèle lisait le
+        document puis répondait du texte, sans jamais écrire. Annoncer la portée
+        juste avant la demande — « aucune sélection, donc document entier » —
+        supprime l'ambiguïté au moment où elle compte.
+        """
+        try:
+            scope = self._scope_line()
+        except Exception:
+            return user_prompt
+        return f"{scope}\n\n{user_prompt}" if scope else user_prompt
+
+    def _scope_line(self):
+        selected = ""
+        try:
+            selected = self.ctx.on_main(
+                lambda: self.ctx.controller.getSelection()
+                .getByIndex(0).getString()) or ""
+        except Exception:
+            selected = ""
+
+        if selected.strip():
+            return (f"PORTÉE : la sélection courante ({len(selected)} caractères). "
+                    "N'agis que sur elle.")
+        if self.ctx.app == "writer":
+            return ("PORTÉE : aucune sélection — la demande porte sur le "
+                    "DOCUMENT ENTIER. Commence par lire sa carte "
+                    "(writer_get_document_map), puis APPLIQUE la modification "
+                    "avec writer_replace_paragraphs de [P1] au dernier "
+                    "paragraphe. Répondre le texte réécrit sans appeler l'outil "
+                    "ne modifierait rien.")
+        return ("PORTÉE : aucune plage sélectionnée — appuie-toi sur la vue "
+                "d'ensemble de la feuille avant d'agir.")
 
     # ── Exécution des outils ────────────────────────────────────────────
 

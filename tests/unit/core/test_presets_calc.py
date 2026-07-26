@@ -2,8 +2,8 @@
 (cellule fusionnée sous la sélection), formule agentique (via orchestrateur).
 Assertions portées de menu_actions/calc.py."""
 
-from src.mirai.core.context import ToolContext
 from src.mirai.core import presets
+from src.mirai.core.context import ToolContext
 from src.mirai.core.llm_client import LLMClient
 from src.mirai.core.orchestrator import Orchestrator
 from src.mirai.core.registry import ToolRegistry
@@ -11,7 +11,10 @@ from src.mirai.core.sinks import PaletteSink
 from src.mirai.core.tools import register_all
 from tests.stubs.fake_docs import FakeCalcDoc, FakeCalcSheet
 from tests.stubs.fake_shell import (
-    FakeShell, FakeSSEResponse, native_tool_call_chunks, text_chunks,
+    FakeShell,
+    FakeSSEResponse,
+    native_tool_call_chunks,
+    text_chunks,
 )
 
 
