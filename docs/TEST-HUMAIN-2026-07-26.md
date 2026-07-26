@@ -6,7 +6,7 @@ Ce document sert à **vérifier que l'assistant fonctionne**, en le faisant marc
 utilisateur normal. Aucune compétence technique n'est nécessaire : chaque scénario dit quoi
 faire, ce que vous devez voir, et vous cochez.
 
-Comptez environ **45 minutes**. Faites les scénarios dans l'ordre : certains préparent les
+Comptez environ **une heure**. Faites les scénarios dans l'ordre : certains préparent les
 suivants.
 
 > **Une seule chose à retenir avant de commencer** : si un scénario ne se passe pas comme
@@ -187,6 +187,76 @@ L'assistant doit AGIR, pas se contenter de vous décrire ce qu'il ferait. Un seu
 > C'est le scénario qui a révélé un défaut : l'assistant répondait un texte
 > expliquant la restructuration en laissant le document intact. Si vous revoyez
 > ce comportement, notez-le — c'est important.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 3.9 Demander la même chose avec d'autres mots
+
+**Faites :** sur un document de plusieurs paragraphes, **sans rien sélectionner**,
+tapez : `reduit à 2 paragraphes. reformate en poème en alexandrin.` puis **Entrée**.
+Recommencez ensuite, sur un document neuf, avec : `aère ce texte` — puis avec
+`mets tout au passé simple`.
+
+**Vous devez voir :** dans les trois cas, le **document est modifié**. La formulation
+ne doit rien changer à la prise en compte : ce sont des ordres, quels que soient les
+verbes employés.
+
+**Faites ensuite l'inverse :** tapez une **question** — `Que penses-tu de ce texte ?`
+ou `Explique-moi ce paragraphe`.
+
+**Vous devez voir :** l'assistant **répond dans la fenêtre** et **ne touche pas** au
+document. C'est la distinction attendue : on modifie sur un ordre, on répond à une
+question.
+
+> Ce scénario a révélé un défaut : la reconnaissance reposait sur une liste de
+> verbes, et le premier prompt ci-dessus n'en contenait aucun — il ne produisait
+> rien. Si vous retrouvez une demande sans effet, **notez la formulation exacte**,
+> c'est elle qui compte.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 3.10 « Ajouter à la suite » plutôt que remplacer
+
+**Faites :** ouvrez l'assistant, **cochez** la case *Ajouter à la suite* près du bouton
+d'envoi. Puis, **avec une phrase sélectionnée**, demandez `Reformule plus simplement`.
+
+**Vous devez voir :** votre texte d'origine est **conservé**, et le résultat est ajouté
+**en dessous**, encadré par des marqueurs de la forme `---début-du-texte-modifié---`.
+
+**Refaites exactement la même chose sans rien sélectionner** (la demande porte alors sur
+tout le document).
+
+**Vous devez voir :** le même comportement — rien n'est écrasé, le résultat s'ajoute à la
+suite avec ses marqueurs.
+
+**Décochez enfin la case** et refaites les deux essais.
+
+**Vous devez voir :** cette fois le texte visé est **remplacé**, sans marqueurs. Fermez
+et rouvrez l'assistant : la case doit avoir **gardé** votre dernier choix.
+
+> Ce scénario a révélé deux défauts successifs : la case ne commandait qu'un seul des
+> chemins possibles, puis le cas « avec sélection » n'écrivait pas du tout dans le
+> document. Les quatre combinaisons ci-dessus (cochée/décochée × avec/sans sélection)
+> sont à faire **toutes les quatre** — c'est leur croisement qui a piégé.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
+
+### 3.11 Voir ce que l'assistant est en train de faire
+
+**Faites :** lancez une demande un peu longue sur tout le document. Pendant qu'elle
+tourne, observez le bas de la fenêtre, puis cliquez sur le petit **(i)**.
+
+**Vous devez voir :** pendant le travail, le champ de saisie est **grisé** et quelque
+chose **bouge** — un indicateur animé, le décompte des mots reçus, le temps écoulé.
+Le clic sur **(i)** ouvre une zone qui **reste ouverte** et que l'on peut **faire
+défiler** (elle montre le raisonnement du modèle, si celui-ci en produit). Un
+**second clic** la referme.
+
+Ouvrez ensuite l'onglet **Actions** en bas.
+
+**Vous devez voir :** la liste des opérations, chacune avec ✓ ou ✗ et sa durée. Une
+ligne `✗` avec un message parlant de `maximum` ou de `paramètre` est un **défaut à
+signaler**.
 
 ☐ Conforme ☐ Non conforme — *observations :* ______________________________
 
@@ -414,21 +484,49 @@ fin — ou un message d'erreur **en rouge** en cas de problème.
 
 ## 8 — Le menu MIrAI
 
+### 8.1 Chaque entrée fait quelque chose
+
 **Faites :** ouvrez le menu **🤖 MIrAI** et essayez chaque entrée, **dans Writer puis dans
 Calc**.
 
 | Entrée | Ce que vous devez voir | Writer | Calc |
 |---|---|---|---|
+| 🤖 Ouvrir l'assistant | La fenêtre de l'assistant s'ouvre | ☐ | ☐ |
 | ⚙️ Paramètres | La fenêtre de réglages s'ouvre | ☐ | ☐ |
-| ℹ️ À propos | Les informations de version s'affichent | ☐ | ☐ |
+| 🔬 Tester le modèle | Voir 8.2 ci-dessous | ☐ | ☐ |
 | 📚 Documentation | La documentation s'ouvre dans le navigateur | ☐ | ☐ |
-| 🌐 Site mirai | Le portail s'ouvre dans le navigateur | ☐ | ☐ |
+| ℹ️ À propos | Les informations de version s'affichent | ☐ | ☐ |
 
-> **Point de vigilance :** essayez aussi ces quatre entrées **sans rien avoir sélectionné**,
+> **Point de vigilance :** essayez aussi ces entrées **sans rien avoir sélectionné**,
 > et **dans Calc**. Dans la version précédente, plusieurs ne faisaient rien du tout dans ces
 > conditions. Elles doivent toutes fonctionner.
 
 *Observations :* ______________________________
+
+### 8.2 Savoir ce que le modèle sait faire
+
+**Faites :** menu **🤖 MIrAI** → **🔬 Tester le modèle**. Patientez quelques secondes.
+
+**Vous devez voir :** un message en **français courant** vous disant ce dont le modèle
+configuré est capable — par exemple qu'il sait enchaîner lecture et modification du
+document, ou au contraire qu'il ne le sait pas et que l'extension pilotera elle-même les
+modifications. Le message ne doit contenir **aucun terme technique** du genre
+`tool_call`.
+
+**Refaites la manipulation une seconde fois.**
+
+**Vous devez voir :** la réponse arrive **immédiatement** — le résultat est mémorisé pour
+ce modèle et ce serveur, il n'est pas remesuré à chaque fois.
+
+> À quoi ça sert : tous les modèles ne se valent pas pour modifier un document.
+> Certains lisent le texte puis s'arrêtent en croyant avoir fini — le document reste
+> alors intact **sans aucun message d'erreur**. Ce test permet de le savoir à l'avance
+> plutôt que de le découvrir sur un document important.
+>
+> Mesures faites le 26/07/2026 : `llama3.2` enchaîne correctement ; `gemma4:12b` lit
+> puis s'arrête ; `mistral` n'utilise pas les outils du tout.
+
+☐ Conforme ☐ Non conforme — *observations :* ______________________________
 
 ---
 
@@ -484,16 +582,23 @@ Précisez aussi votre **système** (macOS / Windows / Linux) et la **version de 
 |---|---|---|---|
 | Installation et connexion | 3 | | |
 | La fenêtre de l'assistant | 4 | | |
-| Actions Writer | 8 | | |
+| Actions Writer | 11 | | |
 | Menu du clic droit | 4 | | |
 | Actions Calc | 4 | | |
 | Pendant le travail | 3 | | |
 | Zone du bas et fenêtre | 6 | | |
 | Quand ça se passe mal | 3 | | |
-| Menu MIrAI | 8 | | |
-| **Total** | **43** | | |
+| Menu MIrAI | 11 | | |
+| **Total** | **49** | | |
 
 **Testeur :** ____________________  **Date :** ____________________
+
+**Les six scénarios prioritaires**, ajoutés après la session de recette du 26/07 et
+jamais encore déroulés par un humain : **3.9** (formulations variées), **3.10** (les
+quatre combinaisons d'« Ajouter à la suite »), **3.11** (retours visuels pendant le
+travail), **6bis.1** (les trois onglets affichent bien leur contenu), **6bis.4**
+(le redimensionnement agrandit les champs) et **8.2** (capacités du modèle). Si le
+temps manque, faites ceux-là.
 
 **Impression générale** (utilisable au quotidien ? gênant ? bloquant ?) :
 

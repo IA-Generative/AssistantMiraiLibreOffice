@@ -6,7 +6,7 @@
 
 ## En une phrase
 
-La suite de tests est **verte** (528 tests : 522 unitaires + 6 d'intégration), la palette
+La suite de tests est **verte** (556 tests : 550 unitaires + 6 d'intégration), la palette
 **s'ouvre en LibreOffice réel**, la chaîne d'authentification `/llm/v1` est vérifiée de bout
 en bout **contre les deux tiers** — DM local Ollama et DM Scaleway avec SSO Keycloak réel —
 et **10 des 22 constats** de qualification sont corrigés, les trois urgences comprises. Le
@@ -26,10 +26,16 @@ reste est listé plus bas, avec sa raison.
 | `323efd3` | **Threading** : `pump_events()` — pomper hors thread principal ne peut plus aborter | 433 ✅ |
 | `44efa5b` | **IHM (étapes 15→18)** : onglets, suggestions, redimensionnement, menu | 453 ✅ |
 | `df3a13d` | **Outils** : `writer_replace_paragraphs` + prompt « AGIS, NE DÉCRIS PAS » | 461 ✅ |
+| `49578e4` | **Intention** : détecter les questions, pas les ordres — fin de la liste de verbes | 486 ✅ |
+| `4c2badf` | **Capacités** : sonde à trois questions + menu « Tester le modèle » + cache | 512 ✅ |
+| `60970d1` | Le raisonnement passe de l'infobulle à une zone persistante et défilable | 522 ✅ |
+| `c2d2362` | « Ajouter à la suite » pilote **toutes** les destinations (`presets.text_sink`) | 536 ✅ |
+| `b875f10` | Le prompt libre **avec sélection** modifie enfin le document | 545 ✅ |
+| `f41d9e8` | Arguments numériques **ramenés dans les bornes** au lieu de faire échouer l'appel | 550 ✅ |
 
 Tags posés : `exp-jetable-v2-baseline`, `exp-jetable-v2-worker`.
 
-## Session de recette du 2026-07-26 — treize défauts trouvés à l'usage
+## Session de recette du 2026-07-26 — dix-neuf défauts trouvés à l'usage
 
 Aucun n'était visible en test automatisé. Ils se répartissent en trois familles,
 et c'est cette répartition qui est instructive pour la suite.
@@ -54,11 +60,25 @@ infobulle qui n'affiche que ce que le modèle n'émet pas. À chaque fois le cod
 multi-paragraphes applique le style du premier à tout ; et préserver les styles
 ne suffit pas s'il faut aussi exclure les titres de la plage réécrite.
 
+**Famille 4 — « ça ne fait rien », quatre fois, quatre causes différentes (4
+défauts).** C'est l'enseignement le plus coûteux de la journée. Une même plainte
+utilisateur a recouvert : un verbe absent de la liste de détection, un modèle qui
+lit mais n'enchaîne pas l'écriture, un réglage branché sur un seul chemin sur
+deux, et un chemin d'exécution qui n'écrivait nulle part dans le document. À
+chaque fois, la tentation était de supposer la cause de la fois précédente. À
+chaque fois, c'était une autre. La parade n'est pas un correctif mais une
+méthode : **mesurer quel chemin a été emprunté avant de chercher pourquoi il a
+échoué** — la télémétrie de preset et la présence (ou l'absence) de la trace
+« Document réécrit » y suffisent.
+
+**Famille 5 — la tolérance asymétrique d'un validateur (1 défaut).** Un
+dépassement de plafond numérique faisait échouer l'appel entier, alors qu'un
+dépassement de longueur de chaîne était tronqué en silence, douze lignes plus
+haut dans le même fichier.
+
 Les deux derniers relèvent de l'ergonomie pure : ordre du fil, taille de police.
 
 ### Détail
-
-
 
 Aucun n'était visible en test automatisé : il a fallu se servir du plugin.
 
@@ -75,8 +95,14 @@ Aucun n'était visible en test automatisé : il a fallu se servir du plugin.
 | titre écrasé par le corps | préserver le style de chaque paragraphe ne suffit pas : il faut exclure les titres de la plage | `doc_rewrite.body_range()` |
 | configuration corrompue sous écriture concurrente | `set_config` écrivait en place | écriture atomique (tmp + fsync + replace) |
 | « restructure le document en 2 paragraphes » sans effet | **le catalogue d'outils était incomplet** : `writer_get_document_map` numérotait des paragraphes que rien ne savait réécrire. Le modèle répondait du texte — `iterations=1`, `ok=true`, document intact | `writer_replace_paragraphs` + consigne « AGIS, NE DÉCRIS PAS » + bascule automatique sur l'onglet qui reçoit la réponse |
+| « reduit à 2 paragraphes. reformate en poème » sans effet | la bascule vers le chemin déterministe reposait sur une **liste de verbes** ; ni « réduis » ni « reformate » n'y figuraient. Une liste de ce genre n'est jamais complète | question inversée : on détecte les **questions** (ouverture interrogative), tout le reste est un ordre |
+| le document reste intact, sans erreur | le modèle **lit** le document puis répond du texte : il n'enchaîne pas vers l'écriture. Le run se termine en succès | sonde à trois questions (`capabilities.py`), verdict mis en cache par couple (endpoint, modèle), menu « Tester le modèle » |
+| raisonnement illisible au survol | l'infobulle s'évanouit au moindre mouvement : ni lecture longue ni défilement | zone persistante et défilable, ouverte/fermée par clic sur (i) |
+| « Ajouter à la suite » sans effet | la case n'était branchée que sur le preset « Modifier », retiré des chips deux heures plus tard. Chaque preset construisait sa destination dans son coin | point de passage unique `presets.text_sink` + deux tests d'architecture par introspection |
+| prompt libre **avec sélection** sans effet sur le document | le chemin déterministe n'était branché que sur « aucune sélection ⇒ document entier » ; avec sélection, la demande repartait en mode agentique, dont le sink par défaut est la **palette** | `_run_selection_rewrite`, symétrique du chemin document, passant par le même `text_sink` |
+| `✗ Lecture du document — paramètre 'max_chars' : maximum 20000` | le validateur **rejetait** un nombre hors bornes, alors qu'il **tronquait** une chaîne trop longue. Le modèle perdait un tour sur un paramètre de confort | valeurs ramenées dans les bornes, arrondi vers l'intérieur ; type invalide et `enum` hors liste restent refusés |
 
-Les cinq sont capitalisés dans le plan (pièges **n°23 à 25**) avec leur signature
+Tous sont capitalisés dans le plan (pièges **n°23 à 49**) avec leur signature
 de diagnostic, et la « règle de complétude du catalogue » ouvre désormais la
 checklist « ajouter un tool » d'`ARCHITECTURE.md`.
 
@@ -214,6 +240,33 @@ Ollama → `HTTP 200`, réponse `QUALIF-OK`, bloc `usage` renvoyé spontanément
 - La persistance du fil est vérifiée : `assistant_conversation.json`, 40 entrées,
   4,2 Ko, restauré à la réouverture (plafond 20 échanges / 100 Ko, troncature FIFO).
 
+**Mesuré, et qui décide du chemin d'exécution** — sonde de capacités sur trois
+modèles via Ollama, le 2026-07-26 :
+
+| Modèle | Accepte les outils | En appelle un | Enchaîne lecture → écriture |
+|---|:--:|:--:|:--:|
+| `llama3.2` | ✓ | ✓ | ✓ |
+| `gemma4:12b` | ✓ | ✓ | ✗ — lit puis s'arrête |
+| `mistral` | ✓ | ✗ | ✗ — répond du texte |
+
+Trois comportements distincts derrière ce qu'un seul drapeau (`llm_tool_mode`)
+prétendait résumer. Seule la troisième colonne détermine si le mode agentique
+peut modifier le document : sans elle, le run se termine en succès en laissant le
+document intact — exactement le « ça ne fait rien » de la famille 4.
+
+**Restant à constater par un humain**, après les correctifs de fin de journée :
+
+- L'affichage effectif des trois onglets (le correctif `setText` est vérifié par
+  relecture programmatique, pas à l'œil).
+- Le redimensionnement qui agrandit réellement les champs.
+- « Ajouter à la suite » avec ses marqueurs, **dans les deux portées** — sélection
+  et document entier. Les deux chemins partagent désormais `presets.text_sink` et
+  un test d'architecture le verrouille, mais seul l'usage le prouve.
+- L'absence de gel dans la durée (la pompe mesure 0,0 % de CPU au repos, ce qui
+  est un indice, pas une preuve d'usage prolongé).
+- Le journal des actions affichant `✓ Lecture du document` là où il affichait
+  `✗ … maximum 20000`.
+
 C'est précisément l'objet de `docs/TEST-HUMAIN-2026-07-26.md`.
 
 ## Incident du 2026-07-26 — le crash « latent » ne l'était pas
@@ -307,7 +360,7 @@ consécutives.
 
 ## Ce que cette journée apprend sur la méthode
 
-**Aucun de ces treize défauts n'a été trouvé par les tests.** Ils l'ont tous été
+**Aucun de ces dix-neuf défauts n'a été trouvé par les tests.** Ils l'ont tous été
 en se servant du plugin, et diagnostiqués par la mesure — jamais par déduction.
 Trois outils ont fait tout le travail :
 
@@ -333,12 +386,32 @@ deux échecs intermittents rencontrés cachaient de vraies courses — un thread
 rafraîchissement qui écrasait la configuration, et une écriture non atomique qui
 pouvait faire perdre les credentials en production.
 
+Troisième enseignement, apparu en fin de journée : **un symptôme déjà rencontré
+n'a pas la même cause que la fois précédente.** « Ça ne fait rien » est revenu
+quatre fois avec quatre causes indépendantes (famille 4). Ce symptôme-là est
+pauvre en information — il dit seulement que la chaîne s'est interrompue quelque
+part — et l'expérience acquise sur les occurrences précédentes devient un
+handicap : elle oriente vers une hypothèse déjà corrigée. La discipline qui en
+sort : **d'abord établir quel chemin a été emprunté** (télémétrie de preset,
+présence de la trace « Document réécrit », journal des actions), et seulement
+ensuite chercher la défaillance sur ce chemin-là.
+
+Quatrième enseignement : **chercher les incohérences de traitement entre
+contraintes voisines.** Le rejet sur `maximum` face à la troncature sur
+`maxLength` cohabitaient depuis l'origine, à douze lignes d'écart, chacune
+défendable prise isolément. Ce type de défaut ne se voit ni en relecture locale
+ni en test unitaire — chaque branche est correcte — mais seulement en se
+demandant *ces deux règles expriment-elles la même intention ? alors pourquoi ne
+se comportent-elles pas pareil ?*
+
 ## Ce que je ferais ensuite, dans cet ordre
 
 1. A-02 (une condition, gros effet), puis A-03.
 2. Étape 8 du plan : supprimer le cœur legacy — ce qui règle T-02/03/04 et une bonne part de
    Q-01/Q-02 par soustraction.
-3. Dérouler `TEST-HUMAIN-2026-07-26.md` en interactif et corriger ce qu'il révèle.
+3. Dérouler `TEST-HUMAIN-2026-07-26.md` en interactif et corriger ce qu'il révèle —
+   en priorité les scénarios 3.9 à 3.11 et 8.2, ajoutés après la session de recette
+   et **non encore validés par un humain**.
 4. Étape 20ter : découpage d'`entrypoint.py` en mixins.
 5. Factorisation `run_text_pipeline`, puis les sept autres cibles nommées.
 6. Trancher S-02 (Ed25519 pur-python, ou repli assumé et documenté).
