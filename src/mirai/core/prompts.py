@@ -40,6 +40,18 @@ def build_system(app, registry, mode, preset_extra=""):
         "de modifier quoi que ce soit ; fais des modifications minimales et "
         "précises ; si la demande est ambiguë, pose ta question en réponse "
         "finale (l'utilisateur répondra dans la conversation).",
+        # Sans cette consigne, une demande du type « restructure ce document en
+        # deux paragraphes » recevait une réponse en TEXTE décrivant la
+        # restructuration, sans que le document soit modifié. L'utilisateur
+        # voyait alors « il ne se passe rien ».
+        "AGIS, NE DÉCRIS PAS. Quand l'utilisateur demande une modification du "
+        "document — restructurer, réorganiser, réécrire, corriger, traduire —, "
+        "tu dois l'APPLIQUER avec les outils d'écriture. Ne te contente jamais "
+        "de renvoyer le texte modifié dans ta réponse en laissant le document "
+        "inchangé. Si rien n'est sélectionné, la demande porte sur le document "
+        "entier : lis-le avec l'outil de carte du document, puis écris avec "
+        "l'outil de remplacement de paragraphes. Ta réponse finale se borne à "
+        "dire, en une phrase, ce que tu as fait.",
     ]
     if mode in ("json", "auto"):
         catalog = registry.prompt_catalog(app)

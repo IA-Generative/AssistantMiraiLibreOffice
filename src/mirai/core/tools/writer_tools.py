@@ -54,6 +54,61 @@ def get_document_map(ctx, args):
                       data={"paragraph_count": index, "truncated": truncated})
 
 
+def _paragraphs(ctx):
+    """Liste les objets paragraphe du document, dans l'ordre."""
+    items = []
+    enumeration = ctx.model.Text.createEnumeration()
+    while enumeration.hasMoreElements():
+        para = enumeration.nextElement()
+        try:
+            if para.supportsService("com.sun.star.text.Paragraph"):
+                items.append(para)
+        except Exception:
+            continue
+    return items
+
+
+def replace_paragraphs(ctx, args):
+    """Remplace une plage de paragraphes [Pn]…[Pm] par un nouveau texte.
+
+    C'est le pendant écriture de `writer_get_document_map` : sans lui, le
+    modèle sait lire le document numéroté mais n'a aucun moyen d'agir dessus
+    hors sélection — il répond alors du texte au lieu de modifier le document.
+
+    Le texte de remplacement peut contenir des sauts de ligne : chacun crée un
+    paragraphe. C'est ce qui permet « restructure ce document en deux
+    paragraphes ».
+    """
+    start = int(args["start"])
+    end = int(args.get("end", start))
+    text = str(args["text"])
+    if start < 1 or end < start:
+        return ToolResult(call_id="", ok=False, content="",
+                          error=f"plage de paragraphes invalide : {start}..{end}")
+
+    paragraphs = _paragraphs(ctx)
+    if start > len(paragraphs):
+        return ToolResult(
+            call_id="", ok=False, content="",
+            error=f"le document ne contient que {len(paragraphs)} paragraphe(s)")
+    end = min(end, len(paragraphs))
+
+    ctx.undo_begin("Réécriture de paragraphes")
+    body = ctx.model.Text
+    # Un curseur qui couvre du DÉBUT du premier paragraphe à la FIN du dernier :
+    # setString() sur cette étendue remplace le bloc d'un seul geste, et les
+    # « \n » du texte deviennent de vrais paragraphes.
+    cursor = body.createTextCursorByRange(paragraphs[start - 1].getStart())
+    cursor.gotoRange(paragraphs[end - 1].getEnd(), True)
+    cursor.setString(text)
+
+    replaced = end - start + 1
+    return ToolResult(
+        call_id="", ok=True,
+        content=f"{replaced} paragraphe(s) remplacé(s) par {len(text)} caractères.",
+        data={"replaced": replaced, "start": start, "end": end})
+
+
 def replace_selection(ctx, args):
     text = args["text"]
     rng = _selection_range(ctx)
@@ -135,6 +190,25 @@ def register(registry):
             "max_chars": {"type": "integer", "default": 6000, "minimum": 500, "maximum": 20000},
         }},
         handler=get_document_map, apps=("writer",),
+    ))
+    registry.register(ToolSpec(
+        name="writer_replace_paragraphs",
+        description=(
+            "Remplace les paragraphes [Pstart] à [Pend] (numéros donnés par "
+            "writer_get_document_map) par un nouveau texte. C'est L'OUTIL à "
+            "utiliser pour restructurer, réorganiser ou réécrire tout ou partie "
+            "du document quand rien n'est sélectionné. Les sauts de ligne du "
+            "texte créent de nouveaux paragraphes."),
+        parameters={"type": "object", "properties": {
+            "start": {"type": "integer", "minimum": 1,
+                      "description": "Numéro du premier paragraphe à remplacer (1 = [P1])."},
+            "end": {"type": "integer", "minimum": 1,
+                    "description": "Numéro du dernier paragraphe inclus. Égal à start "
+                                   "pour n'en remplacer qu'un."},
+            "text": {"type": "string",
+                     "description": "Texte de remplacement ; « \\n » sépare les paragraphes."},
+        }, "required": ["start", "text"]},
+        handler=replace_paragraphs, apps=("writer",),
     ))
     registry.register(ToolSpec(
         name="writer_replace_selection",

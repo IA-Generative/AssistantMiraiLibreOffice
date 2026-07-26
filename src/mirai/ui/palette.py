@@ -1038,6 +1038,10 @@ class AssistantPalette:
         self._cancel = threading.Event()
         self._delta_buffer.reset()
         self._set_send_label(running=True)
+        # La réponse arrive dans l'Historique : si l'utilisateur regarde un
+        # autre onglet, il ne verrait RIEN se produire. On bascule donc pour lui.
+        if self.active_tab != "response":
+            self.select_tab("response")
         self.set_status("L'assistant travaille…")
         shown = prompt_text if preset is None else (
             preset.label + ((" — " + prompt_text) if prompt_text else ""))

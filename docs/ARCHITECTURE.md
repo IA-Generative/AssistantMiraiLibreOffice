@@ -1,6 +1,6 @@
 # Architecture — Démonstrateur « moteur MCP interne + palette universelle »
 
-> ⚠️ Branche `exp-jetable/demonstrateur-moteur-mcp` — **expérimentation jetable**,
+> ⚠️ Branche `exp-jetable/demonstrateur-v2` — **expérimentation jetable**,
 > ne pas merger vers master. Ce document est la carte pour qu'un humain **et**
 > un assistant de codage puissent reprendre le code sans archéologie.
 
@@ -15,9 +15,9 @@
              │ trigger("OpenAssistant") → import paresseux
 ┌────────────▼───────────────┐   ┌───────────────────────────┐
 │ core/entry.py (le pont)    │──▶│ ui/palette.py (DSFR)      │
-│ MainJobShell(job)          │   │ chips · prompt · fil de   │
-└────────────┬───────────────┘   │ conversation · journal    │
-             │ ShellServices     │ d'actions (repliable)     │
+│ MainJobShell(job)          │   │ chips · prompt · sélection│
+└────────────┬───────────────┘   │ zone basse à onglets :    │
+             │ ShellServices     │ Historique/Suggest./Actions│
 ┌────────────▼───────────────────┴───────────────────────────┐
 │ MOTEUR (core/) — jamais d'import de la coquille (testé)    │
 │ registry (tools MCP-like) · orchestrator (boucle agentique)│
@@ -68,6 +68,7 @@
 |---|---|---|---|
 | writer_get_selection | W | | texte sélectionné |
 | writer_get_document_map | W | | doc en paragraphes numérotés [Pn] |
+| writer_replace_paragraphs | W | ✔ | réécrit [Pstart]…[Pend] ; `\n` = nouveaux paragraphes |
 | writer_replace_selection | W | ✔ | remplace la sélection (court) |
 | writer_insert_text | W | ✔ | insère après sélection / fin de doc |
 | writer_find_replace | W | ✔ | paires find/replace exactes |
@@ -86,13 +87,31 @@ Principe clé (petits modèles) : **la prose longue ne transite jamais en
 argument JSON** — elle est streamée en réponse finale vers un *sink*
 (`sinks.py` : PaletteSink, WriterInsertSink, WriterReplaceSink, CalcCellSink).
 
+**Règle de complétude du catalogue.** Tout outil de LECTURE doit avoir son
+pendant d'ÉCRITURE à la même granularité, sinon le modèle sait décrire ce
+qu'il faudrait faire sans pouvoir le faire — et l'utilisateur voit « il ne se
+passe rien » alors que le run se termine en succès. C'est ce qui manquait à
+`writer_get_document_map` : il numérotait les paragraphes que rien ne savait
+réécrire, si bien qu'une demande de restructuration sans sélection recevait une
+réponse en texte et laissait le document intact.
+Symptôme à reconnaître : télémétrie `iterations=1`, `ok=true`, document
+inchangé ⇒ **aucun outil appelé** — regarder le catalogue avant le moteur.
+
+Le prompt système porte la contrepartie : *« AGIS, NE DÉCRIS PAS »* — appliquer
+la modification avec les outils d'écriture, et traiter l'absence de sélection
+comme « la demande porte sur le document entier ».
+
 ## Presets (les chips de la palette) — `core/presets.py`
 
 - **pipeline** (Python pilote, iso-fonctionnalité stricte avec l'historique,
-  marqueurs `---début-du-…---` conservés) : Continuer, Résumer, Simplifier,
+  marqueurs `---début-du-…---` conservés) : Résumer, Simplifier,
   Raccourcir/Allonger, Transformer (Calc), Analyser (Calc).
-- **agentique** (le LLM pilote les tools) : Modifier (Writer), Formule (Calc —
-  contexte de feuille + retrieval `config/calc-functions.json`), prompt libre.
+- **agentique** (le LLM pilote les tools) : Formule (Calc — contexte de feuille
+  + retrieval `config/calc-functions.json`) et le **prompt libre**, qui couvre
+  désormais les demandes documentaires (« restructure en deux paragraphes »)
+  grâce à `writer_replace_paragraphs`.
+- Les chips « Continuer » et « Modifier » ont été retirées : le prompt libre
+  les couvre, et une rangée courte tient sur une seule ligne (piège n°17).
 - Télémétrie : spans historiques conservés (`SummarizeSelection`, …) avec
   `{"via": "palette"}` + nouveaux spans `assistant.open/run/tool`.
 
@@ -118,6 +137,12 @@ argument JSON** — elle est streamée en réponse finale vers un *sink*
 (cap ~4 000 caractères).
 
 ## Ajouter un tool en 5 étapes
+
+> Avant d'écrire quoi que ce soit, poser les trois questions de complétude :
+> existe-t-il (a) une lecture pour se repérer, (b) une écriture de même
+> granularité, (c) une consigne du prompt système qui impose d'utiliser la
+> seconde ? Répondre « non » à l'une des trois donne un assistant qui commente
+> au lieu d'agir.
 
 1. Handler `def mon_tool(ctx, args) -> ToolResult` dans `core/tools/…`.
 2. `registry.register(ToolSpec(name="app_mon_tool", description=…, parameters=

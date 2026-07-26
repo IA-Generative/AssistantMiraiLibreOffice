@@ -566,6 +566,14 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     - **Ne jamais mélanger écriture directe et écriture postée sur le même contrôle.** Mettre le libellé à « Arrêter » en direct (thread principal) puis le remettre via `post()` fait diverger l'affichage de l'état réel dès que le post se perd. Un seul chemin : tout poster, y compris depuis le thread principal.
     - **Polices : viser 6-8 pt, pas 9-10.** Sur Retina les tailles rendent bien plus grand qu'attendu ; 10 pt paraît le double du raisonnable. Le layout mesuré corrige les POSITIONS, pas la taille perçue du texte.
 
+25. **🚨 Un moteur de tools n'agit que s'il a l'outil pour agir — et le prompt qui l'y oblige.** Vécu le 2026-07-26 : « peux-tu restructurer le document en 2 paragraphes ? » sans sélection ne produisait RIEN. La télémétrie disait pourtant `preset=free`, `iterations=1`, `ok=true` : le modèle avait répondu du **texte** décrivant la restructuration, sans toucher au document.
+    **Deux causes, toutes deux nécessaires à corriger :**
+    - **Il manquait l'outil.** `writer_get_document_map` numérote les paragraphes `[P1] [P2]…`, mais AUCUN outil ne savait les réécrire : `writer_replace_selection` exige une sélection, `writer_find_replace` exige des correspondances exactes (fragile sur du texte long). Le modèle n'avait donc littéralement aucun moyen d'appliquer la demande. D'où `writer_replace_paragraphs(start, end, text)` — le pendant écriture de la carte, dont les `\n` créent de vrais paragraphes.
+    - **Le prompt système n'exigeait pas d'agir.** Ajouter une consigne explicite « AGIS, NE DÉCRIS PAS : applique la modification avec les outils d'écriture, ne renvoie pas le texte modifié en laissant le document inchangé ; sans sélection, la demande porte sur le document entier ».
+    **Règle générale, à appliquer à chaque nouvelle capacité** : pour toute famille d'action envisagée, vérifier qu'il existe (a) un outil de LECTURE pour se repérer, (b) un outil d'ÉCRITURE de même granularité, et (c) une consigne qui impose l'usage du second. Un outil de lecture sans son pendant écriture produit un assistant qui commente au lieu d'agir — et le symptôme observé est, encore une fois, « il ne se passe rien ».
+    **Diagnostic** : `iterations=1` + `ok=true` + document inchangé ⇒ le modèle n'a appelé aucun outil. Regarder d'abord le catalogue d'outils, pas le moteur.
+    **Corollaire d'IHM** : la réponse texte partait dans l'onglet Historique ; si l'utilisateur regardait un autre onglet, il ne voyait rien non plus. Un run bascule désormais automatiquement sur l'onglet qui reçoit la sortie.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.
