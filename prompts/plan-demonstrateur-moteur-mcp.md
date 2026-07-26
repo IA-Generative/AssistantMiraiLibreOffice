@@ -644,6 +644,13 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     Les trois réponses étant positives, il ne restait que le rendu.
     **Parade** : écrire dans le modèle ET appeler `setText()` sur le CONTRÔLE. Le modèle porte l'état, le contrôle l'affiche. Un helper unique (`_set_text`) pour toutes les zones de texte, plutôt que des `model.Text = …` disséminés.
 
+44. **🚨 Détecter une intention par liste de mots-clés est structurellement fragile — inverser la question.** La bascule vers le chemin déterministe de réécriture reposait sur une liste de verbes (« réécris », « restructure », « reformule »…). Le prompt réel *« reduit à 2 paragraphes. reformate en poème en alexandrin. »* n'a rien produit : ni « réduis » ni « reformate » n'y figuraient. Chaque oubli redonne exactement le symptôme qu'on cherchait à éliminer — une action sans effet — et la liste ne sera jamais complète : « aère », « convertis », « supprime les répétitions », « mets au passé simple »…
+    **Renversement** : sans sélection, la vraie question n'est pas « est-ce une demande de modification ? » (ensemble infini) mais « est-ce une demande d'INFORMATION ? » (ensemble fermé et reconnaissable). Tout ce qui n'est pas une question est un ordre portant sur le document.
+    **Deux pièges dans le renversement lui-même** :
+    - **l'ordre poli finit par un point d'interrogation** : « peux-tu restructurer le document ? » est un ORDRE. Seule l'OUVERTURE distingue — se fier au « ? » ferait retomber dans l'inaction ;
+    - **un mot isolé n'est pas un ordre** : « bonjour », « merci » ne doivent pas déclencher une réécriture. Un plancher de trois mots suffit.
+    **Règle générale** : quand une classification sépare un ensemble infini d'un ensemble fini, énumérer le fini. Et choisir le défaut du côté où l'erreur coûte le moins — ici réécrire à tort (annulable d'un Ctrl+Z) plutôt que de ne rien faire (indiagnosticable pour l'utilisateur).
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.

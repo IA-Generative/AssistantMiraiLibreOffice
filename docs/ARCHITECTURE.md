@@ -115,6 +115,12 @@ alors qu'une fonction texte et le résultat est appliqué par le code
 (`core/doc_rewrite.py`, même patron que les presets pipeline). Le mode agentique
 reste pour l'exploration et les demandes ouvertes.
 
+**Bascule vers le chemin déterministe : on énumère les QUESTIONS, pas les
+ordres.** Sans sélection, tout ce qui n'est pas une demande d'information est
+un ordre portant sur le document. Énumérer les verbes de modification est sans
+fin ; les questions forment un ensemble fermé. Attention à l'ordre poli
+(« peux-tu restructurer… ? ») : seule l'ouverture compte, pas le « ? ».
+
 **Règle de portée : l'IHM annonce, le modèle n'infère pas.** L'orchestrateur
 préfixe chaque demande d'une ligne de PORTÉE calculée sur le document —
 sélection courante, ou « aucune sélection ⇒ document entier, de [P1] au

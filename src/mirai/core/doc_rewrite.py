@@ -20,45 +20,46 @@ from __future__ import annotations
 
 import re
 
-# Une demande de modification du document. On reste large : le coût d'un faux
-# positif est faible (le modèle réécrit à l'identique), celui d'un faux négatif
-# est une action sans effet — ce qu'on cherche justement à éliminer.
-_REWRITE_VERBS = (
-    "réécri", "reecri", "récri", "recri", "réécrit", "restructur", "restructure",
-    "réorganis", "reorganis", "reformul", "réorganise", "condens", "fusionn",
-    "découp", "decoup", "divis", "scind", "résum", "resum", "raccourci",
-    "allong", "développ", "developp", "corrig", "traduis", "traduit",
-    "simplifi", "clarifi", "harmonis", "uniformis", "réviser", "revois",
-    "mets à jour", "mets a jour", "transforme", "adapte", "rends",
+# Détecter les DEMANDES D'INFORMATION plutôt que les demandes de modification.
+# Énumérer les verbes de modification est sans fin — « réduis », « reformate »,
+# « aère », « convertis »… — et chaque oubli redonne une action sans effet.
+# Les questions, elles, forment un ensemble fermé et reconnaissable : tout ce
+# qui n'en est pas une, sans sélection, est un ordre portant sur le document.
+_QUESTION_OPENERS = (
+    "qu'", "que ", "quel", "quelle", "quels", "quelles", "qui ", "quoi",
+    "où ", "ou est", "quand", "pourquoi", "comment", "combien",
+    "est-ce", "y a-t-il", "y a t il", "peux-tu me dire", "peux tu me dire",
+    "dis-moi", "dis moi", "explique", "explique-moi", "décris", "decris",
+    "de quoi", "en quoi", "à quoi", "a quoi", "sais-tu", "connais-tu",
 )
 
-_DOC_WORDS = ("document", "article", "texte", "page", "note", "courrier",
-              "rapport", "ensemble", "tout")
+# Un mot isolé (« bonjour », « merci ») n'est pas un ordre de réécriture.
+_MIN_WORDS_FOR_ORDER = 3
+
+
+def is_question(prompt: str) -> bool:
+    """Vrai si la demande attend une RÉPONSE, pas une modification.
+
+    Attention aux ordres polis : « peux-tu restructurer le document ? » finit
+    par un point d'interrogation mais reste un ordre. Seule l'ouverture compte.
+    """
+    text = (prompt or "").strip().lower()
+    return any(text.startswith(opener) for opener in _QUESTION_OPENERS)
 
 
 def wants_document_rewrite(prompt: str) -> bool:
     """Vrai si la demande vise une réécriture du document.
 
     Appelée seulement quand rien n'est sélectionné : la portée est alors le
-    document entier, et la question est « faut-il l'écrire, ou seulement
-    répondre ? ».
+    document entier, et la question devient « faut-il l'écrire, ou seulement
+    répondre ? ». On répond OUI par défaut — le coût d'un faux positif est
+    faible (le modèle réécrit à l'identique, un Ctrl+Z suffit), celui d'un faux
+    négatif est une action sans effet, exactement ce qu'on cherche à éliminer.
     """
-    text = (prompt or "").lower()
-    if not text.strip():
+    text = (prompt or "").strip()
+    if len(text.split()) < _MIN_WORDS_FOR_ORDER:
         return False
-    if not any(verb in text for verb in _REWRITE_VERBS):
-        return False
-    # Une question pure appelle une réponse, pas une modification.
-    if text.lstrip().startswith(("qu'", "que ", "quel", "pourquoi", "comment",
-                                 "combien", "explique", "résume-moi ce que")):
-        return False
-    return True
-
-
-def mentions_whole_document(prompt: str) -> bool:
-    """Vrai si la demande nomme explicitement le document dans son ensemble."""
-    text = (prompt or "").lower()
-    return any(word in text for word in _DOC_WORDS)
+    return not is_question(text)
 
 
 # Styles qui désignent un titre. On teste en minuscules et par préfixe : les

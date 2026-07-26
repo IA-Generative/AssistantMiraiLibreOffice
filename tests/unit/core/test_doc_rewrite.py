@@ -8,26 +8,33 @@ Ici Python pilote et applique ; le modèle n'est qu'une fonction texte.
 
 from src.mirai.core.doc_rewrite import (
     build_rewrite_prompt,
-    mentions_whole_document,
     parse_rewritten,
     wants_document_rewrite,
 )
 
 # ── Détection d'intention ───────────────────────────────────────────────
+#
+# Le principe : sans sélection, tout ce qui n'est pas une QUESTION est un ordre
+# portant sur le document. Énumérer les verbes de modification est sans fin —
+# « réduis », « reformate », « aère », « convertis »… — et chaque oubli redonne
+# une action sans effet.
 
-def test_detects_the_case_that_failed():
+def test_detects_the_cases_that_failed():
+    """Deux prompts réels qui n'avaient rien produit, faute de verbe connu."""
+    assert wants_document_rewrite(
+        "reduit à 2 paragraphes. reformate en poème en alexandrin.")
     assert wants_document_rewrite("Réécris l'article en deux paragraphes")
-    assert wants_document_rewrite("Restructure ce document en 2 paragraphes")
 
 
-def test_detects_common_rewrite_requests():
+def test_detects_orders_whatever_the_verb():
     for prompt in ("Reformule tout le texte",
+                   "aère la mise en page",
+                   "convertis en liste à puces",
+                   "mets tout au passé simple",
+                   "supprime les répétitions",
                    "Corrige les fautes du document",
                    "Traduis ce texte en anglais",
-                   "Simplifie l'ensemble",
-                   "Fusionne les paragraphes trop courts",
-                   "Rends le ton plus formel",
-                   "Résume ce document"):
+                   "Rends le ton plus formel"):
         assert wants_document_rewrite(prompt), prompt
 
 
@@ -37,20 +44,36 @@ def test_ignores_questions():
                    "Quel est le sujet du texte ?",
                    "Pourquoi ce passage est-il ambigu ?",
                    "Comment améliorer ce texte ?",
-                   "Combien de paragraphes ?"):
+                   "Combien de paragraphes ?",
+                   "Explique-moi la structure",
+                   "Dis-moi ce qui cloche",
+                   "Est-ce que le ton est adapté ?"):
         assert not wants_document_rewrite(prompt), prompt
 
 
-def test_ignores_unrelated_prompts():
-    assert not wants_document_rewrite("Bonjour")
+def test_polite_orders_are_still_orders():
+    """« Peux-tu restructurer… ? » finit par « ? » mais reste un ordre.
+
+    Seule l'OUVERTURE distingue une question d'un ordre poli — se fier au point
+    d'interrogation ferait retomber dans l'action sans effet.
+    """
+    assert wants_document_rewrite("peux-tu restructurer le document ?")
+    assert wants_document_rewrite("pourrais-tu raccourcir tout ça ?")
+
+
+def test_ignores_too_short_prompts():
+    """Un mot isolé n'est pas un ordre de réécriture."""
+    assert not wants_document_rewrite("bonjour")
+    assert not wants_document_rewrite("merci !")
     assert not wants_document_rewrite("")
     assert not wants_document_rewrite(None)
 
 
-def test_mentions_whole_document():
-    assert mentions_whole_document("réécris le document")
-    assert mentions_whole_document("reformule tout")
-    assert not mentions_whole_document("corrige cette phrase")
+def test_is_question_is_exposed():
+    from src.mirai.core.doc_rewrite import is_question
+
+    assert is_question("Pourquoi ce texte est-il long ?")
+    assert not is_question("Raccourcis ce texte")
 
 
 # ── Construction de la demande ──────────────────────────────────────────
