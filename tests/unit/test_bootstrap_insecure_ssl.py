@@ -14,6 +14,7 @@ from unittest.mock import MagicMock
 
 # ── Stubs must be installed before importing entrypoint ──────────────
 from tests.stubs.uno_stubs import install, make_job
+
 install()
 
 

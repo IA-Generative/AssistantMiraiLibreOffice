@@ -7,7 +7,6 @@ relais (429/401/403/5xx) avec corrélation X-Request-Id, retry_after, anti-temp�
 No LibreOffice required — UNO modules are stubbed.
 """
 import io
-import queue
 import time
 import unittest
 import urllib.error
@@ -108,9 +107,9 @@ class TestStreamRequest429(unittest.TestCase):
         self.job.get_ssl_context = lambda *a, **k: None
 
     def test_429_emits_telemetry_and_user_message(self):
-        body = ('{"error": {"message": "Rate limit exceeded", '
-                '"type": "rate_limit_exceeded", "code": "rate_limit_exceeded"}, '
-                '"retry_after": 30}').encode()
+        body = (b'{"error": {"message": "Rate limit exceeded", '
+                b'"type": "rate_limit_exceeded", "code": "rate_limit_exceeded"}, '
+                b'"retry_after": 30}')
 
         def raising_urlopen(request, context=None, timeout=None, use_proxy=True):
             raise _http_error(429, body, {"X-Request-Id": "trace-429",

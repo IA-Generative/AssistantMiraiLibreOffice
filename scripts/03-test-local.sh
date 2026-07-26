@@ -31,7 +31,7 @@ echo "[3/6] Lint (ruff)"
 if python -m ruff --version >/dev/null 2>&1; then
   # Bloquant sur les erreurs franches (bugs, imports, style).
   python -m ruff check "$ROOT_DIR/src/mirai/core" "$ROOT_DIR/src/mirai/ui" \
-    --ignore C901
+    "$ROOT_DIR/tests" --ignore C901
   # La complexité est un budget en cours de résorption : on la MESURE et on
   # l'affiche, sans bloquer, pour que le chiffre reste sous les yeux.
   complex_count=$(python -m ruff check "$ROOT_DIR/src/mirai/core" "$ROOT_DIR/src/mirai/ui" \

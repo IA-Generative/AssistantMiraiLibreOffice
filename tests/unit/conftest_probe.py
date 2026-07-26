@@ -1,4 +1,6 @@
 import pytest
+
+
 @pytest.fixture(autouse=True)
 def _trace_persist_failures(monkeypatch, request):
     import src.mirai.entrypoint as ep

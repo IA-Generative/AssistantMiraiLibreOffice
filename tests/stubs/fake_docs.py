@@ -4,7 +4,6 @@ asserter l'état final du document dans les tests golden des presets/tools."""
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-
 # ── Writer ──────────────────────────────────────────────────────────────
 
 class FakeUndoManager:

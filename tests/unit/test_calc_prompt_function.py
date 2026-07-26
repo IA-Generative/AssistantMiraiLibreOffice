@@ -7,7 +7,6 @@ Run with:
 import io
 import json
 import ssl
-import sys
 import unittest
 import urllib.error
 from unittest.mock import MagicMock, patch
@@ -24,7 +23,6 @@ from src.mirai.calc_prompt_function import (  # noqa: E402
     call_llm,
     load_config,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -428,6 +426,7 @@ class TestBuildSslContext(unittest.TestCase):
     def test_loads_bundled_ca_if_present(self):
         """If the bundled PEM exists, it should be loaded without error."""
         import os
+
         from src.mirai.calc_prompt_function import _get_bundled_ca_path
 
         bundled = _get_bundled_ca_path()
@@ -455,8 +454,8 @@ class TestLoadConfig(unittest.TestCase):
 
     def test_reads_user_config_json(self):
         import json
-        import tempfile
         import os
+        import tempfile
 
         tmpdir = tempfile.mkdtemp()
         config_path = os.path.join(tmpdir, "config.json")

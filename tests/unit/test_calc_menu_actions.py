@@ -5,7 +5,7 @@ Run with:
     .venv/bin/pytest tests/unit/test_calc_menu_actions.py -v
 """
 import unittest
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock
 
 from tests.stubs.uno_stubs import install
 
@@ -24,7 +24,6 @@ from src.mirai.menu_actions.calc import (  # noqa: E402
     _transform_to_column,
     handle_calc_action,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -471,8 +470,10 @@ class TestGenerateFormulaMultiTurn(unittest.TestCase):
         selection.getRangeAddress.return_value = area
 
         sheet = MagicMock()
-        cols = MagicMock(); cols.Count = 1
-        rows_mock = MagicMock(); rows_mock.Count = 1
+        cols = MagicMock()
+        cols.Count = 1
+        rows_mock = MagicMock()
+        rows_mock.Count = 1
         sheet.getColumns.return_value = cols
         sheet.getRows.return_value = rows_mock
 
@@ -484,7 +485,6 @@ class TestGenerateFormulaMultiTurn(unittest.TestCase):
     def test_multi_turn_sends_two_requests(self):
         """_generate_formula_raw called twice accumulates messages."""
         job = _make_job(["=SUM(A1:A5)"])
-        target = _make_cell()
         msgs = []
         f1, _ = _generate_formula_raw(job, "sum of column A", messages=msgs)
         f2, _ = _generate_formula_raw(job, "make it robust", messages=msgs)

@@ -6,15 +6,13 @@ include phrases like "end of document" produce an empty result because the
 stop-phrase early-return skips text insertion.
 """
 import unittest
-from unittest.mock import MagicMock, call, patch
-
+from unittest.mock import MagicMock
 
 from tests.stubs.uno_stubs import install
 
 install()
 
 from src.mirai.menu_actions.writer import _summarize_selection
-
 
 # ---------------------------------------------------------------------------
 # Helpers

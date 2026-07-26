@@ -5,7 +5,6 @@ Tests: chunking, numbered-paragraph prompt, FIND/REPLACE parsing with
 multiline split and [Pn] stripping, search/replace application.
 """
 import re
-import textwrap
 
 # ─── Simulated document ─────────────────────────────────────────────────────
 SAMPLE_PARAGRAPHS = [
@@ -207,9 +206,9 @@ def simulate_llm_multiline_merge(chunk_text):
         return "<<<NOCHANGE>>>"
     # Merge ALL into one block (the bug)
     return (
-        f"<<<FIND>>>\n" + "\n".join(originals) +
-        f"\n<<<REPLACE>>>\n" + "\n".join(replacements) +
-        f"\n<<<END>>>"
+        "<<<FIND>>>\n" + "\n".join(originals) +
+        "\n<<<REPLACE>>>\n" + "\n".join(replacements) +
+        "\n<<<END>>>"
     )
 
 
@@ -268,7 +267,7 @@ def run_pipeline(doc, chunks, llm_func, label):
     if remaining:
         print(f"  REMAINING FRENCH: {remaining}")
     else:
-        print(f"  OK: all French text translated")
+        print("  OK: all French text translated")
 
     return total_replacements, total_not_found
 
@@ -298,7 +297,7 @@ def test_parser_pn_strip():
     # LLM echoes [P1] in FIND
     response = "<<<FIND>>>\n[P1] Bonjour le monde\n<<<REPLACE>>>\n[P1] Hello world\n<<<END>>>"
     result = parse_find_replace(response)
-    print(f"  Input:  [P1] Bonjour le monde → [P1] Hello world")
+    print("  Input:  [P1] Bonjour le monde → [P1] Hello world")
     print(f"  Parsed: {result}")
     assert result == [("Bonjour le monde", "Hello world")], f"Unexpected: {result}"
     print("  OK: [Pn] stripped correctly")
@@ -315,7 +314,7 @@ def test_parser_multiline_split():
         "<<<REPLACE>>>\nHello world\nGoodbye\n<<<END>>>"
     )
     result = parse_find_replace(response)
-    print(f"  Input:  multiline FIND (2 lines)")
+    print("  Input:  multiline FIND (2 lines)")
     print(f"  Parsed: {result}")
     assert len(result) == 2, f"Expected 2 pairs, got {len(result)}"
     assert result[0] == ("Bonjour le monde", "Hello world")

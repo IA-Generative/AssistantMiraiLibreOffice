@@ -29,7 +29,13 @@ max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 # Les tests peuvent importer largement et déclarer des fixtures non utilisées.
-"tests/**" = ["ARG", "E501"]
+# E402 : les harnais DOIVENT appeler `install()` (stubs UNO) avant d'importer
+# quoi que ce soit de src/mirai — l'ordre est une contrainte, pas un oubli.
+"tests/**" = ["ARG", "E501", "E402"]
+# uno_stubs déclare une trentaine d'interfaces UNO vides. Une classe par ligne
+# (`class _XJob: pass`) se lit comme une table de correspondance ; les étaler
+# sur trois lignes chacune rendrait le fichier illisible pour rien.
+"tests/stubs/uno_stubs.py" = ["E701", "ARG", "E501", "E402"]
 # Signatures uniformes imposées par un contrat, pas par négligence :
 #  - presets  : tous les runners partagent (ctx, shell, user_text, tee,
 #               cancel_event, dispatcher) pour être interchangeables ; chacun

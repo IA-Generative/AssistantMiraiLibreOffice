@@ -2,7 +2,6 @@
 Tests for _fetch_models / _build_auth_headers in MainJob.
 HTTP calls are intercepted via unittest.mock.patch.
 """
-import io
 import json
 import unittest
 from unittest.mock import MagicMock, patch

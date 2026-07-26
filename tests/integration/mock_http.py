@@ -11,11 +11,9 @@ Usage:
 
     assert router.called("GET", "/config/libreoffice/config.json")
 """
-import io
 import json
 import urllib.error
 import urllib.request
-from unittest.mock import MagicMock
 
 
 class _FakeResponse:

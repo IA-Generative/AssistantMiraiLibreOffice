@@ -7,21 +7,15 @@ Run with:
 """
 import hashlib
 import json
-import sys
-import threading
 import time
-import types
-from io import BytesIO
-from unittest.mock import MagicMock, patch, call
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 # ── Stubs must be installed before importing entrypoint ──────────────
 from tests.stubs.uno_stubs import install, make_job
+
 install()
 
 from src.mirai.entrypoint import MainJob
-
 
 # ── helpers ──────────────────────────────────────────────────────────
 

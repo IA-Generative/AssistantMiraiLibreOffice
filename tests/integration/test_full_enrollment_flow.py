@@ -27,10 +27,10 @@ import time
 import unittest
 import urllib.parse
 import urllib.request
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from tests.stubs.uno_stubs import install, make_job
 from tests.integration.mock_http import MockHttpRouter
+from tests.stubs.uno_stubs import install, make_job
 
 install()
 
@@ -275,7 +275,7 @@ class TestFullEnrollmentFlow(unittest.TestCase):
              self._patch_enrollment_wizard(True), \
              self._patch_show_message(), \
              patch("webbrowser.open", side_effect=fake_browser_open):
-            result = self.job._authorization_code_flow(DM_PUBLIC_CONFIG)
+            self.job._authorization_code_flow(DM_PUBLIC_CONFIG)
 
         self.assertIn("auth_url", captured, "webbrowser.open must have been called")
 
