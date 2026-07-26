@@ -42,6 +42,10 @@ class NullProgress:
     def reasoning(self):
         return ""
 
+    @property
+    def tooltip(self):
+        return ""
+
     def exact_tokens(self, _count):
         pass
 
@@ -63,6 +67,7 @@ class RunProgress:
         self._chars = 0
         self._reasoning_chars = 0
         self._reasoning = ""
+        self._preview = ""
         self._exact = None
         self._phase = "Connexion…"
 
@@ -70,7 +75,13 @@ class RunProgress:
 
     def on_text(self, text):
         with self._lock:
-            self._chars += len(text or "")
+            chunk = text or ""
+            self._chars += len(chunk)
+            # Tous les modèles n'émettent pas de `reasoning_content` — la
+            # plupart n'exposent que le texte. L'infobulle montre donc AUSSI ce
+            # qui s'écrit : sans cela, elle resterait vide sur ces modèles-là et
+            # l'indice de survol ne s'afficherait jamais.
+            self._preview = (self._preview + chunk)[-REASONING_TOOLTIP_CHARS:]
             self._phase = "Rédaction"
 
     def on_reasoning(self, text):
@@ -109,6 +120,20 @@ class RunProgress:
         """Dernières lignes du raisonnement, pour l'infobulle de survol."""
         with self._lock:
             return self._reasoning
+
+    @property
+    def tooltip(self):
+        """Contenu de l'infobulle : le raisonnement s'il existe, sinon le texte.
+
+        Préfixé de sa nature, pour que l'utilisateur sache s'il regarde la
+        réflexion du modèle ou le texte qu'il est en train d'écrire.
+        """
+        with self._lock:
+            if self._reasoning:
+                return "Réflexion du modèle :\n\n" + self._reasoning
+            if self._preview:
+                return "Texte en cours :\n\n" + self._preview
+            return ""
 
     @property
     def phase(self):

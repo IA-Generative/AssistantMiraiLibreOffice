@@ -162,3 +162,29 @@ def test_reasoning_is_empty_without_reasoning():
 
 def test_null_progress_exposes_an_empty_reasoning():
     assert NullProgress().reasoning == ""
+
+
+def test_tooltip_falls_back_to_the_streamed_text():
+    """Tous les modèles n'émettent pas de raisonnement — la plupart n'ont que
+    du texte. L'infobulle doit rester utile dans ce cas."""
+    progress = RunProgress()
+    progress.on_text("Le préfet arrête que…")
+
+    tooltip = progress.tooltip
+    assert "Texte en cours" in tooltip
+    assert "Le préfet arrête" in tooltip
+
+
+def test_tooltip_prefers_reasoning_when_available():
+    progress = RunProgress()
+    progress.on_text("du texte")
+    progress.on_reasoning("je réfléchis")
+
+    tooltip = progress.tooltip
+    assert "Réflexion du modèle" in tooltip
+    assert "je réfléchis" in tooltip
+
+
+def test_tooltip_is_empty_before_anything_arrives():
+    assert RunProgress().tooltip == ""
+    assert NullProgress().tooltip == ""

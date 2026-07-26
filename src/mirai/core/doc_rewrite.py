@@ -61,7 +61,35 @@ def mentions_whole_document(prompt: str) -> bool:
     return any(word in text for word in _DOC_WORDS)
 
 
-def build_rewrite_prompt(paragraphs, instruction: str) -> str:
+# Styles qui désignent un titre. On teste en minuscules et par préfixe : les
+# noms varient selon la langue de l'interface et la version (« Heading 1 »,
+# « Titre 1 », « Title »…).
+_HEADING_PREFIXES = ("heading", "titre", "title", "überschrift", "encabezado")
+
+
+def is_heading(style_name: str) -> bool:
+    """Vrai si ce style de paragraphe est un titre."""
+    name = (style_name or "").strip().lower()
+    return any(name.startswith(prefix) for prefix in _HEADING_PREFIXES)
+
+
+def body_range(styles):
+    """(début, fin) 1-indexés des paragraphes de CORPS à réécrire, ou None.
+
+    Les titres sont exclus : réécrire une plage qui commence par un titre y
+    écrase du corps de texte, et comme chaque paragraphe conserve son style,
+    ce corps s'affiche en style Titre. C'est précisément le défaut observé.
+    Les titres restent donc intacts, ce qu'attend d'ailleurs un utilisateur qui
+    demande de « restructurer l'article ».
+    """
+    indexes = [i for i, style in enumerate(styles, start=1)
+               if not is_heading(style)]
+    if not indexes:
+        return None
+    return indexes[0], indexes[-1]
+
+
+def build_rewrite_prompt(paragraphs, instruction: str, headings=None) -> str:
     """Demande au modèle un texte brut, un paragraphe par ligne.
 
     Pas de JSON, pas de tool call, pas de marqueurs : le format le plus simple
@@ -69,8 +97,16 @@ def build_rewrite_prompt(paragraphs, instruction: str) -> str:
     """
     numbered = "\n".join(f"[P{index}] {text}"
                          for index, text in enumerate(paragraphs, start=1))
+    context = ""
+    if headings:
+        # Le titre est donné pour le CONTEXTE, jamais à réécrire : il garde son
+        # style, et le modèle ne doit pas le reprendre dans sa réponse.
+        joined = " / ".join(headings)
+        context = (f"TITRE DU DOCUMENT (à NE PAS reprendre dans ta réponse, "
+                   f"il reste en place) : {joined}\n\n")
     return (
-        "DOCUMENT ACTUEL (un paragraphe par ligne, numérotés) :\n"
+        context +
+        "TEXTE À RÉÉCRIRE (un paragraphe par ligne, numérotés) :\n"
         f"{numbered}\n\n"
         f"DEMANDE : {instruction}\n\n"
         "RÈGLES DE RÉPONSE :\n"
@@ -78,7 +114,7 @@ def build_rewrite_prompt(paragraphs, instruction: str) -> str:
         "- UN paragraphe par ligne, sans les marqueurs [Pn], sans ligne vide.\n"
         "- Pas d'introduction, pas de commentaire, pas de markdown.\n"
         "- Conserve la langue d'origine.\n"
-        "- Si le premier paragraphe est un titre, garde-le comme première ligne."
+        "- Ne reprends pas le titre : il n'est pas dans le texte à réécrire."
     )
 
 

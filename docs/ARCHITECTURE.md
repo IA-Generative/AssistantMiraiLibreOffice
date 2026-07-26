@@ -111,6 +111,17 @@ compteur est une estimation locale (caractères ÷ 4) **marquée `~`**, remplac�
 par la valeur exacte si le relais envoie spontanément un bloc `usage` — jamais
 réclamé, car `stream_options` fait rejeter la requête par certains relais.
 
+**Les titres sortent de la plage réécrite.** Préserver le style de chaque
+paragraphe ne suffit pas : si la plage commence par un titre, le premier bloc
+de corps s'y déverse et s'affiche en style Titre. `doc_rewrite.body_range()`
+borne la réécriture aux paragraphes de corps ; les titres sont donnés au modèle
+comme contexte, avec consigne de ne pas les reprendre.
+
+**Écriture de configuration atomique.** `set_config` écrit dans un fichier
+temporaire puis `os.replace`. En place, un lecteur concurrent peut voir un JSON
+tronqué, repartir sur les valeurs par défaut et perdre les credentials — soit
+une entrée non désirée dans l'état absorbant.
+
 **Règle d'écriture : jamais de `setString` sur une plage multi-paragraphes.**
 LibreOffice applique alors le style du PREMIER paragraphe à tout le bloc — un
 document titre + corps repart intégralement en style titre. On écrit donc

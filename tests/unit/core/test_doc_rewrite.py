@@ -94,3 +94,48 @@ def test_empty_response_yields_nothing():
     assert parse_rewritten("") == []
     assert parse_rewritten("   \n\n  ") == []
     assert parse_rewritten(None) == []
+
+
+# ── Préservation des titres ─────────────────────────────────────────────
+
+def test_heading_styles_are_recognised():
+    from src.mirai.core.doc_rewrite import is_heading
+
+    for style in ("Heading 1", "heading 2", "Titre 1", "Title", "Überschrift 1"):
+        assert is_heading(style), style
+    for style in ("Standard", "Text Body", "Corps de texte", "", None):
+        assert not is_heading(style), style
+
+
+def test_body_range_excludes_a_leading_heading():
+    """Le défaut observé : le corps réécrit héritait du style Titre."""
+    from src.mirai.core.doc_rewrite import body_range
+
+    assert body_range(["Heading 1", "Standard", "Standard"]) == (2, 3)
+
+
+def test_body_range_excludes_headings_at_both_ends():
+    from src.mirai.core.doc_rewrite import body_range
+
+    assert body_range(["Title", "Standard", "Standard", "Heading 2"]) == (2, 3)
+
+
+def test_body_range_covers_everything_without_headings():
+    from src.mirai.core.doc_rewrite import body_range
+
+    assert body_range(["Standard", "Standard"]) == (1, 2)
+
+
+def test_body_range_is_none_when_only_headings():
+    from src.mirai.core.doc_rewrite import body_range
+
+    assert body_range(["Heading 1", "Title"]) is None
+
+
+def test_prompt_gives_the_heading_as_context_only():
+    prompt = build_rewrite_prompt(["Corps."], "réécris",
+                                  headings=["Mon titre"])
+
+    assert "Mon titre" in prompt
+    assert "NE PAS reprendre" in prompt
+    assert "Ne reprends pas le titre" in prompt

@@ -98,6 +98,14 @@ def _paragraphs(ctx):
     return items
 
 
+def paragraph_style(para):
+    """Nom du style d'un paragraphe, ou chaîne vide. Jamais d'exception."""
+    try:
+        return str(para.getPropertyValue("ParaStyleName") or "")
+    except Exception:
+        return ""
+
+
 def replace_paragraphs(ctx, args):
     """Remplace une plage de paragraphes [Pn]…[Pm] par un nouveau texte.
 

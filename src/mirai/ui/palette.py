@@ -1114,7 +1114,8 @@ class AssistantPalette:
 
     def _document_snapshot(self, ctx, preset, prompt_text):
         """Lit d'avance ce dont le run aura besoin. Thread principal uniquement."""
-        snapshot = {"selection": "", "paragraphs": [], "rewrite": False}
+        snapshot = {"selection": "", "paragraphs": [], "styles": [],
+                    "rewrite": False}
         try:
             snapshot["selection"] = _selection_string(ctx) or ""
         except Exception:
@@ -1123,8 +1124,10 @@ class AssistantPalette:
                 and not snapshot["selection"].strip()
                 and doc_rewrite.wants_document_rewrite(prompt_text)):
             try:
-                from ..core.tools.writer_tools import _paragraphs
-                snapshot["paragraphs"] = [p.getString() for p in _paragraphs(ctx)]
+                from ..core.tools.writer_tools import _paragraphs, paragraph_style
+                items = _paragraphs(ctx)
+                snapshot["paragraphs"] = [p.getString() for p in items]
+                snapshot["styles"] = [paragraph_style(p) for p in items]
                 snapshot["rewrite"] = True
             except Exception as exc:
                 self.shell.log(f"[palette] lecture du document impossible : {exc}")
@@ -1142,7 +1145,8 @@ class AssistantPalette:
                 self._run_pipeline(preset, prompt_text, ctx, shown)
             elif snapshot.get("rewrite"):
                 self._run_document_rewrite(ctx, prompt_text,
-                                           snapshot["paragraphs"])
+                                           snapshot["paragraphs"],
+                                           snapshot["styles"])
             else:
                 self._run_agentic(preset, prompt_text, ctx)
             self._delta_buffer.flush()
@@ -1204,7 +1208,7 @@ class AssistantPalette:
         elif not isinstance(sink, PaletteSink):
             self._stream_response(result.text or "Modification appliquée.")
 
-    def _run_document_rewrite(self, ctx, instruction, originals):
+    def _run_document_rewrite(self, ctx, instruction, originals, styles=None):
         """Réécrit le document : Python lit, le LLM rédige, Python applique.
 
         Aucun tool call n'est demandé au modèle — c'est ce qui rend l'opération
@@ -1216,13 +1220,27 @@ class AssistantPalette:
             self._append_response("MIrAI : ", "Le document est vide.")
             return
 
+        # Les titres restent en place : les inclure dans la plage réécrite y
+        # ferait tomber du corps de texte, qui hériterait du style Titre.
+        styles = styles or [""] * len(originals)
+        span = doc_rewrite.body_range(styles)
+        if span is None:
+            self._append_response(
+                "MIrAI : ", "Ce document ne contient que des titres.")
+            return
+        first, last = span
+        body = originals[first - 1:last]
+        headings = [text for text, style in zip(originals, styles, strict=False)
+                    if doc_rewrite.is_heading(style) and text.strip()]
+
         self._progress.set_phase("Rédaction")
         self._append_response("MIrAI : ")
         llm = LLMClient(self.shell)
         step = llm.step(
             [{"role": "system", "content": prompts.LEGACY_TEXT_SYSTEM},
              {"role": "user",
-              "content": doc_rewrite.build_rewrite_prompt(originals, instruction)}],
+              "content": doc_rewrite.build_rewrite_prompt(
+                  body, instruction, headings=headings)}],
             on_text_delta=self._stream_response,
             cancel_event=self._cancel,
             progress=self._progress)
@@ -1243,15 +1261,16 @@ class AssistantPalette:
         self._progress.set_phase("Application au document")
 
         def _apply():
-            replace_paragraphs(ctx, {"start": 1, "end": len(originals),
+            replace_paragraphs(ctx, {"start": first, "end": last,
                                      "text": "\n".join(rewritten)})
             ctx.undo_end()
 
         # `post` et non `call` : on n'a pas besoin du résultat, et attendre
         # exposerait au délai d'AsyncCallback décrit plus haut.
         self.dispatcher.post(_apply)
-        summary = (f"Document réécrit : {len(originals)} → {len(rewritten)} "
-                   f"paragraphe(s). Ctrl+Z pour annuler.")
+        kept = " (titre conservé)" if headings else ""
+        summary = (f"Document réécrit : {len(body)} → {len(rewritten)} "
+                   f"paragraphe(s){kept}. Ctrl+Z pour annuler.")
         self._stream_response("\n" + summary)
         self.conversation.append("user", instruction, ctx.app)
         self.conversation.append("assistant", summary, ctx.app)
@@ -1321,7 +1340,7 @@ class AssistantPalette:
                 progress = self._progress
                 if progress is None:
                     return
-                reasoning = progress.reasoning
+                reasoning = progress.tooltip
                 line = progress.render()
                 if reasoning:
                     # Signaler qu'il y a quelque chose à survoler : sans indice,

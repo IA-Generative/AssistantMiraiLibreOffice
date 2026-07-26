@@ -2599,11 +2599,26 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             if key == "llm_default_models":
                 log_to_file(f"Model saved (local): {value}")
 
+            # Écriture ATOMIQUE : fichier temporaire puis remplacement.
+            # Écrire en place expose tout lecteur concurrent — un autre thread
+            # du plugin, une seconde instance de LibreOffice — à un JSON
+            # tronqué. Le lecteur repart alors sur les valeurs par défaut et
+            # PERD les credentials : c'est une façon d'entrer dans l'état
+            # absorbant (enrôlé sans paire relais) sans que personne ne l'ait
+            # demandé. os.replace est atomique sur POSIX comme sur Windows.
+            temporary_path = f"{config_file_path}.tmp"
             try:
-                with open(config_file_path, 'w', encoding='utf-8') as file:
+                with open(temporary_path, 'w', encoding='utf-8') as file:
                     json.dump(config_data, file, indent=4, ensure_ascii=False)
-            except IOError as e:
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(temporary_path, config_file_path)
+            except OSError as e:
                 log_to_file(f"Error writing to {config_file_path}: {e}")
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
 
     def _jwt_payload(self, token):
         try:
