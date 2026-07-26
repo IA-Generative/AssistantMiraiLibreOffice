@@ -86,6 +86,12 @@ class FakeControl:
     def addItemListener(self, listener):
         self.listeners.append(listener)
 
+    def setText(self, text):
+        self.model.Text = text
+
+    def isVisible(self):
+        return self.visible
+
 
 class FakeDialog:
     def __init__(self):
@@ -331,3 +337,22 @@ def test_journal_receives_lines_outside_agentic_mode(palette_module):
     text = palette._models["journal"].Text
     assert "Lecture du document" in text
     assert "Écriture appliquée" in text
+
+
+def test_text_is_written_through_the_control(palette_module):
+    """Écrire le modèle ne repeint pas toujours : le contrôle doit suivre.
+
+    Un UnoControlEdit déjà doté d'un peer conserve la donnée sans l'afficher —
+    la zone paraît vide alors qu'une relecture du modèle rend bien le texte.
+    """
+    palette = _build(palette_module)
+    palette._set_text("response", "bonjour")
+
+    dialog = palette_module._fake_dialog
+    assert palette._models["response"].Text == "bonjour"
+    assert dialog.getControl("response").model.Text == "bonjour"
+
+
+def test_set_text_tolerates_a_missing_control(palette_module):
+    palette = _build(palette_module)
+    palette._set_text("inexistant", "x")   # ne doit pas lever

@@ -873,7 +873,7 @@ class AssistantPalette:
         self.dispatcher.post(_apply)
 
     def set_journal_text(self, text):
-        self.dispatcher.post(lambda: self._models["journal"].__setattr__("Text", text))
+        self.dispatcher.post(lambda: self._set_text("journal", text))
 
     # ── Indicateur de sélection ─────────────────────────────────────────
 
@@ -1015,8 +1015,8 @@ class AssistantPalette:
     def refresh_suggestions(self):
         """Recalcule les propositions pour la cible courante."""
         try:
-            self._models["suggestions"].Text = suggestions.render(
-                self._current_suggestions())
+            self._set_text("suggestions",
+                           suggestions.render(self._current_suggestions()))
         except Exception as exc:
             self.shell.log(f"[palette] suggestions indisponibles : {exc}")
 
@@ -1047,8 +1047,7 @@ class AssistantPalette:
         """
         self._journal_lines.append(text)
         joined = "\n".join(self._journal_lines)
-        self.dispatcher.post(
-            lambda: self._models["journal"].__setattr__("Text", joined))
+        self.dispatcher.post(lambda: self._set_text("journal", joined))
 
     def reload_history(self):
         """Force la relecture du fil persisté au prochain rendu."""
@@ -1091,10 +1090,30 @@ class AssistantPalette:
             blocks.append("\n".join(group))
 
         text = "\n———\n".join(blocks)
-        self.shell.log(f"[palette] fil rendu : {len(entries)} entrée(s) "
-                       f"persistée(s), {len(text)} caractères")
-        self.dispatcher.post(
-            lambda: self._models["response"].__setattr__("Text", text))
+
+        self.dispatcher.post(lambda: self._set_text("response", text))
+
+    def _set_text(self, name, text):
+        """Écrit dans un contrôle texte ET force son rafraîchissement.
+
+        Écrire `model.Text` met bien la donnée — une relecture le confirme —
+        mais un `UnoControlEdit` déjà doté d'un peer ne repeint pas toujours
+        pour autant : la zone reste vide à l'écran alors qu'elle contient le
+        texte. C'est `setText()` sur le CONTRÔLE qui met à jour l'affichage.
+        On fait les deux : le modèle porte l'état, le contrôle l'affiche.
+        """
+        model = self._models.get(name)
+        if model is not None:
+            try:
+                model.Text = text
+            except Exception:
+                pass
+        try:
+            control = self.dialog.getControl(name)
+            if control is not None:
+                control.setText(text)
+        except Exception:
+            pass          # contrôle sans setText (FixedText) ou déjà disposé
 
     def _append_response(self, prefix, text=""):
         """Ajoute une ligne à l'échange EN COURS, affiché en tête du fil."""

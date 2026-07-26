@@ -62,6 +62,12 @@
      le thread principal et **se réarme elle-même** — armée au démarrage du run
      (depuis le thread principal), éteinte à sa fin. 0,1 % de CPU au repos.
      Il n'existe pas de timer UNO : `com.sun.star.awt.Timer` renvoie `null`.
+   - **La pompe s'éteint dès que la file est vide** — se réarmer sans
+     condition monopolise la boucle et gèle l'interface immédiatement.
+   - **Écrire du texte** : `model.Text` porte l'état, `control.setText()`
+     l'affiche. Un contrôle déjà doté d'un peer ne repeint pas sur la seule
+     écriture du modèle — passer par `_set_text()`, jamais par `model.Text`
+     directement.
    - **Filet d'état** : les mises à jour de fin de run sont postées, donc
      perdables. `heal_if_stuck()` (sur `windowActivated`) restaure l'interface
      si elle est « occupée » sans worker vivant. Toute machine à états pilotée

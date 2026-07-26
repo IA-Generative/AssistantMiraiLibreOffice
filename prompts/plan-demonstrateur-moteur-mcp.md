@@ -634,6 +634,16 @@ i18n ; vrai serveur MCP (stdio/JSON-RPC) ; dépendance jsonschema (subset docume
     - elle ne tourne que **pendant un run** (`stop_pump()` en fin de run) — mesuré à 0,1 % de CPU au repos ;
     - `post()` et `call()` court-circuitent la file quand on est déjà sur le thread principal : pas de détour, pas d'interblocage.
 
+42. **🚨 Une pompe qui se réarme sans condition monopolise la boucle d'événements.** Corollaire immédiat du piège n°41 : la première version de la pompe se réarmait à chaque tour, y compris à vide. LibreOffice passait son temps à traiter des tours de pompe et ne répondait plus ni à la souris ni au clavier — un gel **pire** que celui qu'on corrigeait, et immédiat. **La pompe doit s'éteindre dès que la file est vide** ; c'est `post()` qui la relance à la tâche suivante. Pendant un run, le trafic régulier (fragments, jauge) la maintient vivante ; au repos elle ne tourne pas du tout — 0,0 % de CPU mesuré. Règle générale : toute boucle installée sur le thread d'interface doit avoir une **condition d'arrêt liée au travail restant**, jamais au seul état « un run est en cours ».
+
+43. **🚨 Écrire `model.Text` ne repeint pas un contrôle qui a déjà un peer.** Symptôme déroutant : la zone de texte apparaît **vide à l'écran** alors que tout est correct par ailleurs — le contrôle est visible, dans le champ, et une **relecture du modèle rend bien les 1888 caractères** qu'on vient d'y écrire. La donnée est là, l'affichage non.
+    **Méthode qui a permis de trancher** — instrumenter en trois temps, du plus général au plus précis, sans jamais deviner :
+    1. *les données existent-elles ?* → `fil rendu : 40 entrées, 1837 caractères` ;
+    2. *le contrôle est-il visible et dans le champ ?* → `layout: fenêtre 802x566, zone basse y=325 h=235, visibles=['response']` ;
+    3. *le contrôle contient-il vraiment le texte ?* → **relecture après écriture** : `posé=1888, relu=1888`.
+    Les trois réponses étant positives, il ne restait que le rendu.
+    **Parade** : écrire dans le modèle ET appeler `setText()` sur le CONTRÔLE. Le modèle porte l'état, le contrôle l'affiche. Un helper unique (`_set_text`) pour toutes les zones de texte, plutôt que des `model.Text = …` disséminés.
+
 ## Risques principaux
 
 - JSON fallback avec llama-3.3 : parseur tolérant + coercition d'arguments + presets pipeline pour le volume + flush-si-parse-échoue.
