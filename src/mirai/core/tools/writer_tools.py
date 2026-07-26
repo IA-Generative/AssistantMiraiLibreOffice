@@ -7,6 +7,11 @@ orchestrator). Les tools mutants restent donc courts et sûrs.
 
 from ..tool_calls import ToolResult, ToolSpec
 
+try:
+    from com.sun.star.text.ControlCharacter import PARAGRAPH_BREAK
+except ImportError:      # hors LibreOffice (tests)
+    PARAGRAPH_BREAK = 0
+
 
 def _selection_range(ctx):
     return ctx.controller.getSelection().getByIndex(0)
@@ -41,7 +46,18 @@ def get_document_map(ctx, args):
             continue
         index += 1
         content = para.getString()
-        line = f"[P{index}] {content}" if content.strip() else f"[P{index}] (vide)"
+        # Le style est indiqué au modèle : sans lui, il fusionne un titre avec
+        # le corps du texte sans savoir qu'il détruit la mise en forme.
+        style = ""
+        try:
+            name = str(para.getPropertyValue("ParaStyleName") or "")
+            if name and name not in ("Standard", "Default Paragraph Style",
+                                     "Corps de texte", "Text Body"):
+                style = f" <{name}>"
+        except Exception:
+            style = ""
+        line = (f"[P{index}]{style} {content}" if content.strip()
+                else f"[P{index}]{style} (vide)")
         total += len(line) + 1
         if total > max_chars:
             truncated = True
@@ -50,6 +66,12 @@ def get_document_map(ctx, args):
     body = "\n".join(lines)
     if truncated:
         body += f"\n[... document tronqué à {max_chars} caractères ...]"
+    else:
+        # Dire explicitement où s'arrête le document : sans ce repère, une
+        # demande portant sur « tout le document » ne traitait que les premiers
+        # paragraphes, le modèle ignorant combien il y en avait.
+        body += (f"\n[FIN DU DOCUMENT — {index} paragraphes au total, "
+                 f"de [P1] à [P{index}]]")
     return ToolResult(call_id="", ok=True, content=body or "(document vide)",
                       data={"paragraph_count": index, "truncated": truncated})
 
@@ -94,19 +116,42 @@ def replace_paragraphs(ctx, args):
     end = min(end, len(paragraphs))
 
     ctx.undo_begin("Réécriture de paragraphes")
-    body = ctx.model.Text
-    # Un curseur qui couvre du DÉBUT du premier paragraphe à la FIN du dernier :
-    # setString() sur cette étendue remplace le bloc d'un seul geste, et les
-    # « \n » du texte deviennent de vrais paragraphes.
-    cursor = body.createTextCursorByRange(paragraphs[start - 1].getStart())
-    cursor.gotoRange(paragraphs[end - 1].getEnd(), True)
-    cursor.setString(text)
+    targets = paragraphs[start - 1:end]
+    new_texts = text.split("\n")
 
-    replaced = end - start + 1
+    # Remplacer PARAGRAPHE PAR PARAGRAPHE, jamais une plage d'un seul geste.
+    # `setString` sur une étendue couvrant plusieurs paragraphes applique le
+    # style du PREMIER à tout le bloc : un document dont [P1] est un titre se
+    # retrouvait intégralement en style titre. Écrire dans chaque paragraphe
+    # séparément préserve le style de chacun — c'est la recette du code
+    # historique (`_run_whole_doc_edit`, remplacement ciblé par paragraphe).
+    # strict=False assumé : les longueurs diffèrent dès qu'on change le nombre
+    # de paragraphes, et le surplus est traité juste après.
+    for para, new_text in zip(targets, new_texts, strict=False):
+        para.setString(new_text)
+
+    body = ctx.model.Text
+    if len(new_texts) < len(targets):
+        # Moins de paragraphes qu'avant : vider puis supprimer le surplus.
+        for para in targets[len(new_texts):]:
+            try:
+                body.removeTextContent(para)
+            except Exception:
+                para.setString("")
+    elif len(new_texts) > len(targets):
+        # Plus de paragraphes qu'avant : les ajouter après le dernier, qui
+        # sert de modèle de style.
+        cursor = body.createTextCursorByRange(targets[-1].getEnd())
+        for extra in new_texts[len(targets):]:
+            body.insertControlCharacter(cursor, PARAGRAPH_BREAK, False)
+            body.insertString(cursor, extra, False)
+
     return ToolResult(
         call_id="", ok=True,
-        content=f"{replaced} paragraphe(s) remplacé(s) par {len(text)} caractères.",
-        data={"replaced": replaced, "start": start, "end": end})
+        content=(f"{len(targets)} paragraphe(s) remplacé(s) par "
+                 f"{len(new_texts)} paragraphe(s) ; styles préservés."),
+        data={"replaced": len(targets), "written": len(new_texts),
+              "start": start, "end": end})
 
 
 def replace_selection(ctx, args):
@@ -198,7 +243,14 @@ def register(registry):
             "writer_get_document_map) par un nouveau texte. C'est L'OUTIL à "
             "utiliser pour restructurer, réorganiser ou réécrire tout ou partie "
             "du document quand rien n'est sélectionné. Les sauts de ligne du "
-            "texte créent de nouveaux paragraphes."),
+            "texte créent de nouveaux paragraphes. "
+            "POUR TOUT LE DOCUMENT : start=1 et end = le DERNIER numéro indiqué "
+            "par la carte (elle se termine par « FIN DU DOCUMENT — N paragraphes »). "
+            "ATTENTION AUX STYLES : la carte signale les styles entre chevrons, "
+            "par exemple « [P1] <Titre> ». Le style de chaque paragraphe est "
+            "conservé, donc n'écrase JAMAIS un titre avec du corps de texte — "
+            "laisse-le hors de la plage, ou garde-le comme premier paragraphe "
+            "de ton remplacement."),
         parameters={"type": "object", "properties": {
             "start": {"type": "integer", "minimum": 1,
                       "description": "Numéro du premier paragraphe à remplacer (1 = [P1])."},

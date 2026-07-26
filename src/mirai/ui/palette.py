@@ -386,6 +386,7 @@ class AssistantPalette:
         self.busy = False
         self.active_tab = self._restore_tab(shell)
         self._bottom_height = 0        # ajusté par le redimensionnement
+        self._current_exchange = []    # tour en cours, affiché en tête du fil
         self._base_bottom_h = 0        # hauteur de zone basse au premier layout
         self._natural_height = 0       # hauteur totale au premier layout
         self._min_width = 0            # largeur qui garde les chips sur UNE ligne
@@ -639,8 +640,12 @@ class AssistantPalette:
         if control is not None:
             control.setPosSize(int(x), int(y), int(w), int(h), 15)  # POSSIZE
 
-    def _layout(self):
-        """Positionne tout à partir des tailles réelles de rendu."""
+    def _layout(self, width=None):
+        """Positionne tout à partir des tailles réelles de rendu.
+
+        `width` force la largeur (redimensionnement) ; sinon on repart de la
+        largeur naturelle calculée à l'échelle du rendu.
+        """
         # Échelle dérivée de la hauteur réelle d'une chip (HiDPI-safe)
         chip_prefs = {}
         line_h = 18
@@ -654,7 +659,7 @@ class AssistantPalette:
         margin = int(10 * scale)
         gap = int(6 * scale)
         chip_h = int(line_h + 6 * scale)
-        width = int(500 * scale)
+        width = int(width or self._width or 500 * scale)
         self._width = width
 
         # Bandeau
@@ -914,35 +919,61 @@ class AssistantPalette:
             return suggestions.suggest("calc", cell_count=count, values=values)
         return suggestions.suggest(self.app)
 
+    # ── Fil de conversation (main courante : le plus récent EN HAUT) ────
+
     def _render_conversation(self):
+        """Recompose le fil : échange en cours d'abord, puis l'historique.
+
+        Ordre antichronologique — on lit une main courante par le haut, sans
+        avoir à faire défiler pour voir ce qui vient d'arriver.
+        """
+        blocks = []
+        if self._current_exchange:
+            blocks.append("\n".join(self._current_exchange))
+
         entries = self.conversation.load()
-        lines = []
+        # Les entrées arrivent dans l'ordre chronologique, par paires
+        # (utilisateur, assistant) : on regroupe puis on inverse les groupes,
+        # sans inverser l'intérieur d'un échange — une réponse au-dessus de sa
+        # question serait illisible.
+        exchange, grouped = [], []
         for entry in entries:
+            if entry["role"] == "user" and exchange:
+                grouped.append(exchange)
+                exchange = []
             prefix = "Vous : " if entry["role"] == "user" else "MIrAI : "
-            lines.append(prefix + entry["text"])
-        self._models["response"].Text = "\n\n".join(lines)
+            exchange.append(prefix + entry["text"])
+        if exchange:
+            grouped.append(exchange)
+
+        for group in reversed(grouped):
+            blocks.append("\n".join(group))
+
+        text = "\n———\n".join(blocks)
+        self.dispatcher.post(
+            lambda: self._models["response"].__setattr__("Text", text))
 
     def _append_response(self, prefix, text=""):
-        def _apply():
-            current = self._models["response"].Text
-            addition = (prefix + text) if text or prefix else ""
-            self._models["response"].Text = (
-                (current + "\n\n" + addition) if current else addition)
-        self.dispatcher.post(_apply)
+        """Ajoute une ligne à l'échange EN COURS, affiché en tête du fil."""
+        self._current_exchange.append((prefix + text) if text else prefix)
+        self._render_conversation()
 
     def _stream_response(self, chunk):
         """Entrée du flux : on accumule, le tampon décide quand publier."""
         self._delta_buffer.add(chunk)
 
     def _flush_deltas(self, text):
-        def _apply():
-            self._models["response"].Text = self._models["response"].Text + text
-        self.dispatcher.post(_apply)
+        """Le flux alimente la DERNIÈRE ligne de l'échange en cours."""
+        if not self._current_exchange:
+            self._current_exchange.append("MIrAI : ")
+        self._current_exchange[-1] += text
+        self._render_conversation()
 
     def _on_clear(self):
         if self.busy:
             return
         self.conversation.clear()
+        self._current_exchange = []
         self._models["response"].Text = ""
         self.set_journal_text("")
         self.set_status("Conversation effacée.")
@@ -1037,6 +1068,7 @@ class AssistantPalette:
         self.busy = True
         self._cancel = threading.Event()
         self._delta_buffer.reset()
+        self._current_exchange = []    # nouvel échange : le précédent est persisté
         self._set_send_label(running=True)
         # La réponse arrive dans l'Historique : si l'utilisateur regarde un
         # autre onglet, il ne verrait RIEN se produire. On bascule donc pour lui.

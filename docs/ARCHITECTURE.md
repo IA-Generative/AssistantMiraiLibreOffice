@@ -87,6 +87,15 @@ Principe clé (petits modèles) : **la prose longue ne transite jamais en
 argument JSON** — elle est streamée en réponse finale vers un *sink*
 (`sinks.py` : PaletteSink, WriterInsertSink, WriterReplaceSink, CalcCellSink).
 
+**Règle d'écriture : jamais de `setString` sur une plage multi-paragraphes.**
+LibreOffice applique alors le style du PREMIER paragraphe à tout le bloc — un
+document titre + corps repart intégralement en style titre. On écrit donc
+paragraphe par paragraphe (`para.setString`), on supprime le surplus par
+`removeTextContent`, et les paragraphes ajoutés héritent du style du **dernier**
+remplacé. `writer_get_document_map` annote les styles (`[P1] <Heading 1>`) et
+termine par `[FIN DU DOCUMENT — N paragraphes]` : sans ces deux repères, le
+modèle fusionne un titre avec le corps, ou s'arrête avant la fin.
+
 **Règle de complétude du catalogue.** Tout outil de LECTURE doit avoir son
 pendant d'ÉCRITURE à la même granularité, sinon le modèle sait décrire ce
 qu'il faudrait faire sans pouvoir le faire — et l'utilisateur voit « il ne se
