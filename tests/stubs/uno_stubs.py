@@ -146,15 +146,19 @@ def make_job(config_dir=None):
     ctx.ServiceManager = service_manager
     ctx.getServiceManager.return_value = service_manager
 
-    job = MainJob(ctx)
+    # Le rafraîchissement de configuration est désarmé AVANT la construction :
+    # `MainJob.__init__` le lance en tâche de fond, et ce thread réécrit
+    # config.json. Le neutraliser après coup laisse la course ouverte — selon la
+    # charge, il écrase la valeur que le test vient d'écrire, et l'échec se
+    # déplace d'un test à l'autre. On patche donc la CLASSE le temps de
+    # l'instanciation, puis on la restaure pour ne rien laisser fuir.
+    original_schedule = MainJob._schedule_config_refresh
+    MainJob._schedule_config_refresh = lambda self, *a, **k: None
+    try:
+        job = MainJob(ctx)
+    finally:
+        MainJob._schedule_config_refresh = original_schedule
 
-    # `MainJob.__init__` lance un rafraîchissement de configuration en tâche de
-    # fond. Il réécrit config.json et peut rappeler `_fetch_config` — donc
-    # entrer en course avec le test : selon la charge de la machine, une
-    # assertion `assert_called_once` voit deux appels, ou une valeur qu'on vient
-    # d'écrire est écrasée. On laisse ce thread finir, puis on le désarme.
-    # C'est le seul moyen d'avoir une suite déterministe ; les tests qui
-    # veulent exercer le rafraîchissement l'appellent explicitement.
     deadline = time.time() + 2.0
     while getattr(job, "_fetching_config", False) and time.time() < deadline:
         time.sleep(0.01)

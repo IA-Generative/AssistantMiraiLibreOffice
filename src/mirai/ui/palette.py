@@ -1099,21 +1099,50 @@ class AssistantPalette:
             preset.label + ((" — " + prompt_text) if prompt_text else ""))
         self._append_response("Vous : ", shown)
 
+        # Instantané pris ICI, sur le thread principal. Un `call()` depuis le
+        # worker dépend d'AsyncCallback, qui n'est délivré qu'au prochain
+        # réveil de la boucle d'événements : LibreOffice au repos, l'attente
+        # peut dépasser le délai et le run échoue sur « LibreOffice était
+        # occupé ». Tout ce qui est lisible d'avance l'est donc maintenant.
+        snapshot = self._document_snapshot(ctx, preset, prompt_text)
+
         self._worker = threading.Thread(
             target=self._run_in_worker,
-            args=(preset, prompt_text, ctx, shown),
+            args=(preset, prompt_text, ctx, shown, snapshot),
             daemon=True, name="mirai-run")
         self._worker.start()
 
-    def _run_in_worker(self, preset, prompt_text, ctx, shown):
+    def _document_snapshot(self, ctx, preset, prompt_text):
+        """Lit d'avance ce dont le run aura besoin. Thread principal uniquement."""
+        snapshot = {"selection": "", "paragraphs": [], "rewrite": False}
+        try:
+            snapshot["selection"] = _selection_string(ctx) or ""
+        except Exception:
+            pass
+        if (preset is None and ctx.app == "writer"
+                and not snapshot["selection"].strip()
+                and doc_rewrite.wants_document_rewrite(prompt_text)):
+            try:
+                from ..core.tools.writer_tools import _paragraphs
+                snapshot["paragraphs"] = [p.getString() for p in _paragraphs(ctx)]
+                snapshot["rewrite"] = True
+            except Exception as exc:
+                self.shell.log(f"[palette] lecture du document impossible : {exc}")
+        return snapshot
+
+    def _run_in_worker(self, preset, prompt_text, ctx, shown, snapshot=None):
         """Corps du run — s'exécute HORS du thread principal.
 
         Aucun accès direct à l'UI ni au document ici : tout passe par
         `self.dispatcher` (post pour l'affichage, call pour le document).
         """
+        snapshot = snapshot or {}
         try:
             if preset is not None and preset.mode == "pipeline":
                 self._run_pipeline(preset, prompt_text, ctx, shown)
+            elif snapshot.get("rewrite"):
+                self._run_document_rewrite(ctx, prompt_text,
+                                           snapshot["paragraphs"])
             else:
                 self._run_agentic(preset, prompt_text, ctx)
             self._delta_buffer.flush()
@@ -1155,9 +1184,6 @@ class AssistantPalette:
         taille moyenne lisent le document puis répondent du texte sans jamais
         appeler l'outil d'écriture ; on cesse donc d'en dépendre.
         """
-        if preset is None and self._should_rewrite_document(ctx, prompt_text):
-            self._run_document_rewrite(ctx, prompt_text)
-            return
 
         orchestrator = Orchestrator(
             LLMClient(self.shell), self.registry, ctx,
@@ -1178,27 +1204,14 @@ class AssistantPalette:
         elif not isinstance(sink, PaletteSink):
             self._stream_response(result.text or "Modification appliquée.")
 
-    def _should_rewrite_document(self, ctx, prompt_text):
-        """Vrai si : Writer, aucune sélection, et une demande de modification."""
-        if ctx.app != "writer":
-            return False
-        if not doc_rewrite.wants_document_rewrite(prompt_text):
-            return False
-        selection = self.dispatcher.call(
-            lambda: _selection_string(ctx), timeout=10)
-        return not (selection or "").strip()
-
-    def _run_document_rewrite(self, ctx, instruction):
+    def _run_document_rewrite(self, ctx, instruction, originals):
         """Réécrit le document : Python lit, le LLM rédige, Python applique.
 
         Aucun tool call n'est demandé au modèle — c'est ce qui rend l'opération
         fiable là où le mode agentique échouait silencieusement.
         """
-        from ..core.tools.writer_tools import _paragraphs, replace_paragraphs
+        from ..core.tools.writer_tools import replace_paragraphs
 
-        self._progress.set_phase("Lecture du document")
-        originals = self.dispatcher.call(
-            lambda: [p.getString() for p in _paragraphs(ctx)], timeout=20)
         if not originals:
             self._append_response("MIrAI : ", "Le document est vide.")
             return
@@ -1228,16 +1241,15 @@ class AssistantPalette:
             return
 
         self._progress.set_phase("Application au document")
-        result = self.dispatcher.call(
-            lambda: replace_paragraphs(
-                ctx, {"start": 1, "end": len(originals),
-                      "text": "\n".join(rewritten)}),
-            timeout=30)
-        self.dispatcher.call(ctx.undo_end, timeout=10)
 
-        if not result.ok:
-            self._stream_response(f"\n⚠ {result.error}")
-            return
+        def _apply():
+            replace_paragraphs(ctx, {"start": 1, "end": len(originals),
+                                     "text": "\n".join(rewritten)})
+            ctx.undo_end()
+
+        # `post` et non `call` : on n'a pas besoin du résultat, et attendre
+        # exposerait au délai d'AsyncCallback décrit plus haut.
+        self.dispatcher.post(_apply)
         summary = (f"Document réécrit : {len(originals)} → {len(rewritten)} "
                    f"paragraphe(s). Ctrl+Z pour annuler.")
         self._stream_response("\n" + summary)
