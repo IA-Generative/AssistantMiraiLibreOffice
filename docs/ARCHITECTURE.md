@@ -52,6 +52,14 @@
    - **Anti-flood** : les deltas sont coalescés (~120 ms ou ~80 caractères)
      avant d'être postés, sinon la file du thread principal sature et
      l'application redevient molle.
+   - **Coût du rendu** : la coalescence ne sert à rien si chaque flush
+     recompose tout l'affichage. Le coût par flush doit être proportionnel au
+     fragment, pas à l'historique — et un rendu ne relit JAMAIS une source
+     persistée (l'historique du fil est en cache, invalidé quand il change).
+   - **Filet d'état** : les mises à jour de fin de run sont postées, donc
+     perdables. `heal_if_stuck()` (sur `windowActivated`) restaure l'interface
+     si elle est « occupée » sans worker vivant. Toute machine à états pilotée
+     par messages asynchrones a besoin d'un tel filet.
 2. **Zéro import de la coquille** dans `core/` et `ui/` — la façade
    `shell_facade.MainJobShell` duck-type l'objet MainJob. Règle exécutable :
    `tests/unit/core/test_no_entrypoint_import.py`.
