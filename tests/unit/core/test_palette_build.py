@@ -448,3 +448,263 @@ def test_marker_appears_only_when_there_is_something_to_read(palette_module):
 
     palette.set_reasoning("")
     assert palette._models["reasoning_toggle"].Label == ""
+
+
+# ── Span de run unifié (AssistantRun sur les 4 chemins) ─────────────────
+# L'orchestrateur n'émettait le span QUE pour le mode agentique : pipeline,
+# réécriture de sélection et réécriture de document étaient invisibles.
+# Le point d'émission unique est le finally de `_run_in_worker`.
+
+import threading
+from types import SimpleNamespace
+
+
+def _run_spans(palette):
+    return [c.args[1] for c in palette.shell.telemetry.call_args_list
+            if c.args and c.args[0] == "AssistantRun"]
+
+
+def _step_spans(palette_or_shell, step_name):
+    from src.mirai.core import telemetry_steps
+    shell = getattr(palette_or_shell, "shell", palette_or_shell)
+    return [c.args[1] for c in shell.telemetry.call_args_list
+            if c.args and c.args[0] == telemetry_steps.SPAN
+            and c.args[1].get("step.name") == step_name]
+
+
+def _fake_preset(**overrides):
+    base = dict(id="summarize", label="📝 Résumer", mode="pipeline",
+                needs_input=False, input_hint="", apps=("writer",))
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_worker_emits_exactly_one_run_span(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_run_pipeline",
+                        lambda preset, prompt, ctx, shown: {"ok": True})
+    palette._run_in_worker(_fake_preset(), "", MagicMock(), "shown")
+
+    spans = _run_spans(palette)
+    assert len(spans) == 1
+    attrs = spans[0]
+    assert attrs["run.kind"] == "pipeline"
+    assert attrs["assistant.preset"] == "summarize"
+    assert attrs["assistant.ok"] is True
+    assert attrs["assistant.cancelled"] is False
+    assert attrs["append.mode"] is False
+    assert isinstance(attrs["assistant.duration_ms"], int)
+    assert "assistant.reason" not in attrs, "pas de reason sur un succès"
+
+
+def test_selection_rewrite_branch_has_its_kind(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_run_selection_rewrite",
+                        lambda ctx, prompt, selection: {"ok": True})
+    palette._run_in_worker(None, "réécris ce passage", MagicMock(), "shown",
+                           snapshot={"rewrite_selection": True,
+                                     "selection": "du texte"})
+    assert _run_spans(palette)[0]["run.kind"] == "selection_rewrite"
+    assert _run_spans(palette)[0]["assistant.preset"] == "free"
+
+
+def test_document_rewrite_branch_has_its_kind(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_run_document_rewrite",
+                        lambda ctx, prompt, paragraphs, styles: {"ok": True})
+    palette._run_in_worker(None, "réécris tout", MagicMock(), "shown",
+                           snapshot={"rewrite": True, "paragraphs": ["a"],
+                                     "styles": [""]})
+    assert _run_spans(palette)[0]["run.kind"] == "document_rewrite"
+
+
+def test_agentic_summary_reaches_the_span(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_run_agentic",
+                        lambda preset, prompt, ctx: {
+                            "ok": False, "reason": "max_iterations",
+                            "mode": "json", "iterations": 6})
+    palette._run_in_worker(None, "demande libre", MagicMock(), "shown")
+
+    attrs = _run_spans(palette)[0]
+    assert attrs["run.kind"] == "agentic"
+    assert attrs["assistant.ok"] is False
+    assert attrs["assistant.reason"] == "max_iterations"
+    assert attrs["assistant.mode"] == "json"
+    assert attrs["assistant.iterations"] == 6
+
+
+def test_a_crashed_run_still_emits_its_span(palette_module, monkeypatch):
+    def _boom(preset, prompt, ctx):
+        raise RuntimeError("panne interne")
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_run_agentic", _boom)
+    palette._run_in_worker(None, "demande", MagicMock(), "shown")
+
+    attrs = _run_spans(palette)[0]
+    assert attrs["assistant.ok"] is False
+    assert attrs["assistant.reason"] == "exception"
+    assert "panne interne" not in str(attrs), "jamais le texte de l'erreur"
+
+
+def test_a_closed_palette_still_emits_its_span(palette_module, monkeypatch):
+    from src.mirai.core.ui_thread import DispatcherClosed
+
+    def _closed(preset, prompt, ctx):
+        raise DispatcherClosed("fermée")
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_run_agentic", _closed)
+    palette._run_in_worker(None, "demande", MagicMock(), "shown")
+
+    assert _run_spans(palette)[0]["assistant.reason"] == "palette_closed"
+
+
+def test_a_cancelled_run_is_flagged(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    palette._cancel = threading.Event()
+    palette._cancel.set()
+    monkeypatch.setattr(palette, "_run_agentic",
+                        lambda preset, prompt, ctx: {"ok": False,
+                                                     "reason": "cancelled"})
+    palette._run_in_worker(None, "demande", MagicMock(), "shown")
+
+    attrs = _run_spans(palette)[0]
+    assert attrs["assistant.cancelled"] is True
+    assert attrs["assistant.reason"] == "cancelled"
+
+
+def test_document_rewrite_reports_why_it_did_nothing(palette_module):
+    """Les sorties anticipées doivent nommer leur cause dans le résumé."""
+    palette = _build(palette_module)
+    assert palette._run_document_rewrite(
+        MagicMock(), "x", []) == {"ok": False, "reason": "empty_document"}
+    assert palette._run_document_rewrite(
+        MagicMock(), "x", ["Titre"], ["Heading 1"]) == {
+            "ok": False, "reason": "headings_only"}
+
+
+# ── Refus de lancement ──────────────────────────────────────────────────
+
+def test_an_empty_prompt_refusal_is_counted(palette_module):
+    palette = _build(palette_module)
+    palette._start_run(preset=None)
+
+    spans = _step_spans(palette, "run.refused")
+    assert len(spans) == 1
+    assert spans[0]["refuse.reason"] == "empty_prompt"
+    assert palette.busy is False
+
+
+def test_the_same_refusal_twice_is_emitted_once(palette_module):
+    """Entrée martelée sur un prompt vide : un span, pas une rafale."""
+    palette = _build(palette_module)
+    palette._start_run(preset=None)
+    palette._start_run(preset=None)
+    assert len(_step_spans(palette, "run.refused")) == 1
+
+
+def test_a_different_refusal_is_emitted_again(palette_module):
+    palette = _build(palette_module)
+    palette._start_run(preset=None)                      # empty_prompt
+    palette._start_run(preset=_fake_preset(
+        id="transform", needs_input=True,
+        input_hint="Décrivez la transformation."))       # preset_needs_input
+
+    reasons = [s["refuse.reason"] for s in _step_spans(palette, "run.refused")]
+    assert reasons == ["empty_prompt", "preset_needs_input"]
+    assert _step_spans(palette, "run.refused")[1]["preset.name"] == "transform"
+
+
+def test_wrong_app_refusal_is_counted(palette_module):
+    palette = _build(palette_module, "writer")
+    palette._models["prompt"].Text = "transforme la colonne"
+    palette._start_run(preset=_fake_preset(id="transform", apps=("calc",)))
+    assert _step_spans(palette, "run.refused")[0]["refuse.reason"] == "wrong_app"
+
+
+def test_no_document_refusal_is_counted(palette_module):
+    palette = _build(palette_module)
+    palette._models["prompt"].Text = "résume"
+    palette.uno_ctx.getServiceManager.return_value.createInstanceWithContext \
+        .return_value.getCurrentComponent.return_value = None
+    palette._start_run(preset=None)
+    assert _step_spans(palette, "run.refused")[0]["refuse.reason"] == "no_document"
+
+
+# ── Session : compteurs agrégés, un seul span à la fermeture ────────────
+# Un span par clic d'onglet saturerait l'envoi (1 span = 1 requête HTTP) :
+# les interactions IHM sont comptées en mémoire et partent en UNE fois.
+
+def test_close_emits_one_session_summary(palette_module):
+    palette = _build(palette_module)
+    palette._on_tab_click("journal")
+    palette._on_tab_click("suggestions")
+    palette.toggle_reasoning()      # ouverture : comptée
+    palette.toggle_reasoning()      # fermeture : non comptée
+    palette._on_clear()
+    palette.set_append_mode(True)
+
+    palette.close()
+    palette.close()                 # croix + dispose : jamais deux spans
+
+    spans = _step_spans(palette, "palette.closed")
+    assert len(spans) == 1
+    attrs = spans[0]
+    assert attrs["tabs.switches"] == 2
+    assert attrs["suggestions.views"] == 1
+    assert attrs["reasoning.opens"] == 1
+    assert attrs["conversation.clears"] == 1
+    assert attrs["append.toggles"] == 1
+    assert attrs["runs.count"] == 0
+    assert isinstance(attrs["session.duration_ms"], int)
+
+
+def test_programmatic_tab_switches_are_not_counted(palette_module):
+    """`select_tab` est appelé par show(), les runs, la restauration : seul le
+    CLIC de l'utilisateur mesure un usage."""
+    palette = _build(palette_module)
+    palette.select_tab("journal")
+    palette.select_tab("response")
+    palette.close()
+    assert _step_spans(palette, "palette.closed")[0]["tabs.switches"] == 0
+
+
+def test_runs_are_counted_in_the_session(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_run_agentic",
+                        lambda preset, prompt, ctx: {"ok": True})
+    palette._run_in_worker(None, "demande", MagicMock(), "shown")
+    palette.close()
+    assert _step_spans(palette, "palette.closed")[0]["runs.count"] == 1
+
+
+def test_refocusing_an_open_palette_is_telemetered(palette_module):
+    palette = _build(palette_module)
+    palette_module._open_palette[0] = palette
+    shell = MagicMock()
+
+    result = palette_module.open_or_focus(MagicMock(), shell, "writer", {})
+
+    assert result is palette
+    assert len(_step_spans(shell, "palette.refocused")) == 1
+
+
+# ── Filet anti-blocage ──────────────────────────────────────────────────
+
+def test_heal_stuck_is_telemetered(palette_module):
+    """Chaque déclenchement du filet = un lot de messages async perdus.
+    Sa fréquence sur le parc est un signal de santé, pas un détail."""
+    palette = _build(palette_module)
+    palette.busy = True
+    palette._worker = None
+
+    palette.heal_if_stuck()
+
+    assert palette.busy is False
+    assert len(_step_spans(palette, "ui.heal_stuck")) == 1
+
+
+def test_heal_does_nothing_on_a_healthy_palette(palette_module):
+    palette = _build(palette_module)
+    palette.heal_if_stuck()
+    assert _step_spans(palette, "ui.heal_stuck") == []

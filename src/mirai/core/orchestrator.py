@@ -91,7 +91,6 @@ class Orchestrator:
         self.max_iterations = max_iterations
 
     def run_agentic(self, user_prompt, sink, preset_extra="", preset_id="free"):
-        started = time.monotonic()
         # En mode configuré "auto", le prompt système garde le protocole JSON
         # (un flip natif→json en cours de run reste couvert).
         prompt_mode = (self.llm.configured_mode
@@ -149,15 +148,11 @@ class Orchestrator:
                                    "précisant la demande.")
             return result
         finally:
+            # Le span AssistantRun est émis par le worker de la palette — point
+            # unique couvrant les QUATRE chemins d'exécution. Le RunResult
+            # retourné porte déjà tout ce que le span disait (ok, iterations,
+            # reason) : un second émetteur ici ferait diverger deux formats.
             self._on_main(self.ctx.undo_end)
-            self.ctx.shell.telemetry("AssistantRun", {
-                "plugin.action": "assistant.run",
-                "assistant.preset": preset_id,
-                "assistant.mode": self.llm.effective_mode(),
-                "assistant.iterations": str(result.iterations),
-                "assistant.ok": str(result.ok).lower(),
-                "assistant.duration_ms": str(int((time.monotonic() - started) * 1000)),
-            })
 
     def _with_scope(self, user_prompt):
         """Préfixe la demande par sa PORTÉE, lue sur le document.
