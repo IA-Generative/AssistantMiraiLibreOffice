@@ -464,9 +464,8 @@ def _run_spans(palette):
             if c.args and c.args[0] == "AssistantRun"]
 
 
-def _step_spans(palette_or_shell, step_name):
+def _step_spans(shell, step_name):
     from src.mirai.core import telemetry_steps
-    shell = getattr(palette_or_shell, "shell", palette_or_shell)
     return [c.args[1] for c in shell.telemetry.call_args_list
             if c.args and c.args[0] == telemetry_steps.SPAN
             and c.args[1].get("step.name") == step_name]
@@ -589,7 +588,7 @@ def test_an_empty_prompt_refusal_is_counted(palette_module):
     palette = _build(palette_module)
     palette._start_run(preset=None)
 
-    spans = _step_spans(palette, "run.refused")
+    spans = _step_spans(palette.shell, "run.refused")
     assert len(spans) == 1
     assert spans[0]["refuse.reason"] == "empty_prompt"
     assert palette.busy is False
@@ -600,7 +599,7 @@ def test_the_same_refusal_twice_is_emitted_once(palette_module):
     palette = _build(palette_module)
     palette._start_run(preset=None)
     palette._start_run(preset=None)
-    assert len(_step_spans(palette, "run.refused")) == 1
+    assert len(_step_spans(palette.shell, "run.refused")) == 1
 
 
 def test_a_different_refusal_is_emitted_again(palette_module):
@@ -610,16 +609,16 @@ def test_a_different_refusal_is_emitted_again(palette_module):
         id="transform", needs_input=True,
         input_hint="Décrivez la transformation."))       # preset_needs_input
 
-    reasons = [s["refuse.reason"] for s in _step_spans(palette, "run.refused")]
+    reasons = [s["refuse.reason"] for s in _step_spans(palette.shell, "run.refused")]
     assert reasons == ["empty_prompt", "preset_needs_input"]
-    assert _step_spans(palette, "run.refused")[1]["preset.name"] == "transform"
+    assert _step_spans(palette.shell, "run.refused")[1]["preset.name"] == "transform"
 
 
 def test_wrong_app_refusal_is_counted(palette_module):
     palette = _build(palette_module, "writer")
     palette._models["prompt"].Text = "transforme la colonne"
     palette._start_run(preset=_fake_preset(id="transform", apps=("calc",)))
-    assert _step_spans(palette, "run.refused")[0]["refuse.reason"] == "wrong_app"
+    assert _step_spans(palette.shell, "run.refused")[0]["refuse.reason"] == "wrong_app"
 
 
 def test_no_document_refusal_is_counted(palette_module):
@@ -628,7 +627,7 @@ def test_no_document_refusal_is_counted(palette_module):
     palette.uno_ctx.getServiceManager.return_value.createInstanceWithContext \
         .return_value.getCurrentComponent.return_value = None
     palette._start_run(preset=None)
-    assert _step_spans(palette, "run.refused")[0]["refuse.reason"] == "no_document"
+    assert _step_spans(palette.shell, "run.refused")[0]["refuse.reason"] == "no_document"
 
 
 # ── Session : compteurs agrégés, un seul span à la fermeture ────────────
@@ -647,7 +646,7 @@ def test_close_emits_one_session_summary(palette_module):
     palette.close()
     palette.close()                 # croix + dispose : jamais deux spans
 
-    spans = _step_spans(palette, "palette.closed")
+    spans = _step_spans(palette.shell, "palette.closed")
     assert len(spans) == 1
     attrs = spans[0]
     assert attrs["tabs.switches"] == 2
@@ -666,7 +665,7 @@ def test_programmatic_tab_switches_are_not_counted(palette_module):
     palette.select_tab("journal")
     palette.select_tab("response")
     palette.close()
-    assert _step_spans(palette, "palette.closed")[0]["tabs.switches"] == 0
+    assert _step_spans(palette.shell, "palette.closed")[0]["tabs.switches"] == 0
 
 
 def test_runs_are_counted_in_the_session(palette_module, monkeypatch):
@@ -675,7 +674,7 @@ def test_runs_are_counted_in_the_session(palette_module, monkeypatch):
                         lambda preset, prompt, ctx: {"ok": True})
     palette._run_in_worker(None, "demande", MagicMock(), "shown")
     palette.close()
-    assert _step_spans(palette, "palette.closed")[0]["runs.count"] == 1
+    assert _step_spans(palette.shell, "palette.closed")[0]["runs.count"] == 1
 
 
 def test_refocusing_an_open_palette_is_telemetered(palette_module):
@@ -701,10 +700,10 @@ def test_heal_stuck_is_telemetered(palette_module):
     palette.heal_if_stuck()
 
     assert palette.busy is False
-    assert len(_step_spans(palette, "ui.heal_stuck")) == 1
+    assert len(_step_spans(palette.shell, "ui.heal_stuck")) == 1
 
 
 def test_heal_does_nothing_on_a_healthy_palette(palette_module):
     palette = _build(palette_module)
     palette.heal_if_stuck()
-    assert _step_spans(palette, "ui.heal_stuck") == []
+    assert _step_spans(palette.shell, "ui.heal_stuck") == []

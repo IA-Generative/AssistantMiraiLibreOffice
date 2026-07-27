@@ -454,8 +454,8 @@ class AssistantPalette:
         self._delta_buffer = _DeltaCoalescer(self._flush_deltas)
         self._selection_watcher = None      # (listener, contrôleur) — garde vivante
         # Usage de la session : compté en mémoire, envoyé en UNE fois à la
-        # fermeture. Un span par clic d'onglet saturerait l'envoi — une trace
-        # coûte une requête HTTP et un thread (cf. entrypoint).
+        # fermeture. Un span par clic d'onglet saturerait l'envoi — côté
+        # coquille, une trace coûte une requête HTTP et un thread.
         self._opened_at = time.monotonic()
         self._closed = False
         self._session = {"runs": 0, "tabs": 0, "suggestions": 0,
@@ -599,7 +599,7 @@ class AssistantPalette:
                 })
             self._models[name] = tab_model
             handler = dsfr.ClickHandler(
-                tab_model, on_click=(lambda t=tab_id: self.select_tab(t)),
+                tab_model, on_click=(lambda t=tab_id: self._on_tab_click(t)),
                 fg=dsfr.TOKENS["text_mention"], fg_hover=dsfr.TOKENS["primary_hover"])
             control.addMouseListener(handler)
             self._handlers.append(handler)
@@ -874,6 +874,11 @@ class AssistantPalette:
         pendant la fermeture reçoit DispatcherClosed au lieu de toucher un
         contrôle détruit.
         """
+        # La croix de la fenêtre ET le dispose passent tous deux par ici : le
+        # résumé de session ne doit partir qu'une fois.
+        if not self._closed:
+            self._closed = True
+            self._emit_session_summary()
         if self._cancel is not None:
             self._cancel.set()
         # Retirer les listeners AVANT dispose() : l'ordre inverse laisse
@@ -894,6 +899,25 @@ class AssistantPalette:
             pass
         if _open_palette[0] is self:
             _open_palette[0] = None
+
+    def _emit_session_summary(self):
+        """Ce que l'utilisateur a fait de la palette, en UN span de fermeture.
+
+        Émettre à chaque clic coûterait une requête HTTP et un thread par
+        geste — la coquille envoie une trace par span, sans lot : on agrège
+        ici, et on envoie une fois. La durée de session dit si la palette est
+        ouverte le temps d'une demande ou laissée ouverte toute la journée —
+        deux usages qui n'appellent pas les mêmes choix d'ergonomie.
+        """
+        telemetry_steps.emit(self.shell, telemetry_steps.PALETTE_CLOSED, {
+            "session.duration_ms": int((time.monotonic() - self._opened_at) * 1000),
+            "runs.count": self._session["runs"],
+            "tabs.switches": self._session["tabs"],
+            "suggestions.views": self._session["suggestions"],
+            "reasoning.opens": self._session["reasoning"],
+            "conversation.clears": self._session["clears"],
+            "append.toggles": self._session["append_toggles"],
+        })
 
     # ── Mises à jour d'affichage ────────────────────────────────────────
     # Ces méthodes sont appelées indifféremment depuis le thread principal et
@@ -1022,6 +1046,7 @@ class AssistantPalette:
 
     def set_append_mode(self, enabled):
         """Mémorise le choix — il ne doit pas être à refaire à chaque ouverture."""
+        self._session["append_toggles"] += 1
         self.append_mode = bool(enabled)
         try:
             self.shell.set_config("assistant_append_mode",
@@ -1037,6 +1062,18 @@ class AssistantPalette:
         except Exception:
             stored = ""
         return stored if stored in dict(TABS) else "response"
+
+    def _on_tab_click(self, tab_id):
+        """Bascule demandée par l'UTILISATEUR — la seule qui mesure un usage.
+
+        `select_tab` est aussi appelée par l'ouverture, la restauration et le
+        démarrage d'un run : les compter mêlerait le comportement du logiciel
+        à celui de la personne qui s'en sert.
+        """
+        self._session["tabs"] += 1
+        if tab_id == "suggestions":
+            self._session["suggestions"] += 1
+        self.select_tab(tab_id)
 
     def select_tab(self, tab_id):
         """Bascule la zone basse. L'onglet actif est mémorisé en configuration.
@@ -1126,6 +1163,7 @@ class AssistantPalette:
         if self.active_tab == REASONING_PANE:
             self.select_tab(self._tab_before_reasoning or "response")
             return
+        self._session["reasoning"] += 1
         self._tab_before_reasoning = self.active_tab
         self.select_tab(REASONING_PANE)
 
@@ -1225,6 +1263,7 @@ class AssistantPalette:
     def _on_clear(self):
         if self.busy:
             return
+        self._session["clears"] += 1
         self.conversation.clear()
         self._current_exchange = []
         self._history_cache = None
@@ -1302,23 +1341,23 @@ class AssistantPalette:
             return
         prompt_text = self._prompt_text().strip()
         if preset is None and not prompt_text:
-            self.set_status("Tapez d'abord votre demande.", tone="error")
-            return
+            return self._refuse("empty_prompt", "Tapez d'abord votre demande.")
         if preset is not None and preset.needs_input and not prompt_text:
-            self.set_status(preset.input_hint or "Précisez votre demande.",
-                            tone="error")
-            return
+            return self._refuse(
+                "preset_needs_input",
+                preset.input_hint or "Précisez votre demande.", preset)
 
         ctx = self._current_context()
         if ctx is None:
-            self.set_status("Ouvrez un document Writer ou Calc.", tone="error")
-            return
+            return self._refuse("no_document",
+                                "Ouvrez un document Writer ou Calc.", preset)
         if preset is not None and ctx.app not in preset.apps:
             wanted = "Writer" if "writer" in preset.apps else "Calc"
-            self.set_status(f"Cette action nécessite un document {wanted}.",
-                            tone="error")
-            return
+            return self._refuse(
+                "wrong_app", f"Cette action nécessite un document {wanted}.",
+                preset)
 
+        self._last_refusal = ""
         self.busy = True
         self._cancel = threading.Event()
         self._delta_buffer.reset()
@@ -1354,6 +1393,25 @@ class AssistantPalette:
             args=(preset, prompt_text, ctx, shown, snapshot),
             daemon=True, name="mirai-run")
         self._worker.start()
+
+    def _refuse(self, reason, message, preset=None):
+        """Refuse le lancement en le DISANT — à l'utilisateur et au parc.
+
+        Ces refus étaient invisibles : un preset systématiquement lancé sans
+        sélection, ou un raccourci utilisé dans la mauvaise application, ne
+        laissaient qu'un statut rouge que personne ne remonte. La télémétrie
+        ne part pas par `journal_line` : le journal est vidé au démarrage du
+        run suivant, et un refus n'est pas une étape de run.
+        """
+        self.set_status(message, tone="error")
+        # Entrée martelée sur un prompt vide : un span, pas une rafale.
+        if self._last_refusal != reason:
+            self._last_refusal = reason
+            attributes = {"refuse.reason": reason}
+            if preset is not None:
+                attributes["preset.name"] = preset.id
+            telemetry_steps.emit(self.shell, telemetry_steps.RUN_REFUSED,
+                                 attributes)
 
     def _model_can_chain_tools(self):
         """Le modèle sait-il enchaîner lecture → écriture ?
@@ -1842,6 +1900,10 @@ def open_or_focus(uno_ctx, shell, app, callbacks):
         try:
             existing.dialog.setVisible(True)
             existing.dialog.setFocus()
+            # Rouvrir une palette DÉJÀ ouverte n'est pas une ouverture : le
+            # confondre avec elle gonflerait AssistantOpen d'un geste qui dit
+            # surtout que la fenêtre s'était perdue derrière le document.
+            telemetry_steps.emit(shell, telemetry_steps.PALETTE_REFOCUSED)
             return existing
         except Exception:
             _open_palette[0] = None
