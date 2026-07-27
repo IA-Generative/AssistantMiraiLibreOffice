@@ -997,6 +997,10 @@ class AssistantPalette:
         if not self.busy or (worker is not None and worker.is_alive()):
             return
         self.shell.log("[palette] interface bloquée en état occupé — réparation")
+        # Chaque déclenchement = un lot de messages asynchrones jamais délivré.
+        # Le filet transforme un blocage définitif en gêne d'une seconde, mais
+        # sa FRÉQUENCE sur le parc dit si le transport UNO tient la charge.
+        telemetry_steps.emit(self.shell, telemetry_steps.UI_HEAL_STUCK)
         self.busy = False
         self._cancel = None
         self._worker = None
@@ -1600,9 +1604,7 @@ class AssistantPalette:
 
         extra, user_prompt, sink = self._prepare_agentic_run(preset, prompt_text, ctx)
         self._append_response("MIrAI : ")
-        result = orchestrator.run_agentic(
-            user_prompt, sink, preset_extra=extra,
-            preset_id=preset.id if preset else "free")
+        result = orchestrator.run_agentic(user_prompt, sink, preset_extra=extra)
         self._delta_buffer.flush()
         if not result.ok:
             self._stream_response("⚠ " + (result.text or result.reason))

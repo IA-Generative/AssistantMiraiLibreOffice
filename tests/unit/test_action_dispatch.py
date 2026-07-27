@@ -164,9 +164,17 @@ def test_unhandled_action_is_telemetered_once_per_action():
 
     spans = [s for s, _ in seen]
     assert spans == ["ActionUnhandled", "ActionUnhandled"]
-    assert seen[0][1]["plugin.action"] == "dispatch.unhandled"
     assert seen[0][1]["action"] == "ActionFantome"
     assert seen[1][1]["action"] == "AutreAction"
+
+
+def test_the_new_spans_have_a_condensed_action_name():
+    """`plugin.action` est posé par `_send_telemetry` depuis cette table :
+    sans entrée, le tableau de bord affiche le nom brut du span."""
+    from src.mirai.entrypoint import MainJob
+
+    assert MainJob._ACTION_NAMES["ActionUnhandled"] == "dispatch.unhandled"
+    assert MainJob._ACTION_NAMES["ConfigWaitAtTrigger"] == "config.wait"
 
 
 def test_new_shell_spans_pass_the_identity_filter():
@@ -204,7 +212,6 @@ def test_config_wait_reports_duration_and_outcome(monkeypatch):
     spans = dict(seen)
     assert "ConfigWaitAtTrigger" in spans
     attrs = spans["ConfigWaitAtTrigger"]
-    assert attrs["plugin.action"] == "config.wait"
     assert attrs["config.available"] is True
     assert isinstance(attrs["config.wait_ms"], int)
     assert attrs["action"] == "OpenAssistant"

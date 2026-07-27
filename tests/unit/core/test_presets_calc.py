@@ -116,7 +116,7 @@ def test_formula_agentic_applies_and_explains():
     sink = PaletteSink()
     orchestrator = Orchestrator(LLMClient(shell), registry, ctx)
     result = orchestrator.run_agentic("prix fois quantité", sink,
-                                      preset_extra=extra, preset_id="formula")
+                                      preset_extra=extra)
     assert result.ok
     assert sheet.formulas[(2, 1)] == "=A2*B2"
     assert sheet.grid[(2, 1)] == "30"
@@ -146,6 +146,6 @@ def test_formula_error_feedback_loop():
     ctx = _ctx(doc, shell)
     registry = register_all(ToolRegistry())
     orchestrator = Orchestrator(LLMClient(shell), registry, ctx)
-    result = orchestrator.run_agentic("somme", PaletteSink(), preset_id="formula")
+    result = orchestrator.run_agentic("somme", PaletteSink())
     assert result.ok and result.iterations == 3
     assert sheet.grid[(2, 1)] == "5"

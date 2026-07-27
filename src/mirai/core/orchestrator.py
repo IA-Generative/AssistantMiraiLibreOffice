@@ -90,7 +90,7 @@ class Orchestrator:
                 max_iterations = DEFAULT_MAX_ITERATIONS
         self.max_iterations = max_iterations
 
-    def run_agentic(self, user_prompt, sink, preset_extra="", preset_id="free"):
+    def run_agentic(self, user_prompt, sink, preset_extra=""):
         # En mode configuré "auto", le prompt système garde le protocole JSON
         # (un flip natif→json en cours de run reste couvert).
         prompt_mode = (self.llm.configured_mode
