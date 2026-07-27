@@ -51,6 +51,7 @@ from ..core import (
     prompts,
     selection_info,
     suggestions,
+    telemetry_steps,
 )
 from ..core import presets as presets_module
 from ..core.context import ToolContext
@@ -1082,14 +1083,28 @@ class AssistantPalette:
 
     # ── Fil de conversation (main courante : le plus récent EN HAUT) ────
 
-    def journal_line(self, text):
+    def journal_line(self, text, step="", **attributes):
         """Ajoute une ligne au journal d'actions (onglet « Actions »).
 
         Le journal n'était alimenté que par le mode agentique via RunObserver :
         un preset ou une réécriture laissait l'onglet désespérément vide, alors
         que c'est justement là que l'utilisateur cherche ce qui s'est passé.
+
+        Trois destinations, trois publics :
+
+        - l'**onglet Actions**, pour l'utilisateur, en français ;
+        - **`~/log.txt`**, pour le diagnostic après coup — sans quoi un défaut
+          rapporté ne laisse aucune trace de ce que le run a réellement fait
+          (constaté le 2026-07-26 : le fichier ne portait que « run: début » et
+          « run: terminé », impossible de dire quel chemin avait été pris) ;
+        - la **télémétrie**, pour l'exploitation — mais uniquement si l'appelant
+          nomme une étape (`step=`), et jamais le texte français : il cite le
+          document, et la télémétrie quitte le poste (cf. `telemetry_steps`).
         """
         self._journal_lines.append(text)
+        self.shell.log(f"[journal] {text}")
+        if step:
+            telemetry_steps.emit(self.shell, step, attributes)
         joined = "\n".join(self._journal_lines)
         self.dispatcher.post(lambda: self._set_text("journal", joined))
 
@@ -1443,12 +1458,19 @@ class AssistantPalette:
         Le runner touche le document ; il le fait via ctx.on_main. Son appel LLM
         reste dans ce worker.
         """
-        self.journal_line(f"⚙ {preset.label} — préparation")
+        self.journal_line(f"⚙ {preset.label} — préparation",
+                          step=telemetry_steps.PRESET_START,
+                          **{"preset.name": preset.id})
         message = preset.runner(ctx, self.shell, prompt_text, None,
                                 cancel_event=self._cancel,
                                 dispatcher=self.dispatcher,
                                 append_mode=self.append_mode)
-        self.journal_line(f"✓ {preset.label} — {message[:70]}")
+        # Le texte du message vient du modèle : il reste au journal et au
+        # fichier, seule sa LONGUEUR part en télémétrie.
+        self.journal_line(f"✓ {preset.label} — {message[:70]}",
+                          step=telemetry_steps.PRESET_DONE,
+                          **{"preset.name": preset.id,
+                             "result.chars": len(message or "")})
         self._append_response("MIrAI : ", message)
         self.conversation.append("user", shown, ctx.app)
         self.conversation.append("assistant", message, ctx.app)
@@ -1491,7 +1513,10 @@ class AssistantPalette:
         """
         from ..core.presets import text_sink
 
-        self.journal_line(f"⚙ Modification de la sélection ({len(selection)} car.)")
+        self.journal_line(f"⚙ Modification de la sélection ({len(selection)} car.)",
+                          step=telemetry_steps.SELECTION_START,
+                          **{"selection.chars": len(selection),
+                             "append.mode": bool(self.append_mode)})
         self._append_response("MIrAI : ")
         sink = self.dispatcher.call(
             lambda: text_sink(ctx, self.append_mode,
@@ -1525,7 +1550,9 @@ class AssistantPalette:
             self.dispatcher.call(ctx.undo_end, timeout=10)
 
         how = "ajouté après la sélection" if self.append_mode else "remplacée"
-        self.journal_line(f"✓ Sélection {how}")
+        self.journal_line(f"✓ Sélection {how}",
+                          step=telemetry_steps.SELECTION_DONE,
+                          **{"append.mode": bool(self.append_mode)})
         summary = f"Sélection {how}. Ctrl+Z pour annuler."
         self.conversation.append("user", instruction, ctx.app)
         self.conversation.append("assistant", summary, ctx.app)
@@ -1555,10 +1582,16 @@ class AssistantPalette:
         headings = [text for text, style in zip(originals, styles, strict=False)
                     if doc_rewrite.is_heading(style) and text.strip()]
 
-        self.journal_line(f"✓ Lecture du document — {len(originals)} paragraphe(s)")
+        self.journal_line(f"✓ Lecture du document — {len(originals)} paragraphe(s)",
+                          step=telemetry_steps.DOCUMENT_READ,
+                          **{"document.paragraphs": len(originals),
+                             "document.headings": len(headings)})
         if headings:
             self.journal_line(f"↳ Titre conservé : « {headings[0][:50]} »")
-        self.journal_line(f"⚙ Réécriture des paragraphes {first} à {last}")
+        self.journal_line(f"⚙ Réécriture des paragraphes {first} à {last}",
+                          step=telemetry_steps.DOCUMENT_START,
+                          **{"body.paragraphs": len(body),
+                             "append.mode": bool(self.append_mode)})
         self._progress.set_phase("Rédaction")
         self._append_response("MIrAI : ")
         llm = LLMClient(self.shell)
@@ -1585,13 +1618,22 @@ class AssistantPalette:
             # rien répondre — et que la reprise élargie du client n'a pas suffi —
             # le remède est un autre modèle, pas un autre prompt.
             if getattr(step, "starved_by_reasoning", False):
-                self.journal_line("✗ Budget épuisé par le raisonnement")
+                self.journal_line(
+                    "✗ Budget épuisé par le raisonnement",
+                    step=telemetry_steps.REASONING_STARVED,
+                    **{"reasoning.chars": int(step.reasoning_chars),
+                       "finish.reason": "length"})
                 self._stream_response(
                     "\n⚠ Ce modèle a consacré tout son budget à réfléchir sans "
                     "produire de réponse. Le document n'a pas été modifié. "
                     "Essayez un modèle qui raisonne moins (Paramètres), ou une "
                     "demande portant sur une partie du document.")
             else:
+                self.journal_line(
+                    "✗ Réponse inexploitable",
+                    step=telemetry_steps.DOCUMENT_EMPTY,
+                    **{"reply.chars": len(step.text or ""),
+                       "finish.reason": (step.finish_reason or "unknown")})
                 self._stream_response(
                     "\n⚠ Réponse inexploitable — le document n'a pas été modifié.")
             return
@@ -1618,7 +1660,12 @@ class AssistantPalette:
         # exposerait au délai d'AsyncCallback décrit plus haut.
         self.dispatcher.post(_apply)
         self.journal_line(
-            f"✓ Écriture appliquée — {len(body)} → {len(rewritten)} paragraphe(s)")
+            f"✓ Écriture appliquée — {len(body)} → {len(rewritten)} paragraphe(s)",
+            step=telemetry_steps.DOCUMENT_DONE,
+            **{"body.paragraphs": len(body),
+               "result.paragraphs": len(rewritten),
+               "headings.kept": len(headings),
+               "append.mode": bool(self.append_mode)})
         kept = " (titre conservé)" if headings else ""
         how = "ajouté à la suite" if self.append_mode else "réécrit"
         summary = (f"Document {how} : {len(body)} → {len(rewritten)} "

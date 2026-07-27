@@ -339,6 +339,50 @@ def test_journal_receives_lines_outside_agentic_mode(palette_module):
     assert "Écriture appliquée" in text
 
 
+def test_journal_lines_also_reach_the_log_file(palette_module):
+    """Sans cela, un défaut rapporté ne laisse aucune trace de ce qu'a fait le run.
+
+    Constaté le 2026-07-26 : `~/log.txt` ne portait que « run: début » et
+    « run: terminé ». Impossible de dire quel chemin avait été emprunté, ni si
+    le document avait été modifié — la seule information était à l'écran.
+    """
+    palette = _build(palette_module)
+    written = []
+    palette.shell.log = written.append
+
+    palette.journal_line("✓ Lecture du document — 45 paragraphe(s)")
+
+    assert any("Lecture du document — 45" in line for line in written)
+
+
+def test_a_step_produces_telemetry_without_the_french_text(palette_module):
+    from src.mirai.core import telemetry_steps
+
+    palette = _build(palette_module)
+    palette.shell.log = lambda _m: None
+    palette.shell.telemetry.reset_mock()
+
+    palette.journal_line("↳ Titre conservé : « Rapport annuel 2026 »",
+                         step=telemetry_steps.DOCUMENT_READ,
+                         **{"document.paragraphs": 45})
+
+    name, attributes = palette.shell.telemetry.call_args[0]
+    assert name == telemetry_steps.SPAN
+    assert attributes["document.paragraphs"] == 45
+    assert "Rapport annuel" not in str(attributes), "le document ne sort pas du poste"
+
+
+def test_a_line_without_a_step_sends_no_telemetry(palette_module):
+    """Toutes les lignes ne sont pas des étapes : pas de bruit dans les traces."""
+    palette = _build(palette_module)
+    palette.shell.log = lambda _m: None
+    palette.shell.telemetry.reset_mock()
+
+    palette.journal_line("↳ Titre conservé : « Rapport annuel 2026 »")
+
+    palette.shell.telemetry.assert_not_called()
+
+
 def test_text_is_written_through_the_control(palette_module):
     """Écrire le modèle ne repeint pas toujours : le contrôle doit suivre.
 

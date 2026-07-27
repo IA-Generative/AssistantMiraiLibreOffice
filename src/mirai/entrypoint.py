@@ -345,6 +345,32 @@ def generate_span_id():
     return uuid.uuid4().hex[:16]
 
 
+def otel_attributes(mapping):
+    """Convertit un dict d'attributs au format OTLP/JSON, EN CONSERVANT LES TYPES.
+
+    Tout aplatir en `stringValue` (comportement d'origine) rend la trace
+    inexploitable comme mesure : un nombre de paragraphes rendu « 45 » ne peut
+    plus être agrégé, moyenné ni seuillé côté Tempo/Grafana.
+
+    `bool` est testé AVANT `int` : en Python, `True` est un entier, et l'ordre
+    inverse enverrait `intValue: "1"` pour un drapeau.
+    Les entiers voyagent en chaîne : OTLP/JSON code les int64 ainsi, pour ne pas
+    perdre de précision au passage par un flottant JavaScript.
+    """
+    out = []
+    for key, value in (mapping or {}).items():
+        if isinstance(value, bool):
+            typed = {"boolValue": value}
+        elif isinstance(value, int):
+            typed = {"intValue": str(value)}
+        elif isinstance(value, float):
+            typed = {"doubleValue": value}
+        else:
+            typed = {"stringValue": str(value)}
+        out.append({"key": key, "value": typed})
+    return out
+
+
 def send_telemetry_trace_async(config, span_name, attributes=None):
     """
     Send OpenTelemetry trace asynchronously in a separate thread.
@@ -410,13 +436,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
         if attributes:
             span_attributes.update(attributes)
         
-        # Convert attributes to OpenTelemetry format
-        otel_attributes = []
-        for key, value in span_attributes.items():
-            otel_attributes.append({
-                "key": key,
-                "value": {"stringValue": str(value)}
-            })
+        encoded_attributes = otel_attributes(span_attributes)
         
         # Build OpenTelemetry JSON payload
         payload = {
@@ -443,7 +463,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
                                     "kind": 1,  # SPAN_KIND_INTERNAL
                                     "startTimeUnixNano": str(timestamp_ns),
                                     "endTimeUnixNano": str(timestamp_ns + 1000000),  # Add 1ms duration
-                                    "attributes": otel_attributes,
+                                    "attributes": encoded_attributes,
                                     "status": {"code": 1}  # STATUS_CODE_OK
                                 }
                             ]
