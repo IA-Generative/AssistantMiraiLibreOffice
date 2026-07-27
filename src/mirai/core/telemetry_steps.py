@@ -28,10 +28,31 @@ DOCUMENT_DONE = "document.rewrite.done"
 DOCUMENT_EMPTY = "document.rewrite.empty"
 REASONING_STARVED = "llm.reasoning_starved"
 
+# Fiabilité : bascules et reprises du client LLM. La bascule natif→json est
+# DÉFINITIVE pour le poste ; les reprises réussies étaient invisibles (seul
+# leur échec se voyait), donc impossible de dire si elles servent.
+TOOLS_FALLBACK_JSON = "llm.tools_fallback_json"
+AUTH_RECOVERED = "llm.auth_recovered"
+REASONING_RETRY_OK = "llm.reasoning_retry_ok"
+
+# Usage : ce que fait l'utilisateur AUTOUR des runs — refus de lancement,
+# session de palette (résumé unique à la fermeture), retour à une palette
+# déjà ouverte.
+RUN_REFUSED = "run.refused"
+PALETTE_CLOSED = "palette.closed"
+PALETTE_REFOCUSED = "palette.refocused"
+
+# Santé : le filet anti-blocage s'est déclenché — des messages asynchrones
+# ont été perdus. Sa fréquence sur le parc est un signal, pas un détail.
+UI_HEAL_STUCK = "ui.heal_stuck"
+
 STEPS = frozenset({
     PRESET_START, PRESET_DONE, SELECTION_START, SELECTION_DONE,
     DOCUMENT_READ, DOCUMENT_START, DOCUMENT_DONE, DOCUMENT_EMPTY,
     REASONING_STARVED,
+    TOOLS_FALLBACK_JSON, AUTH_RECOVERED, REASONING_RETRY_OK,
+    RUN_REFUSED, PALETTE_CLOSED, PALETTE_REFOCUSED,
+    UI_HEAL_STUCK,
 })
 
 # Une étiquette : minuscules, chiffres, point/tiret/souligné. Assez pour un
@@ -66,6 +87,24 @@ def emit(shell, step, attributes=None):
     payload["step.name"] = step
     try:
         shell.telemetry(SPAN, payload)
+    except Exception:
+        return False
+    return True
+
+
+def emit_run(shell, attributes=None):
+    """Émet le span de run unifié (`AssistantRun`), sous le même filtre.
+
+    Un seul point d'émission — le finally du worker de la palette — couvre les
+    quatre chemins d'exécution (agentique, pipeline, réécriture de sélection,
+    réécriture de document). Passer par ici et non par `shell.telemetry`
+    directement garantit qu'un futur attribut ne pourra pas embarquer une
+    phrase du document.
+    """
+    payload = safe_attributes(attributes)
+    payload["plugin.action"] = "assistant.run"
+    try:
+        shell.telemetry("AssistantRun", payload)
     except Exception:
         return False
     return True

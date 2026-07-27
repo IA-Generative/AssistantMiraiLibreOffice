@@ -95,3 +95,63 @@ def test_a_broken_telemetry_never_breaks_the_run():
             raise OSError("réseau coupé")
 
     assert telemetry_steps.emit(Broken(), telemetry_steps.DOCUMENT_READ) is False
+
+
+# ── Vocabulaire étendu (fiabilité, usage, santé) ────────────────────────
+
+def test_reliability_and_usage_steps_are_declared():
+    """Chaque angle mort identifié a sa constante — jamais de chaîne libre."""
+    expected = {
+        telemetry_steps.TOOLS_FALLBACK_JSON: "llm.tools_fallback_json",
+        telemetry_steps.AUTH_RECOVERED: "llm.auth_recovered",
+        telemetry_steps.REASONING_RETRY_OK: "llm.reasoning_retry_ok",
+        telemetry_steps.RUN_REFUSED: "run.refused",
+        telemetry_steps.PALETTE_CLOSED: "palette.closed",
+        telemetry_steps.PALETTE_REFOCUSED: "palette.refocused",
+        telemetry_steps.UI_HEAL_STUCK: "ui.heal_stuck",
+    }
+    for constant, value in expected.items():
+        assert constant == value
+        assert constant in telemetry_steps.STEPS, value
+
+
+# ── Span de run unifié (emit_run) ───────────────────────────────────────
+
+def test_emit_run_uses_the_assistant_run_span():
+    shell = FakeShell()
+    ok = telemetry_steps.emit_run(shell, {
+        "run.kind": "pipeline",
+        "assistant.preset": "summarize",
+        "assistant.ok": True,
+        "assistant.duration_ms": 1234,
+    })
+    assert ok
+    name, attrs = shell.spans[0]
+    assert name == "AssistantRun"
+    assert attrs["plugin.action"] == "assistant.run"
+    assert attrs["run.kind"] == "pipeline"
+    assert attrs["assistant.ok"] is True
+    assert attrs["assistant.duration_ms"] == 1234
+
+
+def test_emit_run_filters_free_text_like_emit_does():
+    """Le run unifié passe par le MÊME filtre : une phrase n'en sort jamais."""
+    shell = FakeShell()
+    telemetry_steps.emit_run(shell, {
+        "run.kind": "agentic",
+        "assistant.reason": "http_429",
+        "document.title": "Rapport annuel 2026 — synthèse",
+        "Contenu du document": "Le chat dort sur le canapé.",
+    })
+    _name, attrs = shell.spans[0]
+    assert attrs["assistant.reason"] == "http_429"
+    assert "Rapport annuel" not in str(attrs)
+    assert "chat" not in str(attrs)
+
+
+def test_emit_run_never_breaks_the_run():
+    class Broken:
+        def telemetry(self, *_a, **_k):
+            raise OSError("réseau coupé")
+
+    assert telemetry_steps.emit_run(Broken(), {"run.kind": "agentic"}) is False
