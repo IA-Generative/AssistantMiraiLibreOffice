@@ -294,6 +294,45 @@ administrateur y parvient. Il ne protège toutefois `queue-worker` qu'une fois c
 déploiement basculé, puisque c'est son code qui exécute la boucle — ce qui est
 désormais le cas.
 
+#### Tests de post-déploiement passés contre l'intégration
+
+`tests/test_post_deploy.py` est prévu pour viser une instance vivante et ne modifie rien
+(lecture seule, en-tête du fichier). Lancé contre l'intégration :
+
+```bash
+DM_BASE_URL=https://bootstrap.fake-domain.name \
+DM_ADMIN_TOKEN=<secret device-management-secrets/DM_QUEUE_ADMIN_TOKEN> \
+  pytest tests/test_post_deploy.py
+```
+
+**29 / 32 verts.** Les trois échecs sont des résolutions DNS
+(`httpx.ConnectError: nodename nor servname provided`) sur des URL *annoncées par la config*
+et hébergées sur le réseau interne du ministère, injoignable depuis un poste externe. Ils ne
+dépendent pas du code livré ici.
+
+`tests/test_e2e_deployment.py` (35 tests) n'a **pas** été lancé contre l'intégration, et ne
+doit pas l'être : il est écrit pour un déploiement Docker local créé de zéro — il vérifie des
+conteneurs et des ports locaux, et sa phase 4 **crée** cohortes, drapeaux, artefacts et
+campagnes. Le passer sur un environnement partagé y écrirait de vrais objets.
+
+#### Observation : l'intégration Scaleway n'est pas la destination des traces
+
+Les trois profils servis par `bootstrap.fake-domain.name` — `int`, `prod` et `dev` — annoncent
+tous le **même** `telemetryEndpoint` :
+
+```
+https://onyxia.gpu.minint.fr/telemetry/v1/traces
+```
+
+Un plugin qui lit cette configuration envoie donc ses traces vers l'environnement DGX, et non
+vers le Device Management Scaleway vérifié ci-dessus — que la recette a atteint en le visant
+directement. Or le namespace `dm-dgx-test` de ce cluster tourne l'image **`0.7.0`**.
+
+Sous réserve de confirmer que `onyxia.gpu.minint.fr` dessert bien ce déploiement (impossible à
+vérifier depuis l'extérieur du réseau interne), **le correctif de typage ne produira aucun
+effet pour les postes réels tant que l'environnement servant cet hôte n'aura pas été mis à
+jour**. À trancher avant d'annoncer la fonctionnalité disponible.
+
 #### Une erreur de démarrage, préexistante et sans lien
 
 `telemetry-relay` journalise au démarrage `Failed to apply DB schema` →
@@ -309,22 +348,29 @@ les journaux.
 
 ## 5. Points ouverts
 
-1. **Intégration : fait et vérifié vert** (§ 4.3). Reste, au démarrage de `telemetry-relay`,
-   un `Failed to apply DB schema` (`must be owner of table feature_flags`) préexistant et
-   sans effet sur le service — à traiter pour ne pas polluer les journaux.
-2. **Filtre d'identité inchangé** — tant que l'identité télémétrie n'est pas « user », seuls
+1. **Intégration : fait et vérifié vert** (§ 4.3) — recette télémétrie de bout en bout, plus
+   29/32 tests de post-déploiement.
+2. **À trancher avant d'annoncer la fonctionnalité** : les trois profils servis par
+   l'intégration annoncent un `telemetryEndpoint` sur `onyxia.gpu.minint.fr` (DGX), pas sur
+   l'intégration elle-même. Le correctif n'aura donc aucun effet pour les postes réels tant
+   que l'environnement servant cet hôte n'est pas mis à jour — le namespace `dm-dgx-test`
+   tourne l'image `0.7.0` (§ 4.3).
+3. Reste, au démarrage de `telemetry-relay`, un `Failed to apply DB schema`
+   (`must be owner of table feature_flags`) préexistant et sans effet sur le service — à
+   traiter pour ne pas polluer les journaux.
+4. **Filtre d'identité inchangé** — tant que l'identité télémétrie n'est pas « user », seuls
    les événements techniques sortent. Les spans `Assistant*` restent donc invisibles sur un
    poste non lié à un utilisateur : décision conservée telle quelle. Les deux nouveaux spans
    de coquille (`ConfigWaitAtTrigger`, `ActionUnhandled`) ont été ajoutés à la liste
    technique — ils décrivent le poste, pas la personne, et sont justement ceux dont on a
    besoin quand rien ne fonctionne encore.
-3. **Recette en LibreOffice réel non faite** — elle demande une session interactive. Les
+5. **Recette en LibreOffice réel non faite** — elle demande une session interactive. Les
    chemins sont couverts par les tests, mais un passage manuel (un run par branche, une
    annulation, un refus, fermeture de palette) confirmerait les valeurs affichées dans
    `~/log.txt` avec `telemetrylogJson=true`.
-4. **`writer_replace_paragraphs` ne déclare pas `mutates=True`** alors qu'il écrit — il
+6. **`writer_replace_paragraphs` ne déclare pas `mutates=True`** alors qu'il écrit — il
    n'ouvre donc pas le contexte d'annulation par le registre, et manque à la table des
    libellés du journal. Constaté au passage, **non corrigé** : hors périmètre.
-5. **Les suggestions ne sont pas cliquables** — `core/suggestions.py` déclare pourtant
+7. **Les suggestions ne sont pas cliquables** — `core/suggestions.py` déclare pourtant
    `preset_id` et `runs_immediately`. Le compteur de consultations est en place ; le clic
    reste à implémenter.
