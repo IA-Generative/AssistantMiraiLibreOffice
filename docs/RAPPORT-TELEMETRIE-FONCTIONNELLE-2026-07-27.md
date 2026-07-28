@@ -157,7 +157,34 @@ jeton répondait 503 ; `DM_TELEMETRY_UPSTREAM_ENDPOINT` pointait un collecteur i
 Sauvegarde dans `.env.secrets.bak-e2e`. La pile d'observabilité locale (Tempo + Grafana) a
 été démarrée : `docker compose -p mirai-obs -f deploy/docker/local-rcfg/docker-compose.observability.yml up -d`.
 
-### 4.3 Intégration Scaleway — **bascule incomplète, à terminer**
+### 4.3 Intégration Scaleway — **vérifiée verte**
+
+> **Résultat final (2026-07-28)** : les cinq déploiements sont sur
+> `0.9.15-telemetry1` et la recette passe — `✓ tous les spans persistés avec leurs
+> types intacts`. Le détail ci-dessous retrace le chemin, car la première bascule
+> avait échoué pour une raison qui resservira.
+
+```
+POST /telemetry/v1/traces × 8   → 200 (telemetry-relay persiste en synchrone)
+device_telemetry_events         → 8 lignes, types intacts
+file / lettres mortes           → 0 en attente, 0 lettre morte
+index unique lettre morte       → idx_queue_job_dead_letters_job_id présent
+```
+
+Relu en base d'intégration :
+
+```json
+AssistantRun          {"assistant.ok": false, "assistant.cancelled": false,
+                       "assistant.duration_ms": 8421, "append.mode": true}
+AssistantToolCall     {"tool.ok": false, "tool.duration_ms": 42, "tool.args_coerced": 2}
+AssistantStep/closed  {"runs.count": 4, "tabs.switches": 7, "session.duration_ms": 754321}
+AssistantOpen         {"selection.active": true, "caps.measured": false}
+```
+
+À comparer à l'état d'avant bascule de `telemetry-relay`, où **tous** ces attributs
+valaient `""`.
+
+#### Le chemin — bascule d'abord incomplète
 
 Image construite et poussée : `docker.io/etiquet/device-management:0.9.15-telemetry1`
 (linux/amd64, digest `sha256:89d6997a…`). Le tag `latest` n'a délibérément **pas** été
@@ -230,18 +257,30 @@ avant la bascule de `telemetry-relay` — le défaut que corrige cette livraison
  "assistant.app": "writer", "plugin.action": "assistant.open"}
 ```
 
-L'index unique de lettre morte, lui, est **déjà appliqué** en base : le schéma est réappliqué
-au démarrage, et la bascule de `device-management` a suffi à le créer
-(`idx_queue_job_dead_letters_job_id` vérifié présent). Il ne protège toutefois `queue-worker`
-qu'une fois ce déploiement basculé, puisque c'est son code qui exécute la boucle.
+L'index unique de lettre morte, lui, était **déjà appliqué** en base dès la première
+bascule : le schéma est réappliqué au démarrage, et seul le pod porteur du DSN
+administrateur y parvient. Il ne protège toutefois `queue-worker` qu'une fois ce
+déploiement basculé, puisque c'est son code qui exécute la boucle — ce qui est
+désormais le cas.
+
+#### Une erreur de démarrage, préexistante et sans lien
+
+`telemetry-relay` journalise au démarrage `Failed to apply DB schema` →
+`must be owner of table feature_flags`. Le partage des privilèges veut que seul le pod
+porteur du DSN administrateur (`postgres`, propriétaire des tables) applique le schéma ;
+les autres échouent au premier ordre exigeant la propriété. C'est structurel et antérieur
+à cette livraison : l'ordre en cause est à la ligne 361 de `db/schema.sql`, non modifié
+ici, alors que l'index ajouté est à la ligne 102 — il est donc atteint *avant*, et il est
+bien créé. Sans effet sur le service, mais mériterait d'être traité pour ne pas polluer
+les journaux.
 
 ---
 
 ## 5. Points ouverts
 
-1. **Bascule en intégration à terminer** — `telemetry-relay` et `queue-worker` sont encore
-   sur l'ancienne image, et ce sont eux que les deux correctifs visent (§ 4.3). Le retest
-   restera rouge tant que `telemetry-relay` n'est pas basculé.
+1. **Intégration : fait et vérifié vert** (§ 4.3). Reste, au démarrage de `telemetry-relay`,
+   un `Failed to apply DB schema` (`must be owner of table feature_flags`) préexistant et
+   sans effet sur le service — à traiter pour ne pas polluer les journaux.
 2. **Filtre d'identité inchangé** — tant que l'identité télémétrie n'est pas « user », seuls
    les événements techniques sortent. Les spans `Assistant*` restent donc invisibles sur un
    poste non lié à un utilisateur : décision conservée telle quelle. Les deux nouveaux spans
