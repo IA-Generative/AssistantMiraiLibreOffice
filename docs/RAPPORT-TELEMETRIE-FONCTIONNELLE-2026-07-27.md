@@ -101,7 +101,7 @@ injoignable le provoque — c'est ainsi qu'il a été découvert. Une coupure de
 emportait donc le traitement des enrôlements avec elle.
 
 Corrigé par un index unique dans le schéma canonique, appliqué de façon idempotente au
-démarrage. Débloque au passage `test_queue_load_smoke`, rouge jusqu'ici.
+démarrage.
 
 ---
 
@@ -111,9 +111,40 @@ démarrage. Débloque au passage `test_queue_load_smoke`, rouge jusqu'ici.
 
 | Suite | Résultat |
 |---|---|
-| Plugin — `./scripts/03-test-local.sh` (unitaires + intégration + lint + build) | **657 tests verts**, lint propre, OXT produit |
-| Device Management — `tests/test_telemetry.py`, `test_queue_validation.py`, `test_queue_load.py` | **12 verts** |
-| Device Management — suite complète | **aucune régression** : 22 échecs avant / 21 après, tous préexistants sur HEAD propre (admin UI, enrôlement) — dont un **corrigé** par le lot |
+| Plugin — `./scripts/03-test-local.sh` (unitaires + intégration + lint + build) | **657 tests verts**, aucun échec, lint propre, OXT produit |
+| Device Management — tests ajoutés (`test_telemetry.py`, `test_queue_validation.py`) | **11 verts** |
+| Device Management — suite complète | **aucune régression** — voir ci-dessous |
+
+#### Device Management : 88 échecs, strictement les mêmes avant et après
+
+La suite du DM n'est pas verte sur cette machine, et ne l'était pas non plus avant cette
+livraison. Pour distinguer une régression d'un échec d'environnement, chaque version a été
+passée **deux fois** (branche, puis commit parent `4f217bf` en tête détachée) :
+
+| | run 1 | run 2 | échecs constants |
+|---|---|---|---|
+| Commit parent | 88 | 88 | **88** |
+| Cette branche | 89 | 90 | **88** |
+
+Le jeu des 88 échecs constants est **strictement identique** des deux côtés : aucune
+régression. Les écarts entre runs individuels sont des tests instables —
+`test_queue_load_smoke` (seuil de débit `throughput_rps > 500.0`, sensible à la charge
+machine ; il passe seul) et deux `test_e2e_deployment.py` qui sollicitent le réseau.
+
+Répartition des 88 :
+
+| Fichier | Nb | Cause |
+|---|---|---|
+| `test_e2e_deployment.py` | 35 | exigent un déploiement vivant et une base `bootstrap` locale |
+| `test_post_deploy.py` | 32 | interrogent de vraies URL (`httpx.ConnectError`) |
+| `test_admin_ui.py` | 18 | exigent une session Keycloak (404) |
+| 3 autres | 3 | passent **seuls**, échouent en suite complète (pollution entre modules : `importlib.reload(app.main)` avec des variables d'environnement différentes) |
+
+> **Correction d'une affirmation antérieure.** Une version précédente de ce rapport
+> annonçait « 22 échecs avant / 21 après, dont un corrigé par le lot
+> (`test_queue_load_smoke`) ». C'était faux : la mesure reposait sur un seul run par
+> version, et ce test est instable. Il n'est pas corrigé par cette livraison — il passe ou
+> échoue selon la charge de la machine.
 
 Environ 90 tests ajoutés, écrits **avant** le code et vérifiés rouges (37 échecs initiaux
 côté plugin, 2 côté DM) avant toute implémentation.
