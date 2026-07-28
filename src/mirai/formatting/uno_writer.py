@@ -3,6 +3,8 @@ using the UNO API — real paragraph styles, character properties, lists,
 hyperlinks and tables instead of literal Markdown/HTML characters.
 """
 
+import urllib.parse
+
 from .ast_nodes import Blockquote, Bold, Code, CodeBlock, Heading, Italic, Link, ListItem, Paragraph, Table, Text
 
 # com.sun.star.style.ParagraphAdjust values (stable UNO constants).
@@ -10,6 +12,24 @@ _PARA_ADJUST = {"left": 0, "right": 1, "justify": 2, "center": 3}
 
 _PARAGRAPH_BREAK = 0  # com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK
 _LINE_BREAK = 1  # com.sun.star.text.ControlCharacter.LINE_BREAK
+
+# Links come from LLM-generated Markdown/HTML, which may be steered by a
+# prompt injection hidden in the source document. Only these schemes become
+# real clickable hyperlinks; anything else (vnd.sun.star.script:, file://,
+# javascript:, a bare/relative reference, ...) is dropped so the text stays
+# plain — this blocks macro-execution and local-file-open vectors on click.
+_ALLOWED_LINK_SCHEMES = {"http", "https", "mailto"}
+
+
+def _sanitize_link_url(url):
+    """Return *url* if its scheme is allow-listed, else "" (plain text)."""
+    if not url:
+        return ""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme.lower()
+    except ValueError:
+        return ""
+    return url if scheme in _ALLOWED_LINK_SCHEMES else ""
 
 
 def write_blocks(model, text_obj, cursor, blocks, base_char_style=None, base_para_style=None):
@@ -115,7 +135,7 @@ def _write_run(text_obj, cursor, value, base_char_style, base_font, bold, italic
     except Exception:
         pass
     try:
-        cursor.setPropertyValue("HyperLinkURL", link_url or "")
+        cursor.setPropertyValue("HyperLinkURL", _sanitize_link_url(link_url))
     except Exception:
         pass
     text_obj.insertString(cursor, value, False)
