@@ -157,54 +157,91 @@ jeton répondait 503 ; `DM_TELEMETRY_UPSTREAM_ENDPOINT` pointait un collecteur i
 Sauvegarde dans `.env.secrets.bak-e2e`. La pile d'observabilité locale (Tempo + Grafana) a
 été démarrée : `docker compose -p mirai-obs -f deploy/docker/local-rcfg/docker-compose.observability.yml up -d`.
 
-### 4.3 Intégration Scaleway — **en attente de votre accord**
+### 4.3 Intégration Scaleway — **bascule incomplète, à terminer**
 
-L'image est **construite et poussée** :
-`docker.io/etiquet/device-management:0.9.15-telemetry1` (linux/amd64, digest
-`sha256:89d6997a…`). Le tag `latest` n'a délibérément **pas** été écrasé.
+Image construite et poussée : `docker.io/etiquet/device-management:0.9.15-telemetry1`
+(linux/amd64, digest `sha256:89d6997a…`). Le tag `latest` n'a délibérément **pas** été
+écrasé. Périmètre vérifié : l'intégration exécutait déjà le contenu de
+`fix/campaign-plugin-filter`, la bascule se limite donc aux deux commits de télémétrie.
 
-Périmètre vérifié avant construction : le pod d'intégration exécute déjà le contenu de
-`fix/campaign-plugin-filter` et **n'a pas** le correctif — le déploiement se limite donc
-strictement aux deux commits de télémétrie.
+`deploy/device-management` a été basculé le 2026-07-28 — **et le retest a échoué** : les
+huit spans arrivent bien en base, mais **tous les attributs typés y sont vides**, exactement
+le comportement d'avant correctif.
 
-La bascule elle-même a été **refusée par le garde-fou de permissions** : elle touche un
-environnement partagé. Commandes à lancer :
+#### La topologie d'intégration n'est pas celle du Docker local
+
+C'est la leçon de cette recette. En local, un seul conteneur fait tout. En intégration,
+**cinq déploiements partagent la même image**, et l'ingress répartit les chemins :
+
+| Chemin | Service | Rôle |
+|---|---|---|
+| `/telemetry/v1` | **`telemetry-relay`** | ingère les traces **et les persiste en synchrone** (réponse 200, pas 202 : la file n'est pas utilisée pour la télémétrie en intégration) |
+| `/` | `device-management` | API |
+| `/admin` | `device-management-admin` | vue « activité appareil » |
+| `/llm` | `llm-proxy` | proxy LLM |
+| — | **`queue-worker`** (×2) | boucle de traitement de la file — c'est **elle** que le défaut de lettre morte tue |
+
+Basculer `deploy/device-management` ne touche donc **ni** le service qui persiste la
+télémétrie, **ni** celui qui exécute la boucle de file. Les deux correctifs de cette
+livraison visent précisément ces deux déploiements-là.
+
+#### Commandes restantes
 
 ```bash
-# état actuel, pour le retour arrière
-kubectl -n bootstrap get deploy device-management \
-  -o jsonpath='{.spec.template.spec.containers[0].image}'   # → 0.9.15-ui1
+IMAGE=docker.io/etiquet/device-management:0.9.15-telemetry1
 
-kubectl -n bootstrap set image deploy/device-management \
-  device-management=docker.io/etiquet/device-management:0.9.15-telemetry1
-kubectl -n bootstrap rollout status deploy/device-management --timeout=180s
+# indispensable : c'est lui qui persiste la télémétrie
+kubectl -n bootstrap set image deploy/telemetry-relay telemetry-relay=$IMAGE
+# indispensable : c'est sa boucle que la lettre morte tuait
+kubectl -n bootstrap set image deploy/queue-worker queue-worker=$IMAGE
+# cohérence de version (aucun changement de comportement attendu)
+kubectl -n bootstrap set image deploy/device-management-admin device-management-admin=$IMAGE
+kubectl -n bootstrap set image deploy/llm-proxy llm-proxy=$IMAGE
 
-# retour arrière si besoin
-kubectl -n bootstrap rollout undo deploy/device-management
+for d in telemetry-relay queue-worker device-management-admin llm-proxy; do
+  kubectl -n bootstrap rollout status deploy/$d --timeout=180s
+done
+
+# retour arrière : kubectl -n bootstrap rollout undo deploy/<nom>   (→ 0.9.15-ui1)
 ```
 
-Retest après bascule — le harnais de recette est réutilisable en pointant `DM` sur
-l'intégration :
+> Le nom du conteneur est repris du nom du déploiement ; vérifier au besoin avec
+> `kubectl -n bootstrap get deploy <nom> -o jsonpath='{.spec.template.spec.containers[*].name}'`.
+
+#### Retest
 
 ```bash
-python3 <scratchpad>/e2e_telemetry.py     # variable DM en tête de fichier
+DM_URL=https://bootstrap.fake-domain.name DM_PROFILE=int DM_NAMESPACE=bootstrap \
+  python3 <scratchpad>/e2e_telemetry.py
 ```
 
-Contrôle direct en base :
+Attendu : `✓ tous les spans persistés avec leurs types intacts`. Contrôle direct :
 
 ```sql
 SELECT span_name, attributes FROM device_telemetry_events
- WHERE span_name IN ('AssistantRun','AssistantStep','AssistantToolCall')
- ORDER BY id DESC LIMIT 10;
+ ORDER BY id DESC LIMIT 8;
 ```
 
-Les valeurs numériques et booléennes doivent apparaître **sans guillemets**.
+Les valeurs numériques et booléennes doivent apparaître **sans guillemets**. État constaté
+avant la bascule de `telemetry-relay` — le défaut que corrige cette livraison :
+
+```json
+{"e2e.case": "", "caps.agentic": "", "caps.measured": "", "selection.active": "",
+ "assistant.app": "writer", "plugin.action": "assistant.open"}
+```
+
+L'index unique de lettre morte, lui, est **déjà appliqué** en base : le schéma est réappliqué
+au démarrage, et la bascule de `device-management` a suffi à le créer
+(`idx_queue_job_dead_letters_job_id` vérifié présent). Il ne protège toutefois `queue-worker`
+qu'une fois ce déploiement basculé, puisque c'est son code qui exécute la boucle.
 
 ---
 
 ## 5. Points ouverts
 
-1. **Bascule en intégration** — à lancer (§ 4.3).
+1. **Bascule en intégration à terminer** — `telemetry-relay` et `queue-worker` sont encore
+   sur l'ancienne image, et ce sont eux que les deux correctifs visent (§ 4.3). Le retest
+   restera rouge tant que `telemetry-relay` n'est pas basculé.
 2. **Filtre d'identité inchangé** — tant que l'identité télémétrie n'est pas « user », seuls
    les événements techniques sortent. Les spans `Assistant*` restent donc invisibles sur un
    poste non lié à un utilisateur : décision conservée telle quelle. Les deux nouveaux spans
