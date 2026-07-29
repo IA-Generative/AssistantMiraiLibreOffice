@@ -161,8 +161,6 @@
   "DECIMAL": {"cat": "Text", "syn": "DECIMAL(Text; Radix)", "desc": "Convert from base to decimal", "ex": "=DECIMAL(\"FF\";16)"},
   "CHAR": {"cat": "Text", "syn": "CHAR(Number)", "desc": "Character from code", "ex": "=CHAR(65)"},
   "CODE": {"cat": "Text", "syn": "CODE(Text)", "desc": "Character code of first char", "ex": "=CODE(\"A\")"},
-  "WEBSERVICE": {"cat": "Text", "syn": "WEBSERVICE(URL)", "desc": "Fetch web content", "ex": "=WEBSERVICE(\"https://api.example.com/data\")"},
-  "FILTERXML": {"cat": "Text", "syn": "FILTERXML(XMLDocument; XPathExpression)", "desc": "Extract from XML with XPath", "ex": "=FILTERXML(A1;\"//item\")"},
   "BIN2DEC": {"cat": "Add-in", "syn": "BIN2DEC(Number)", "desc": "Binary to decimal", "ex": "=BIN2DEC(\"1010\")"},
   "DEC2BIN": {"cat": "Add-in", "syn": "DEC2BIN(Number[; Places])", "desc": "Decimal to binary", "ex": "=DEC2BIN(10)"},
   "HEX2DEC": {"cat": "Add-in", "syn": "HEX2DEC(Number)", "desc": "Hexadecimal to decimal", "ex": "=HEX2DEC(\"FF\")"},
