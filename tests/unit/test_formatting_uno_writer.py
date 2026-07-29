@@ -83,6 +83,58 @@ class TestLinks(unittest.TestCase):
         link_run = next(c for c in text_calls if c[1] == "le site")
         self.assertEqual(link_run[2]["HyperLinkURL"], "https://example.com")
 
+    def test_mailto_link_is_kept(self):
+        model, text_obj, cursor, inserted = _make_harness()
+        insert_formatted(model, text_obj, cursor, "[contact](mailto:foo@example.com)")
+
+        text_calls = [c for c in inserted if c[0] == "text"]
+        link_run = next(c for c in text_calls if c[1] == "contact")
+        self.assertEqual(link_run[2]["HyperLinkURL"], "mailto:foo@example.com")
+
+    def test_uppercase_scheme_is_kept(self):
+        model, text_obj, cursor, inserted = _make_harness()
+        insert_formatted(model, text_obj, cursor, "[le site](HTTPS://example.com)")
+
+        text_calls = [c for c in inserted if c[0] == "text"]
+        link_run = next(c for c in text_calls if c[1] == "le site")
+        self.assertEqual(link_run[2]["HyperLinkURL"], "HTTPS://example.com")
+
+
+class TestLinkSchemeAllowlist(unittest.TestCase):
+    """A prompt-injected LLM response could plant a dangerous URI scheme in a
+    Markdown/HTML link (macro execution, local file open on click). Only
+    http(s)/mailto may become a real Writer hyperlink; anything else must be
+    dropped and the link text inserted as plain, non-clickable text.
+    """
+
+    _REJECTED_URLS = [
+        "vnd.sun.star.script:Standard.Module1.Main?language=Basic&location=application",
+        "file:///etc/passwd",
+        "file://C:/Windows/System32/cmd.exe",
+        "javascript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "ftp://example.com/payload",
+        "example.com",  # no scheme — ambiguous, treated as unsafe
+        "//example.com/evil",
+    ]
+
+    def test_each_dangerous_or_missing_scheme_is_rejected(self):
+        for url in self._REJECTED_URLS:
+            with self.subTest(url=url):
+                model, text_obj, cursor, inserted = _make_harness()
+                insert_formatted(model, text_obj, cursor, f"[cliquez ici]({url})")
+
+                text_calls = [c for c in inserted if c[0] == "text"]
+                link_run = next(c for c in text_calls if c[1] == "cliquez ici")
+                self.assertEqual(link_run[2]["HyperLinkURL"], "")
+
+    def test_non_link_runs_have_no_hyperlink(self):
+        model, text_obj, cursor, inserted = _make_harness()
+        insert_formatted(model, text_obj, cursor, "juste du texte")
+
+        text_calls = [c for c in inserted if c[0] == "text"]
+        self.assertEqual(text_calls[0][2]["HyperLinkURL"], "")
+
 
 class TestEmptyInput(unittest.TestCase):
     def test_empty_string_inserts_nothing(self):
