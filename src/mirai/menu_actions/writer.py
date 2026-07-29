@@ -2,6 +2,7 @@
 
 import re
 
+from ..formatting import insert_formatted
 from .shared import apply_settings_result
 
 _RE_THINK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
@@ -12,22 +13,43 @@ def _strip_think_blocks(text):
     return _RE_THINK.sub("", text).lstrip("\n")
 
 
-def _check_stop_phrase(accumulated, chunk, stop_phrases):
-    """Return (text_to_insert, stop_detected) for the current streaming chunk.
-
-    When a stop phrase is found in *accumulated*, return the portion of *chunk*
-    that precedes the stop phrase (may be empty) and True.
-    Otherwise return *chunk* unchanged and False.
-    """
-    acc_lower = accumulated.lower()
+def _truncate_at_stop_phrase(text, stop_phrases):
+    """Cut *text* right before the earliest occurrence of any stop phrase."""
+    lower = text.lower()
+    cut = len(text)
     for phrase in stop_phrases:
-        pos = acc_lower.find(phrase.lower())
-        if pos == -1:
-            continue
-        already_inserted = len(accumulated) - len(chunk)
-        partial = chunk[:max(0, pos - already_inserted)] if pos > already_inserted else ""
-        return partial, True
-    return chunk, False
+        pos = lower.find(phrase.lower())
+        if pos != -1:
+            cut = min(cut, pos)
+    return text[:cut].rstrip()
+
+
+def _collect_stream(job, request, api_type, question_patterns=None, stop_phrases=None):
+    """Drain a streaming request into a single string (no insertion here).
+
+    Returns (text, asked_question):
+    - if *question_patterns* is given and one is found anywhere in the
+      response, returns ("", True) — caller decides how to report it;
+    - otherwise returns the response with think-blocks stripped and,
+      if *stop_phrases* is given, truncated at the first stop phrase.
+    """
+    accumulated = [""]
+
+    def _callback(chunk_text):
+        accumulated[0] += chunk_text
+
+    job.stream_request(request, api_type, _callback)
+    full = _strip_think_blocks(accumulated[0])
+
+    if question_patterns:
+        lower = full.lower()
+        if any(pattern in lower for pattern in question_patterns):
+            return "", True
+
+    if stop_phrases:
+        full = _truncate_at_stop_phrase(full, stop_phrases)
+
+    return full.strip(), False
 
 
 def _scroll_to_cursor(controller, cursor):
@@ -72,30 +94,6 @@ _EXTEND_QUESTION_PATTERNS = [
 ]
 
 
-def _make_extend_callback(text_obj, cursor, controller, done_flag, on_question):
-    """Return a streaming callback for extend_selection.
-
-    Inserts each chunk unless a conversational question pattern is detected,
-    in which case *on_question()* is called and further chunks are ignored.
-    """
-    accumulated = [""]
-
-    def _callback(chunk_text):
-        if done_flag[0]:
-            return
-        accumulated[0] += chunk_text
-        lower = accumulated[0].lower()
-        for pattern in _EXTEND_QUESTION_PATTERNS:
-            if pattern in lower:
-                done_flag[0] = True
-                on_question()
-                return
-        text_obj.insertString(cursor, chunk_text, False)
-        _scroll_to_cursor(controller, cursor)
-
-    return _callback
-
-
 def _extend_selection(job, text, selection, text_range, controller=None, model=None):
     job._send_telemetry(
         "ExtendSelection",
@@ -126,23 +124,15 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        extend_done = [False]
-        retry_needed = [False]
-
-        def _on_question_attempt1():
-            retry_needed[0] = True
-
         with _undo_context(model, "Générer la suite"):
             text.insertString(cursor, "\n\n---début-du-texte-généré---\n", False)
 
-            job.stream_request(
-                request, "chat",
-                _make_extend_callback(text, cursor, controller, extend_done, _on_question_attempt1),
+            generated, asked_question = _collect_stream(
+                job, request, "chat", question_patterns=_EXTEND_QUESTION_PATTERNS,
             )
 
             # Auto-retry with a stronger directive when the model asked a question.
-            if retry_needed[0]:
-                extend_done[0] = False
+            if asked_question:
                 retry_sp = (
                     "Tu dois CONTINUER le texte de l'utilisateur mot après mot, "
                     "comme si tu en étais l'auteur. Il est INTERDIT de poser une question "
@@ -153,22 +143,22 @@ def _extend_selection(job, text, selection, text_range, controller=None, model=N
                     "Voici le texte à continuer :\n\n" + base_text
                     + "\n\nÉcris UNIQUEMENT la suite directe, sans aucune introduction."
                 )
-                retry_request = job.make_api_request(
-                    retry_prompt, retry_sp, max_tokens
+                retry_request = job.make_api_request(retry_prompt, retry_sp, max_tokens)
+                generated, asked_again = _collect_stream(
+                    job, retry_request, "chat", question_patterns=_EXTEND_QUESTION_PATTERNS,
                 )
-
-                def _on_question_retry():
+                if asked_again:
                     text.insertString(
                         cursor,
                         "\n[Le modèle n'a pas pu continuer le texte."
                         " Essayez de sélectionner plus de contexte.]",
                         False,
                     )
+                    generated = ""
 
-                job.stream_request(
-                    retry_request, "chat",
-                    _make_extend_callback(text, cursor, controller, extend_done, _on_question_retry),
-                )
+            if generated:
+                insert_formatted(model, text, cursor, generated)
+                _scroll_to_cursor(controller, cursor)
 
             text.insertString(cursor, "\n---fin-du-texte-généré---\n", False)
     except Exception as e:
@@ -250,30 +240,14 @@ RÉSUMÉ :
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        summary_text = ""
-        summary_done = [False]
-        stop_phrases = [
-            "[END]",
-            "---END---",
-        ]
-
         with _undo_context(model, "Résumer"):
             text.insertString(cursor, "\n\n---début-du-résumé---\n", False)
 
-            def append_summary(chunk_text):
-                nonlocal summary_text
-                if summary_done[0]:
-                    return
-                summary_text += chunk_text
-                to_insert, done = _check_stop_phrase(summary_text, chunk_text, stop_phrases)
-                if done:
-                    summary_text = summary_text[:len(summary_text) - len(chunk_text) + len(to_insert)].rstrip()
-                    summary_done[0] = True
-                if to_insert:
-                    text.insertString(cursor, to_insert, False)
-                    _scroll_to_cursor(controller, cursor)
+            summary, _ = _collect_stream(job, request, "chat", stop_phrases=["[END]", "---END---"])
+            if summary:
+                insert_formatted(model, text, cursor, summary)
+                _scroll_to_cursor(controller, cursor)
 
-            job.stream_request(request, "chat", append_summary)
             text.insertString(cursor, "\n---fin-du-résumé---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
@@ -333,12 +307,6 @@ VERSION REFORMULÉE :
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        simplified_text = ""
-        simplify_done = [False]
-        stop_phrases = [
-            "[END]",
-            "---END---",
-        ]
         # Only true conversational questions — NOT response format prefixes like
         # "Voici le texte reformulé" which are normal model output patterns.
         question_patterns = [
@@ -349,28 +317,17 @@ VERSION REFORMULÉE :
         with _undo_context(model, "Reformuler"):
             text.insertString(cursor, "\n\n---reformulation-du-texte---\n", False)
 
-            def append_simplified(chunk_text):
-                nonlocal simplified_text
-                if simplify_done[0]:
-                    return
-                simplified_text += chunk_text
-                lower_text = simplified_text.lower()
-                for pattern in question_patterns:
-                    if pattern in lower_text:
-                        cursor.gotoStart(False)
-                        cursor.gotoEnd(True)
-                        text.insertString(cursor, "[Le modèle a posé une question. Veuillez réessayer.]", False)
-                        simplify_done[0] = True
-                        return
-                to_insert, done = _check_stop_phrase(simplified_text, chunk_text, stop_phrases)
-                if done:
-                    simplified_text = simplified_text[:len(simplified_text) - len(chunk_text) + len(to_insert)].rstrip()
-                    simplify_done[0] = True
-                if to_insert:
-                    text.insertString(cursor, to_insert, False)
-                    _scroll_to_cursor(controller, cursor)
+            simplified, asked_question = _collect_stream(
+                job, request, "chat",
+                question_patterns=question_patterns,
+                stop_phrases=["[END]", "---END---"],
+            )
+            if asked_question:
+                text.insertString(cursor, "[Le modèle a posé une question. Veuillez réessayer.]", False)
+            elif simplified:
+                insert_formatted(model, text, cursor, simplified)
+                _scroll_to_cursor(controller, cursor)
 
-            job.stream_request(request, "chat", append_simplified)
             text.insertString(cursor, "\n---fin-de-reformulation---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
@@ -484,27 +441,14 @@ TEXTE CORRIGÉ :
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        corrected_text = ""
-        correct_done = [False]
-        stop_phrases = ["[END]", "---END---"]
-
         with _undo_context(model, "Corriger"):
             text.insertString(cursor, "\n\n---début-de-correction---\n", False)
 
-            def append_corrected(chunk_text):
-                nonlocal corrected_text
-                if correct_done[0]:
-                    return
-                corrected_text += chunk_text
-                to_insert, done = _check_stop_phrase(corrected_text, chunk_text, stop_phrases)
-                if done:
-                    corrected_text = corrected_text[:len(corrected_text) - len(chunk_text) + len(to_insert)].rstrip()
-                    correct_done[0] = True
-                if to_insert:
-                    text.insertString(cursor, to_insert, False)
-                    _scroll_to_cursor(controller, cursor)
+            corrected, _ = _collect_stream(job, request, "chat", stop_phrases=["[END]", "---END---"])
+            if corrected:
+                insert_formatted(model, text, cursor, corrected)
+                _scroll_to_cursor(controller, cursor)
 
-            job.stream_request(request, "chat", append_corrected)
             text.insertString(cursor, "\n---fin-de-correction---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
@@ -555,27 +499,14 @@ TRADUCTION :
         cursor = text.createTextCursorByRange(text_range)
         cursor.collapseToEnd()
 
-        translated_text = ""
-        translate_done = [False]
-        stop_phrases = ["[END]", "---END---"]
-
         with _undo_context(model, "Traduire"):
             text.insertString(cursor, "\n\n---début-de-traduction---\n", False)
 
-            def append_translated(chunk_text):
-                nonlocal translated_text
-                if translate_done[0]:
-                    return
-                translated_text += chunk_text
-                to_insert, done = _check_stop_phrase(translated_text, chunk_text, stop_phrases)
-                if done:
-                    translated_text = translated_text[:len(translated_text) - len(chunk_text) + len(to_insert)].rstrip()
-                    translate_done[0] = True
-                if to_insert:
-                    text.insertString(cursor, to_insert, False)
-                    _scroll_to_cursor(controller, cursor)
+            translated, _ = _collect_stream(job, request, "chat", stop_phrases=["[END]", "---END---"])
+            if translated:
+                insert_formatted(model, text, cursor, translated)
+                _scroll_to_cursor(controller, cursor)
 
-            job.stream_request(request, "chat", append_translated)
             text.insertString(cursor, "\n---fin-de-traduction---\n", False)
     except Exception as e:
         text_range = selection.getByIndex(0)
