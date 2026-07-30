@@ -315,7 +315,7 @@ doit pas l'être : il est écrit pour un déploiement Docker local créé de zé
 conteneurs et des ports locaux, et sa phase 4 **crée** cohortes, drapeaux, artefacts et
 campagnes. Le passer sur un environnement partagé y écrirait de vrais objets.
 
-#### Observation : l'intégration Scaleway n'est pas la destination des traces
+#### La chaîne Scaleway fonctionne, mais le parc est dirigé ailleurs
 
 Les trois profils servis par `bootstrap.fake-domain.name` — `int`, `prod` et `dev` — annoncent
 tous le **même** `telemetryEndpoint` :
@@ -324,14 +324,33 @@ tous le **même** `telemetryEndpoint` :
 https://onyxia.gpu.minint.fr/telemetry/v1/traces
 ```
 
-Un plugin qui lit cette configuration envoie donc ses traces vers l'environnement DGX, et non
-vers le Device Management Scaleway vérifié ci-dessus — que la recette a atteint en le visant
-directement. Or le namespace `dm-dgx-test` de ce cluster tourne l'image **`0.7.0`**.
+**Ce n'est pas un défaut de configuration, c'est un choix délibéré.** La cause est une
+surcharge à chaud enregistrée en base (`config_overrides`), posée depuis l'interface
+d'administration le **2026-07-27 à 12:42 UTC par johann.lorber-linagora@interieur.gouv.fr** :
 
-Sous réserve de confirmer que `onyxia.gpu.minint.fr` dessert bien ce déploiement (impossible à
-vérifier depuis l'extérieur du réseau interne), **le correctif de typage ne produira aucun
-effet pour les postes réels tant que l'environnement servant cet hôte n'aura pas été mis à
-jour**. À trancher avant d'annoncer la fonctionnalité disponible.
+| Clé | Valeur |
+|---|---|
+| `PUBLIC_BASE_URL` | `https://onyxia.gpu.minint.fr/bootstrap` |
+| `DM_BOOTSTRAP_URLS` | `["https://onyxia.gpu.minint.fr"]` |
+
+Ces surcharges priment sur l'environnement du pod, qui porte pourtant
+`PUBLIC_BASE_URL=https://bootstrap.fake-domain.name` et un
+`DM_TELEMETRY_PUBLIC_ENDPOINT=/telemetry/v1/traces` relatif.
+`_resolve_public_telemetry_endpoint()` (app/main.py:893) dérive l'endpoint de l'origine de
+`PUBLIC_BASE_URL` : la valeur onyxia en découle mécaniquement. Tout se comporte comme conçu.
+
+Conséquence à connaître, à ne pas confondre avec une panne :
+
+- **La chaîne Scaleway est saine et vérifiée** — la recette la vise directement et passe.
+- **Aucun poste réel n'y envoie ses traces** tant que cette surcharge est en place : le parc
+  est dirigé vers DGX. Le correctif de typage n'y produira donc aucun effet visible.
+- Le namespace `dm-dgx-test` de ce cluster tourne l'image **`0.7.0`**. Impossible de
+  confirmer depuis l'extérieur que `onyxia.gpu.minint.fr` dessert bien ce déploiement — le
+  nom ne résout pas hors du réseau interne.
+
+> **Aucune modification n'a été faite sur ces surcharges.** Elles relèvent d'une décision
+> d'exploitation prise par un tiers sur un environnement partagé : les changer redirigerait
+> la télémétrie d'un parc entier. À arbitrer avec leur auteur.
 
 #### Une erreur de démarrage, préexistante et sans lien
 
@@ -350,11 +369,12 @@ les journaux.
 
 1. **Intégration : fait et vérifié vert** (§ 4.3) — recette télémétrie de bout en bout, plus
    29/32 tests de post-déploiement.
-2. **À trancher avant d'annoncer la fonctionnalité** : les trois profils servis par
-   l'intégration annoncent un `telemetryEndpoint` sur `onyxia.gpu.minint.fr` (DGX), pas sur
-   l'intégration elle-même. Le correctif n'aura donc aucun effet pour les postes réels tant
-   que l'environnement servant cet hôte n'est pas mis à jour — le namespace `dm-dgx-test`
-   tourne l'image `0.7.0` (§ 4.3).
+2. **À arbitrer avec son auteur avant d'annoncer la fonctionnalité** : une surcharge à chaud
+   posée le 2026-07-27 par johann.lorber-linagora@interieur.gouv.fr dirige tout le parc vers
+   `onyxia.gpu.minint.fr` (`PUBLIC_BASE_URL`, `DM_BOOTSTRAP_URLS`). La chaîne Scaleway est
+   saine et vérifiée, mais aucun poste réel n'y envoie ses traces — le correctif n'y produira
+   donc aucun effet visible tant que l'environnement servant cet hôte n'est pas mis à jour
+   (`dm-dgx-test` tourne `0.7.0`). Rien n'a été modifié (§ 4.3).
 3. Reste, au démarrage de `telemetry-relay`, un `Failed to apply DB schema`
    (`must be owner of table feature_flags`) préexistant et sans effet sur le service — à
    traiter pour ne pas polluer les journaux.
