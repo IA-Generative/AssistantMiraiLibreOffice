@@ -321,7 +321,7 @@ Les trois profils servis par `bootstrap.fake-domain.name` — `int`, `prod` et `
 tous le **même** `telemetryEndpoint` :
 
 ```
-https://onyxia.gpu.minint.fr/telemetry/v1/traces
+https://<HOTE_DGX>/telemetry/v1/traces
 ```
 
 **Ce n'est pas un défaut de configuration, c'est un choix délibéré.** La cause est une
@@ -330,8 +330,8 @@ d'administration le **2026-07-27 à 12:42 UTC par johann.lorber-linagora@interie
 
 | Clé | Valeur |
 |---|---|
-| `PUBLIC_BASE_URL` | `https://onyxia.gpu.minint.fr/bootstrap` |
-| `DM_BOOTSTRAP_URLS` | `["https://onyxia.gpu.minint.fr"]` |
+| `PUBLIC_BASE_URL` | `https://<HOTE_DGX>/bootstrap` |
+| `DM_BOOTSTRAP_URLS` | `["https://<HOTE_DGX>"]` |
 
 Ces surcharges priment sur l'environnement du pod, qui porte pourtant
 `PUBLIC_BASE_URL=https://bootstrap.fake-domain.name` et un
@@ -345,7 +345,7 @@ Conséquence à connaître, à ne pas confondre avec une panne :
 - **Aucun poste réel n'y envoie ses traces** tant que cette surcharge est en place : le parc
   est dirigé vers DGX. Le correctif de typage n'y produira donc aucun effet visible.
 - Le namespace `dm-dgx-test` de ce cluster tourne l'image **`0.7.0`**. Impossible de
-  confirmer depuis l'extérieur que `onyxia.gpu.minint.fr` dessert bien ce déploiement — le
+  confirmer depuis l'extérieur que `<HOTE_DGX>` dessert bien ce déploiement — le
   nom ne résout pas hors du réseau interne.
 
 > **Aucune modification n'a été faite sur ces surcharges.** Elles relèvent d'une décision
@@ -371,7 +371,7 @@ les journaux.
    29/32 tests de post-déploiement.
 2. **À arbitrer avec son auteur avant d'annoncer la fonctionnalité** : une surcharge à chaud
    posée le 2026-07-27 par johann.lorber-linagora@interieur.gouv.fr dirige tout le parc vers
-   `onyxia.gpu.minint.fr` (`PUBLIC_BASE_URL`, `DM_BOOTSTRAP_URLS`). La chaîne Scaleway est
+   `<HOTE_DGX>` (`PUBLIC_BASE_URL`, `DM_BOOTSTRAP_URLS`). La chaîne Scaleway est
    saine et vérifiée, mais aucun poste réel n'y envoie ses traces — le correctif n'y produira
    donc aucun effet visible tant que l'environnement servant cet hôte n'est pas mis à jour
    (`dm-dgx-test` tourne `0.7.0`). Rien n'a été modifié (§ 4.3).
