@@ -128,6 +128,52 @@ def test_every_declared_step_survives_the_wire(step):
     assert read_back["probe.flag"] is True
 
 
+def test_the_run_duration_is_measured_and_not_hardcoded():
+    """Une durée toujours nulle passerait inaperçue : tous les runs de test sont
+    instantanés. On en fait durer un pour de vrai.
+
+    Constaté en recette locale le 2026-07-28 : les cinq spans d'un parcours
+    complet portaient `assistant.duration_ms: 0` — plausible avec des branches
+    factices, indistinguable d'un compteur cassé.
+    """
+    import time
+    from unittest.mock import MagicMock
+
+    from src.mirai.core.ui_thread import DirectDispatcher
+    from src.mirai.ui import dsfr
+    from src.mirai.ui import palette as palette_module
+    from tests.unit.core.test_palette_build import FakeDialog
+
+    dialog = FakeDialog()
+    dsfr.make_dialog = lambda *_a, **_k: (dialog, dialog.model)
+    dsfr.probe_font = lambda _toolkit: "Arial"
+    palette_module._open_palette = [None]
+    palette_module.MainThreadDispatcher = lambda _ctx, log=None: DirectDispatcher()
+
+    spans = []
+    shell = MagicMock()
+    shell.toolkit.return_value = MagicMock()
+    shell.user_config_dir.return_value = "/tmp/mirai-duration-test"
+    shell.get_config.side_effect = lambda key, default=None: default
+    shell.log = lambda _m: None
+    shell.telemetry = lambda name, attrs=None: spans.append((name, dict(attrs or {})))
+
+    palette = palette_module.AssistantPalette(MagicMock(), shell, "writer",
+                                              callbacks={})
+
+    def _slow(*_a, **_k):
+        time.sleep(0.2)
+        return {"ok": True}
+
+    palette._run_agentic = _slow
+    palette._run_in_worker(None, "demande", MagicMock(), "demande")
+
+    run = next(a for name, a in spans if name == "AssistantRun")
+    assert isinstance(run["assistant.duration_ms"], int)
+    assert run["assistant.duration_ms"] >= 150, (
+        f"durée non mesurée : {run['assistant.duration_ms']} ms")
+
+
 def test_document_content_never_reaches_the_wire_even_typed():
     """Le filtre agit AVANT l'encodage : rien à rattraper côté serveur."""
     shell = _RecordingShell()
