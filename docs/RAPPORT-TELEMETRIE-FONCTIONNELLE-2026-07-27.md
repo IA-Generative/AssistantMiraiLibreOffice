@@ -182,6 +182,42 @@ AssistantStep/closed  {"runs.count": 4, "tabs.switches": 7, "session.duration_ms
 AssistantOpen         {"selection.active": true, "caps.measured": false}
 ```
 
+#### Recette avec le VRAI code de la palette (2026-07-28)
+
+La recette ci-dessus postait des payloads **écrits à la main** : elle prouvait que le serveur
+sait relire des types, pas que le plugin émet les bonnes valeurs. Une seconde passe comble
+l'écart — la palette réelle est montée sur des contrôles UNO factices, ses parcours sont
+rejoués (refus, run preset, réécriture de document, run annulé, gestes d'interface,
+fermeture), et `shell.telemetry` est branché sur le **vrai** émetteur OTLP vers le DM local.
+Aucune valeur n'est écrite à la main :
+
+```
+5 spans émis PAR LE CODE → 202 → file → 5 lignes en base → 5 traces dans Tempo
+✓ chaque valeur produite par le code est relue à l'identique en base
+```
+
+Valeurs produites par les parcours, relues sans altération :
+
+```json
+AssistantStep/run.refused  {"refuse.reason": "empty_prompt"}
+AssistantRun               {"run.kind": "pipeline", "assistant.ok": true, "append.mode": false}
+AssistantRun               {"run.kind": "document_rewrite", "assistant.reason": "empty_reply",
+                            "append.mode": true}
+AssistantRun               {"run.kind": "agentic", "assistant.cancelled": true,
+                            "assistant.reason": "cancelled", "assistant.iterations": 2}
+AssistantStep/palette.closed {"runs.count": 3, "tabs.switches": 2, "suggestions.views": 1,
+                            "reasoning.opens": 1}
+```
+
+Les compteurs de session correspondent exactement aux gestes rejoués — trois runs, deux
+clics d'onglet dont un sur Suggestions, une ouverture du panneau de raisonnement.
+
+**Un point relevé au passage** : les cinq spans portaient `assistant.duration_ms: 0`.
+Plausible, toutes les branches du harnais étant instantanées — mais indistinguable d'un
+compteur cassé. Vérifié en faisant durer un run pour de vrai (356 ms mesurées), et verrouillé
+par un test permanent (`test_the_run_duration_is_measured_and_not_hardcoded`) : sans lui, une
+régression sur la mesure passerait inaperçue, tous les runs de la suite étant instantanés.
+
 **Configuration locale ajustée** (fichiers non versionnés, `deploy/docker/.env.secrets`) :
 `DM_TELEMETRY_TOKEN_SIGNING_KEY` était vide et écrasait la valeur de `.env` — le mint de
 jeton répondait 503 ; `DM_TELEMETRY_UPSTREAM_ENDPOINT` pointait un collecteur inexistant.
