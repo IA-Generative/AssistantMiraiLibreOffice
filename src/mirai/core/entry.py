@@ -74,6 +74,43 @@ def test_model_capabilities(job):
     return verdict
 
 
+def _open_attributes(shell, model, app):
+    """Ce qu'on sait de la situation à l'ouverture — sans réseau, sans document.
+
+    Deux informations décident du chemin d'exécution et n'étaient nulle part :
+
+    - `selection.active` : une demande libre porte sur la sélection quand elle
+      existe, sur le document entier sinon ;
+    - `caps.measured` / `caps.agentic` : le verdict est MESURÉ par le menu
+      « Tester le modèle » et son défaut, en l'absence de mesure, est NON. Un
+      poste jamais sondé ne passe donc jamais en mode agentique — mais rien ne
+      permettait de distinguer « sonde jamais lancée » (un geste utilisateur le
+      corrige) de « modèle incapable d'enchaîner » (il faut changer de modèle).
+    """
+    from . import capabilities as caps
+
+    attributes = {"plugin.action": "assistant.open", "assistant.app": app}
+
+    selected = ""
+    if app == "writer":
+        try:
+            selected = model.CurrentController.getSelection().getByIndex(0).getString()
+        except Exception:
+            selected = ""
+    attributes["selection.active"] = bool((selected or "").strip())
+
+    verdict = None
+    try:
+        verdict = caps.load_cached(shell,
+                                   shell.get_config("llm_base_urls", ""),
+                                   shell.get_config("llm_default_models", ""))
+    except Exception:
+        verdict = None
+    attributes["caps.measured"] = verdict is not None
+    attributes["caps.agentic"] = bool(verdict and verdict.supports_agentic)
+    return attributes
+
+
 def open_palette(job, model):
     """Ouvre la palette universelle sur le document courant."""
     shell = MainJobShell(job)
@@ -91,8 +128,7 @@ def open_palette(job, model):
             pass
         return None
 
-    shell.telemetry("AssistantOpen", {"plugin.action": "assistant.open",
-                                      "assistant.app": app})
+    shell.telemetry("AssistantOpen", _open_attributes(shell, model, app))
     shell.log(f"[palette] ouverture demandée app={app}")
 
     callbacks = {

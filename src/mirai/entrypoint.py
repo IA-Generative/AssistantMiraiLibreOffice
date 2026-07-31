@@ -927,6 +927,29 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         "EnrollFailed": "enroll.fail",
         "BootstrapConfig": "bootstrap",
         "LlmRelayError": "llm.error",
+        "ConfigWaitAtTrigger": "config.wait",
+        "ActionUnhandled": "dispatch.unhandled",
+    }
+
+    # Une action non gérée signalée une fois par nom et par session : un
+    # utilisateur qui reclique sur une entrée de menu morte ne doit pas
+    # produire une rafale de traces.
+    _unhandled_reported_cls = set()
+
+    # Spans émis AVANT que le poste ne soit lié à un utilisateur. Les autres
+    # sont jetés tant que l'identité télémétrie n'est pas "user" — ceux-ci
+    # décrivent le poste, pas la personne, et sont justement ceux dont on a
+    # besoin quand rien ne fonctionne encore.
+    _TECHNICAL_EVENTS = {
+        "ExtensionLoaded",
+        "OpenSettings",
+        "OpenmiraiWebsite",
+        "OpenWebsite",
+        "ReloadConfig",
+        "ProxyCheck",
+        "ProxyTest",
+        "ConfigWaitAtTrigger",
+        "ActionUnhandled",
     }
 
     def _send_telemetry(self, span_name, attributes=None):
@@ -1003,6 +1026,51 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             self._send_telemetry("LlmRelayError", attrs)
         except Exception as e:
             log_to_file(f"Failed to send LlmRelayError telemetry: {str(e)}")
+
+    def _wait_for_config(self, action):
+        """Attend une configuration en vol, et DIT combien de temps ça a duré.
+
+        Au démarrage à froid, un déclenchement peut rester bloqué jusqu'à 15 s
+        sur un fetch réseau : l'utilisateur voit une extension qui « ne fait
+        rien ». Cette attente n'était mesurée nulle part — impossible de dire
+        si elle touche tout le parc ou trois postes au réseau lent. Retourne
+        la durée d'attente en millisecondes (0 = aucune attente).
+        """
+        if not (self._fetching_config and not self.config_cache):
+            return 0
+        log_to_file(f"trigger: waiting for config fetch to complete before {action}")
+        started = time.time()
+        while self._fetching_config and time.time() - started < 15:
+            time.sleep(0.3)
+        waited_ms = int((time.time() - started) * 1000)
+        available = bool(self.config_cache)
+        log_to_file("trigger: config now available" if available
+                    else "trigger: config still unavailable after wait")
+        self._send_telemetry("ConfigWaitAtTrigger", {
+            "config.wait_ms": waited_ms,
+            "config.available": available,
+            "action": str(action),
+        })
+        return waited_ms
+
+    def _report_unhandled_action(self, action, model):
+        """Une action déclarée mais non implémentée : le dire au parc.
+
+        Le clic sans effet laissait un message à l'écran et une ligne dans le
+        journal local — invisible pour le support. Une entrée de menu morte
+        après une mise à jour ne se voyait donc que si un utilisateur pensait
+        à la signaler.
+        """
+        try:
+            if action in MainJob._unhandled_reported_cls:
+                return
+            MainJob._unhandled_reported_cls.add(action)
+            self._send_telemetry("ActionUnhandled", {
+                "action": str(action),
+                "document": type(model).__name__,
+            })
+        except Exception as exc:
+            log_to_file(f"Failed to send ActionUnhandled telemetry: {str(exc)}")
 
     def _get_user_config_dir(self):
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
@@ -1124,18 +1192,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             access_token = str(self._get_config_from_file("access_token", "") or "").strip()
             has_valid_login = bool(access_token) and (not self._token_is_expired(access_token))
             if current_kind != "user":
-                technical_events = {
-                    "ExtensionLoaded",
-                    "OpenSettings",
-                    "OpenmiraiWebsite",
-                    "OpenWebsite",
-                    "ReloadConfig",
-                    "ProxyCheck",
-                    "ProxyTest",
-                }
                 if not has_valid_login:
                     return True
-                if _span_name and _span_name not in technical_events:
+                if _span_name and _span_name not in self._TECHNICAL_EVENTS:
                     return True
             handled = bool(flow.send_trace(payload))
             if flow.rebind_required():
@@ -10079,15 +10138,7 @@ EDITED VERSION:
 
         # Wait for any in-progress config fetch to finish (e.g. from __init__)
         # so the trigger has access to config/token for LLM calls
-        if self._fetching_config and not self.config_cache:
-            log_to_file(f"trigger: waiting for config fetch to complete before {action}")
-            _t0 = time.time()
-            while self._fetching_config and time.time() - _t0 < 15:
-                time.sleep(0.3)
-            if self.config_cache:
-                log_to_file("trigger: config now available")
-            else:
-                log_to_file("trigger: config still unavailable after wait")
+        self._wait_for_config(action)
 
         # First-time enrollment: intercept before any action
         # Informational/navigation actions bypass enrollment check
@@ -10140,6 +10191,7 @@ EDITED VERSION:
         # comme pour le support.
         log_to_file(f"[dispatch] action non gérée : {action!r} "
                     f"(document={type(model).__name__}, src={source})")
+        self._report_unhandled_action(action, model)
         self._show_message(
             "Action indisponible",
             f"L'action « {action} » n'est pas disponible ici.\n\n"

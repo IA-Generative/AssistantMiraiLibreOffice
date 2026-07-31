@@ -132,3 +132,45 @@ def test_cancelling_prevents_the_retry():
     # 0 et non 1 : une annulation déjà posée court-circuite jusqu'à l'émission
     # de la requête. Ce qui compte ici est qu'il n'y ait pas de SECONDE.
     assert len(shell.requests) < 2
+
+
+# ── La reprise réussie doit se VOIR ─────────────────────────────────────
+# L'échec est télémétré par la palette (`llm.reasoning_starved`). Sans le
+# pendant « réussi », impossible de savoir si la reprise élargie sert à
+# quelque chose — ou si elle coûte un aller-retour pour rien.
+
+def _retry_steps(shell):
+    from src.mirai.core import telemetry_steps
+    return [attrs for span, attrs in shell.telemetry_events
+            if span == telemetry_steps.SPAN
+            and attrs.get("step.name") == telemetry_steps.REASONING_RETRY_OK]
+
+
+def test_a_successful_retry_is_telemetered_with_its_cost():
+    shell = FakeShell(responses=[
+        FakeSSEResponse(reasoning_chunks("pensée " * 50)),
+        FakeSSEResponse(text_chunks("Le document réécrit.")),
+    ])
+    LLMClient(shell).step([{"role": "user", "content": "réécris"}])
+
+    steps = _retry_steps(shell)
+    assert len(steps) == 1
+    attrs = steps[0]
+    assert attrs["reasoning.chars"] > 0
+    assert attrs["retry.max_tokens"] >= 12000
+
+
+def test_a_failed_retry_emits_no_success_step():
+    shell = FakeShell(responses=[
+        FakeSSEResponse(reasoning_chunks("pensée " * 50)),
+        FakeSSEResponse(reasoning_chunks("encore " * 50)),
+    ])
+    LLMClient(shell).step([{"role": "user", "content": "réécris"}])
+    assert _retry_steps(shell) == []
+
+
+def test_an_untried_run_emits_no_retry_step():
+    shell = FakeShell(responses=[FakeSSEResponse(
+        reasoning_chunks("je réfléchis", content="Réponse.", finish="stop"))])
+    LLMClient(shell).step([{"role": "user", "content": "x"}])
+    assert _retry_steps(shell) == []

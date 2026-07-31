@@ -71,7 +71,7 @@ def test_call_tool_success_and_telemetry():
     spans = [s for s, _ in ctx.shell.telemetry_events]
     assert "AssistantToolCall" in spans
     attrs = ctx.shell.telemetry_events[0][1]
-    assert attrs["tool.name"] == "writer_echo" and attrs["tool.ok"] == "true"
+    assert attrs["tool.name"] == "writer_echo" and attrs["tool.ok"] is True
     # Jamais d'arguments ni de contenu en télémétrie
     assert "hé" not in str(attrs)
 
@@ -113,3 +113,81 @@ def test_content_capped():
     ctx.shell.config["tool_result_max_chars"] = 10
     result = registry.call_tool("writer_echo", {"text": "a" * 100}, ctx)
     assert len(result.content) < 50 and "tronqué" in result.content
+
+
+# ── Télémétrie enrichie : motif d'échec + coercitions + types ───────────
+
+def _tool_span(ctx):
+    spans = [(s, a) for s, a in ctx.shell.telemetry_events
+             if s == "AssistantToolCall"]
+    assert spans, "chaque appel d'outil doit produire son span"
+    return spans[-1][1]
+
+
+def test_tool_span_attributes_are_typed():
+    """bool/int réels, pas des chaînes : agrégeables côté Grafana."""
+    registry, ctx = _make_registry(), _Ctx()
+    registry.call_tool("writer_echo", {"text": "x"}, ctx)
+    attrs = _tool_span(ctx)
+    assert attrs["tool.ok"] is True
+    assert isinstance(attrs["tool.duration_ms"], int)
+
+
+def test_unknown_tool_reports_its_error_kind():
+    registry, ctx = _make_registry(), _Ctx()
+    registry.call_tool("inexistant", {}, ctx)
+    attrs = _tool_span(ctx)
+    assert attrs["tool.ok"] is False
+    assert attrs["tool.error_kind"] == "unknown_tool"
+
+
+def test_invalid_args_report_their_error_kind():
+    registry, ctx = _make_registry(), _Ctx()
+    registry.call_tool("writer_echo", {}, ctx)   # requis manquant
+    assert _tool_span(ctx)["tool.error_kind"] == "invalid_args"
+
+
+def test_handler_exception_reports_its_error_kind():
+    registry, ctx = _make_registry(), _Ctx()
+    registry.call_tool("writer_boom", {}, ctx)
+    assert _tool_span(ctx)["tool.error_kind"] == "exception"
+
+
+def test_a_successful_call_carries_no_error_kind():
+    registry, ctx = _make_registry(), _Ctx()
+    registry.call_tool("writer_echo", {"text": "x"}, ctx)
+    assert "tool.error_kind" not in _tool_span(ctx)
+
+
+def _bounded_registry():
+    registry = ToolRegistry()
+    registry.register(ToolSpec(
+        name="writer_read", description="lecture bornée",
+        parameters={"type": "object", "properties": {
+            "count": {"type": "integer", "maximum": 20}}},
+        handler=lambda ctx, args: ToolResult(call_id="", ok=True,
+                                             content=str(args.get("count"))),
+        apps=("writer",),
+    ))
+    return registry
+
+
+def test_clamped_arguments_are_counted():
+    """f41d9e8 ramène 99 → 20 au lieu de rejeter : la coercition doit se voir,
+    sinon impossible de savoir combien d'appels sont rattrapés en silence."""
+    registry, ctx = _bounded_registry(), _Ctx()
+    result = registry.call_tool("writer_read", {"count": 99}, ctx)
+    assert result.ok and result.content == "20"
+    assert _tool_span(ctx)["tool.args_coerced"] == 1
+
+
+def test_clean_arguments_are_not_counted_as_coerced():
+    registry, ctx = _bounded_registry(), _Ctx()
+    registry.call_tool("writer_read", {"count": 5}, ctx)
+    assert "tool.args_coerced" not in _tool_span(ctx)
+
+
+def test_tool_span_still_never_carries_arguments():
+    registry, ctx = _bounded_registry(), _Ctx()
+    registry.call_tool("writer_read", {"count": 99, "note": "texte du doc"}, ctx)
+    assert "texte du doc" not in str(_tool_span(ctx))

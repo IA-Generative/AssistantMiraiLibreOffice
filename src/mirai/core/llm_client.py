@@ -15,7 +15,7 @@ import dataclasses
 import json
 import re
 
-from . import sse_pump
+from . import sse_pump, telemetry_steps
 from .progress import NullProgress
 from .text_filters import strip_think_blocks
 from .tool_calls import ToolCall
@@ -175,6 +175,11 @@ class LLMClient:
                 self.shell.set_config("llm_tool_mode_detected", "json")
             except Exception:
                 pass
+            # Bascule DÉFINITIVE pour ce poste : elle mérite une trace. Sans
+            # elle, un parc dont la moitié parle JSON est indistinguable d'un
+            # parc en tool calling natif. Auto-limitée par `set_config`.
+            telemetry_steps.emit(self.shell, telemetry_steps.TOOLS_FALLBACK_JSON,
+                                 {"llm.status": result.error})
             mode = "json"
             result = self._run_step(messages, tools, on_text_delta, mode,
                                     cancel_event=cancel_event, progress=progress)
@@ -189,6 +194,11 @@ class LLMClient:
             result = self._run_step(messages, tools, on_text_delta, mode,
                                     recover_auth=True, cancel_event=cancel_event,
                                     progress=progress)
+            # Seule la reprise RÉUSSIE est signalée : un second 401 est déjà
+            # porté par LlmRelayError côté coquille, et l'annoncer « récupéré »
+            # serait un mensonge de tableau de bord.
+            if result.error != "http_401":
+                telemetry_steps.emit(self.shell, telemetry_steps.AUTH_RECOVERED)
 
         # Budget épuisé par le raisonnement : une seule reprise, plus large.
         #
@@ -214,6 +224,14 @@ class LLMClient:
             # Ne jamais dégrader : on ne garde la reprise que si elle apporte
             # ce qui manquait — du texte ou un tool call.
             if (retried.text or "").strip() or retried.tool_calls:
+                # L'ÉCHEC de ce mécanisme est déjà visible (la palette émet
+                # `llm.reasoning_starved`). Sans son pendant réussi, impossible
+                # de dire si la reprise sauve des runs ou coûte un aller-retour
+                # pour rien.
+                telemetry_steps.emit(
+                    self.shell, telemetry_steps.REASONING_RETRY_OK,
+                    {"reasoning.chars": int(result.reasoning_chars),
+                     "retry.max_tokens": int(widened)})
                 return retried
         return result
 

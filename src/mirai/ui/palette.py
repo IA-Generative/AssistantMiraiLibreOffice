@@ -453,6 +453,14 @@ class AssistantPalette:
         self._cancel = None
         self._delta_buffer = _DeltaCoalescer(self._flush_deltas)
         self._selection_watcher = None      # (listener, contrôleur) — garde vivante
+        # Usage de la session : compté en mémoire, envoyé en UNE fois à la
+        # fermeture. Un span par clic d'onglet saturerait l'envoi — côté
+        # coquille, une trace coûte une requête HTTP et un thread.
+        self._opened_at = time.monotonic()
+        self._closed = False
+        self._session = {"runs": 0, "tabs": 0, "suggestions": 0,
+                         "reasoning": 0, "clears": 0, "append_toggles": 0}
+        self._last_refusal = ""             # anti-rafale sur Entrée martelée
         self._build()
 
     # ── Construction (création des contrôles, positions posées par _layout) ──
@@ -591,7 +599,7 @@ class AssistantPalette:
                 })
             self._models[name] = tab_model
             handler = dsfr.ClickHandler(
-                tab_model, on_click=(lambda t=tab_id: self.select_tab(t)),
+                tab_model, on_click=(lambda t=tab_id: self._on_tab_click(t)),
                 fg=dsfr.TOKENS["text_mention"], fg_hover=dsfr.TOKENS["primary_hover"])
             control.addMouseListener(handler)
             self._handlers.append(handler)
@@ -866,6 +874,11 @@ class AssistantPalette:
         pendant la fermeture reçoit DispatcherClosed au lieu de toucher un
         contrôle détruit.
         """
+        # La croix de la fenêtre ET le dispose passent tous deux par ici : le
+        # résumé de session ne doit partir qu'une fois.
+        if not self._closed:
+            self._closed = True
+            self._emit_session_summary()
         if self._cancel is not None:
             self._cancel.set()
         # Retirer les listeners AVANT dispose() : l'ordre inverse laisse
@@ -886,6 +899,25 @@ class AssistantPalette:
             pass
         if _open_palette[0] is self:
             _open_palette[0] = None
+
+    def _emit_session_summary(self):
+        """Ce que l'utilisateur a fait de la palette, en UN span de fermeture.
+
+        Émettre à chaque clic coûterait une requête HTTP et un thread par
+        geste — la coquille envoie une trace par span, sans lot : on agrège
+        ici, et on envoie une fois. La durée de session dit si la palette est
+        ouverte le temps d'une demande ou laissée ouverte toute la journée —
+        deux usages qui n'appellent pas les mêmes choix d'ergonomie.
+        """
+        telemetry_steps.emit(self.shell, telemetry_steps.PALETTE_CLOSED, {
+            "session.duration_ms": int((time.monotonic() - self._opened_at) * 1000),
+            "runs.count": self._session["runs"],
+            "tabs.switches": self._session["tabs"],
+            "suggestions.views": self._session["suggestions"],
+            "reasoning.opens": self._session["reasoning"],
+            "conversation.clears": self._session["clears"],
+            "append.toggles": self._session["append_toggles"],
+        })
 
     # ── Mises à jour d'affichage ────────────────────────────────────────
     # Ces méthodes sont appelées indifféremment depuis le thread principal et
@@ -965,6 +997,10 @@ class AssistantPalette:
         if not self.busy or (worker is not None and worker.is_alive()):
             return
         self.shell.log("[palette] interface bloquée en état occupé — réparation")
+        # Chaque déclenchement = un lot de messages asynchrones jamais délivré.
+        # Le filet transforme un blocage définitif en gêne d'une seconde, mais
+        # sa FRÉQUENCE sur le parc dit si le transport UNO tient la charge.
+        telemetry_steps.emit(self.shell, telemetry_steps.UI_HEAL_STUCK)
         self.busy = False
         self._cancel = None
         self._worker = None
@@ -1014,6 +1050,7 @@ class AssistantPalette:
 
     def set_append_mode(self, enabled):
         """Mémorise le choix — il ne doit pas être à refaire à chaque ouverture."""
+        self._session["append_toggles"] += 1
         self.append_mode = bool(enabled)
         try:
             self.shell.set_config("assistant_append_mode",
@@ -1029,6 +1066,18 @@ class AssistantPalette:
         except Exception:
             stored = ""
         return stored if stored in dict(TABS) else "response"
+
+    def _on_tab_click(self, tab_id):
+        """Bascule demandée par l'UTILISATEUR — la seule qui mesure un usage.
+
+        `select_tab` est aussi appelée par l'ouverture, la restauration et le
+        démarrage d'un run : les compter mêlerait le comportement du logiciel
+        à celui de la personne qui s'en sert.
+        """
+        self._session["tabs"] += 1
+        if tab_id == "suggestions":
+            self._session["suggestions"] += 1
+        self.select_tab(tab_id)
 
     def select_tab(self, tab_id):
         """Bascule la zone basse. L'onglet actif est mémorisé en configuration.
@@ -1118,6 +1167,7 @@ class AssistantPalette:
         if self.active_tab == REASONING_PANE:
             self.select_tab(self._tab_before_reasoning or "response")
             return
+        self._session["reasoning"] += 1
         self._tab_before_reasoning = self.active_tab
         self.select_tab(REASONING_PANE)
 
@@ -1217,6 +1267,7 @@ class AssistantPalette:
     def _on_clear(self):
         if self.busy:
             return
+        self._session["clears"] += 1
         self.conversation.clear()
         self._current_exchange = []
         self._history_cache = None
@@ -1294,23 +1345,23 @@ class AssistantPalette:
             return
         prompt_text = self._prompt_text().strip()
         if preset is None and not prompt_text:
-            self.set_status("Tapez d'abord votre demande.", tone="error")
-            return
+            return self._refuse("empty_prompt", "Tapez d'abord votre demande.")
         if preset is not None and preset.needs_input and not prompt_text:
-            self.set_status(preset.input_hint or "Précisez votre demande.",
-                            tone="error")
-            return
+            return self._refuse(
+                "preset_needs_input",
+                preset.input_hint or "Précisez votre demande.", preset)
 
         ctx = self._current_context()
         if ctx is None:
-            self.set_status("Ouvrez un document Writer ou Calc.", tone="error")
-            return
+            return self._refuse("no_document",
+                                "Ouvrez un document Writer ou Calc.", preset)
         if preset is not None and ctx.app not in preset.apps:
             wanted = "Writer" if "writer" in preset.apps else "Calc"
-            self.set_status(f"Cette action nécessite un document {wanted}.",
-                            tone="error")
-            return
+            return self._refuse(
+                "wrong_app", f"Cette action nécessite un document {wanted}.",
+                preset)
 
+        self._last_refusal = ""
         self.busy = True
         self._cancel = threading.Event()
         self._delta_buffer.reset()
@@ -1346,6 +1397,25 @@ class AssistantPalette:
             args=(preset, prompt_text, ctx, shown, snapshot),
             daemon=True, name="mirai-run")
         self._worker.start()
+
+    def _refuse(self, reason, message, preset=None):
+        """Refuse le lancement en le DISANT — à l'utilisateur et au parc.
+
+        Ces refus étaient invisibles : un preset systématiquement lancé sans
+        sélection, ou un raccourci utilisé dans la mauvaise application, ne
+        laissaient qu'un statut rouge que personne ne remonte. La télémétrie
+        ne part pas par `journal_line` : le journal est vidé au démarrage du
+        run suivant, et un refus n'est pas une étape de run.
+        """
+        self.set_status(message, tone="error")
+        # Entrée martelée sur un prompt vide : un span, pas une rafale.
+        if self._last_refusal != reason:
+            self._last_refusal = reason
+            attributes = {"refuse.reason": reason}
+            if preset is not None:
+                attributes["preset.name"] = preset.id
+            telemetry_steps.emit(self.shell, telemetry_steps.RUN_REFUSED,
+                                 attributes)
 
     def _model_can_chain_tools(self):
         """Le modèle sait-il enchaîner lecture → écriture ?
@@ -1415,29 +1485,43 @@ class AssistantPalette:
         `self.dispatcher` (post pour l'affichage, call pour le document).
         """
         snapshot = snapshot or {}
+        started = time.monotonic()
+        self._session["runs"] += 1
         self.shell.log("[palette] run: début")
+        # Chaque branche rend un résumé {ok, reason, …} : c'est lui qui alimente
+        # le span de fin. Les valeurs par défaut couvrent le cas où la branche
+        # lève avant d'avoir rendu quoi que ce soit.
+        kind, summary = "agentic", {"ok": False, "reason": "exception"}
         try:
             if preset is not None and preset.mode == "pipeline":
-                self._run_pipeline(preset, prompt_text, ctx, shown)
+                kind = "pipeline"
+                summary = self._run_pipeline(preset, prompt_text, ctx, shown)
             elif snapshot.get("rewrite_selection"):
-                self._run_selection_rewrite(ctx, prompt_text,
-                                            snapshot["selection"])
+                kind = "selection_rewrite"
+                summary = self._run_selection_rewrite(ctx, prompt_text,
+                                                      snapshot["selection"])
             elif snapshot.get("rewrite"):
-                self._run_document_rewrite(ctx, prompt_text,
-                                           snapshot["paragraphs"],
-                                           snapshot["styles"])
+                kind = "document_rewrite"
+                summary = self._run_document_rewrite(ctx, prompt_text,
+                                                     snapshot["paragraphs"],
+                                                     snapshot["styles"])
             else:
-                self._run_agentic(preset, prompt_text, ctx)
+                summary = self._run_agentic(preset, prompt_text, ctx)
             self._delta_buffer.flush()
             self._finish_run()
         except DispatcherClosed:
+            summary = {"ok": False, "reason": "palette_closed"}
             self.shell.log("[palette] run interrompu : palette fermée")
         except Exception as exc:
+            summary = {"ok": False, "reason": "exception"}
             self.shell.log(f"[palette] run error: {exc}")
             self._delta_buffer.flush()
             self.set_status(_friendly_error(exc), tone="error")
             self._append_response("MIrAI : ", f"⚠ {_friendly_error(exc)}")
         finally:
+            # Le span AVANT de libérer l'état : `_cancel` est remis à None juste
+            # après, et l'annulation ne serait plus lisible.
+            self._emit_run_span(kind, preset, summary, started)
             # Ordre important : libérer l'état AVANT de poster les mises à
             # jour, pour qu'un filet déclenché entre-temps voie un run terminé.
             self.busy = False
@@ -1451,6 +1535,31 @@ class AssistantPalette:
             # au repos.
             self.dispatcher.post(self.dispatcher.stop_pump)
             self.shell.log("[palette] run: terminé, interface restaurée")
+
+    def _emit_run_span(self, kind, preset, summary, started):
+        """Un run = un span, quel que soit le chemin emprunté.
+
+        Le mode agentique était seul instrumenté : un preset, une réécriture de
+        sélection ou de document ne laissaient aucune trace de durée ni
+        d'issue. `assistant.reason` nomme la cause de fin — sans elle, une
+        annulation, un plafond d'itérations et un 429 se ressemblent tous.
+        """
+        summary = summary or {}
+        attributes = {
+            "run.kind": kind,
+            "assistant.preset": preset.id if preset is not None else "free",
+            "assistant.ok": bool(summary.get("ok")),
+            "assistant.cancelled": self._cancelled(),
+            "append.mode": bool(self.append_mode),
+            "assistant.duration_ms": int((time.monotonic() - started) * 1000),
+        }
+        if summary.get("reason"):
+            attributes["assistant.reason"] = str(summary["reason"])
+        if summary.get("mode"):
+            attributes["assistant.mode"] = str(summary["mode"])
+        if summary.get("iterations") is not None:
+            attributes["assistant.iterations"] = int(summary["iterations"])
+        telemetry_steps.emit_run(self.shell, attributes)
 
     def _run_pipeline(self, preset, prompt_text, ctx, shown):
         """Preset piloté par Python : le LLM n'est qu'une fonction texte.
@@ -1474,6 +1583,7 @@ class AssistantPalette:
         self._append_response("MIrAI : ", message)
         self.conversation.append("user", shown, ctx.app)
         self.conversation.append("assistant", message, ctx.app)
+        return {"ok": True}
 
     def _run_agentic(self, preset, prompt_text, ctx):
         """Run piloté par le LLM, qui appelle les outils du registre.
@@ -1494,14 +1604,15 @@ class AssistantPalette:
 
         extra, user_prompt, sink = self._prepare_agentic_run(preset, prompt_text, ctx)
         self._append_response("MIrAI : ")
-        result = orchestrator.run_agentic(
-            user_prompt, sink, preset_extra=extra,
-            preset_id=preset.id if preset else "free")
+        result = orchestrator.run_agentic(user_prompt, sink, preset_extra=extra)
         self._delta_buffer.flush()
         if not result.ok:
             self._stream_response("⚠ " + (result.text or result.reason))
         elif not isinstance(sink, PaletteSink):
             self._stream_response(result.text or "Modification appliquée.")
+        return {"ok": result.ok, "reason": result.reason,
+                "mode": orchestrator.llm.effective_mode(),
+                "iterations": result.iterations}
 
     def _run_selection_rewrite(self, ctx, instruction, selection):
         """Applique une demande libre À LA SÉLECTION, par un chemin sûr.
@@ -1541,9 +1652,9 @@ class AssistantPalette:
             self._delta_buffer.flush()
             if step.error:
                 self._stream_response("⚠ " + error_message(step.error))
-                return
+                return {"ok": False, "reason": step.error}
             if self._cancelled():
-                return
+                return {"ok": False, "reason": "cancelled"}
             self.dispatcher.call(
                 lambda: sink.finish(step.text, step.streamed), timeout=30)
         finally:
@@ -1556,6 +1667,7 @@ class AssistantPalette:
         summary = f"Sélection {how}. Ctrl+Z pour annuler."
         self.conversation.append("user", instruction, ctx.app)
         self.conversation.append("assistant", summary, ctx.app)
+        return {"ok": True}
 
     def _run_document_rewrite(self, ctx, instruction, originals, styles=None):
         """Réécrit le document : Python lit, le LLM rédige, Python applique.
@@ -1567,7 +1679,7 @@ class AssistantPalette:
 
         if not originals:
             self._append_response("MIrAI : ", "Le document est vide.")
-            return
+            return {"ok": False, "reason": "empty_document"}
 
         # Les titres restent en place : les inclure dans la plage réécrite y
         # ferait tomber du corps de texte, qui hériterait du style Titre.
@@ -1576,7 +1688,7 @@ class AssistantPalette:
         if span is None:
             self._append_response(
                 "MIrAI : ", "Ce document ne contient que des titres.")
-            return
+            return {"ok": False, "reason": "headings_only"}
         first, last = span
         body = originals[first - 1:last]
         headings = [text for text, style in zip(originals, styles, strict=False)
@@ -1607,9 +1719,9 @@ class AssistantPalette:
 
         if step.error:
             self._stream_response("⚠ " + error_message(step.error))
-            return
+            return {"ok": False, "reason": step.error}
         if self._cancelled():
-            return
+            return {"ok": False, "reason": "cancelled"}
 
         rewritten = doc_rewrite.parse_rewritten(step.text)
         if not rewritten:
@@ -1628,6 +1740,7 @@ class AssistantPalette:
                     "produire de réponse. Le document n'a pas été modifié. "
                     "Essayez un modèle qui raisonne moins (Paramètres), ou une "
                     "demande portant sur une partie du document.")
+                return {"ok": False, "reason": "reasoning_starved"}
             else:
                 self.journal_line(
                     "✗ Réponse inexploitable",
@@ -1636,7 +1749,7 @@ class AssistantPalette:
                        "finish.reason": (step.finish_reason or "unknown")})
                 self._stream_response(
                     "\n⚠ Réponse inexploitable — le document n'a pas été modifié.")
-            return
+            return {"ok": False, "reason": "empty_reply"}
 
         self._progress.set_phase("Application au document")
 
@@ -1673,6 +1786,7 @@ class AssistantPalette:
         self._stream_response("\n" + summary)
         self.conversation.append("user", instruction, ctx.app)
         self.conversation.append("assistant", summary, ctx.app)
+        return {"ok": True}
 
     def _prepare_agentic_run(self, preset, prompt_text, ctx):
         """Résout prompt, contexte supplémentaire et destination de la sortie."""
@@ -1788,6 +1902,10 @@ def open_or_focus(uno_ctx, shell, app, callbacks):
         try:
             existing.dialog.setVisible(True)
             existing.dialog.setFocus()
+            # Rouvrir une palette DÉJÀ ouverte n'est pas une ouverture : le
+            # confondre avec elle gonflerait AssistantOpen d'un geste qui dit
+            # surtout que la fenêtre s'était perdue derrière le document.
+            telemetry_steps.emit(shell, telemetry_steps.PALETTE_REFOCUSED)
             return existing
         except Exception:
             _open_palette[0] = None

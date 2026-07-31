@@ -138,3 +138,80 @@ def test_calc_failure_is_reported():
 def test_calc_handler_still_refuses_non_calc_documents():
     job, _rec = _job()
     assert handle_calc_action(job, "AnalyzeRange", object()) is False
+
+
+# ── Santé technique : les pannes muettes deviennent des spans ───────────
+
+def _telemetry_recorder(job):
+    seen = []
+    job._send_telemetry = (
+        lambda span, attrs=None: seen.append((span, dict(attrs or {}))))
+    return seen
+
+
+def test_unhandled_action_is_telemetered_once_per_action():
+    """Le clic sans effet laissait un log local ; le parc, lui, ne voyait
+    rien. Une émission par nom d'action et par session — pas une par clic."""
+    from src.mirai.entrypoint import MainJob
+
+    job = make_job()
+    MainJob._unhandled_reported_cls = set()
+    seen = _telemetry_recorder(job)
+
+    job._report_unhandled_action("ActionFantome", object())
+    job._report_unhandled_action("ActionFantome", object())
+    job._report_unhandled_action("AutreAction", object())
+
+    spans = [s for s, _ in seen]
+    assert spans == ["ActionUnhandled", "ActionUnhandled"]
+    assert seen[0][1]["action"] == "ActionFantome"
+    assert seen[1][1]["action"] == "AutreAction"
+
+
+def test_the_new_spans_have_a_condensed_action_name():
+    """`plugin.action` est posé par `_send_telemetry` depuis cette table :
+    sans entrée, le tableau de bord affiche le nom brut du span."""
+    from src.mirai.entrypoint import MainJob
+
+    assert MainJob._ACTION_NAMES["ActionUnhandled"] == "dispatch.unhandled"
+    assert MainJob._ACTION_NAMES["ConfigWaitAtTrigger"] == "config.wait"
+
+
+def test_new_shell_spans_pass_the_identity_filter():
+    """Avant login, seuls les spans « techniques » sortent : les deux
+    nouveaux doivent en être, sinon ils seraient jetés en silence."""
+    from src.mirai.entrypoint import MainJob
+
+    for span in ("ActionUnhandled", "ConfigWaitAtTrigger", "ExtensionLoaded"):
+        assert span in MainJob._TECHNICAL_EVENTS, span
+
+
+def test_config_wait_emits_nothing_when_config_is_ready():
+    job = make_job()
+    seen = _telemetry_recorder(job)
+    job._fetching_config = False
+    job.config_cache = {"config": {}}
+
+    assert job._wait_for_config("OpenAssistant") == 0
+    assert seen == []
+
+
+def test_config_wait_reports_duration_and_outcome(monkeypatch):
+    job = make_job()
+    seen = _telemetry_recorder(job)
+    job._fetching_config = True
+    job.config_cache = {}
+
+    def _sleep(_seconds):
+        job._fetching_config = False
+        job.config_cache = {"config": {}}
+
+    monkeypatch.setattr("time.sleep", _sleep)
+    job._wait_for_config("OpenAssistant")
+
+    spans = dict(seen)
+    assert "ConfigWaitAtTrigger" in spans
+    attrs = spans["ConfigWaitAtTrigger"]
+    assert attrs["config.available"] is True
+    assert isinstance(attrs["config.wait_ms"], int)
+    assert attrs["action"] == "OpenAssistant"

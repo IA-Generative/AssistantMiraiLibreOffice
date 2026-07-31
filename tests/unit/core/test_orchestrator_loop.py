@@ -97,8 +97,23 @@ def test_text_only_run():
     assert sink.text == "Réponse."
     assert ("final", "Réponse.") in observer.events
     assert ctx.undo_ended == 1
+    # Le span AssistantRun est émis par le WORKER de la palette (point unique
+    # couvrant les 4 chemins d'exécution) — plus par l'orchestrateur, dont le
+    # RunResult porte déjà tout ce que le span disait.
     spans = [s for s, _ in shell.telemetry_events]
-    assert "AssistantRun" in spans
+    assert "AssistantRun" not in spans
+
+
+def test_orchestrator_emits_no_span_itself():
+    """Tout ce que le span portait est dans le RunResult : ok, iterations,
+    reason. Un second émetteur ferait diverger deux formats du même span."""
+    shell = FakeShell()
+    ctx = _Ctx(shell)
+    orchestrator = Orchestrator(FakeLLM([StepResult(text="ok")]),
+                                _registry(), ctx)
+    result = orchestrator.run_agentic("x", PaletteSink())
+    assert result.ok
+    assert shell.telemetry_events == []
 
 
 def test_tool_call_then_final():
