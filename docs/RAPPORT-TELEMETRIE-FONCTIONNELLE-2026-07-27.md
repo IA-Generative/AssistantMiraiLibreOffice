@@ -403,30 +403,23 @@ les journaux.
 
 ## 5. Points ouverts
 
-1. **Intégration : fait et vérifié vert** (§ 4.3) — recette télémétrie de bout en bout, plus
-   29/32 tests de post-déploiement.
-2. **À arbitrer avec son auteur avant d'annoncer la fonctionnalité** : une surcharge à chaud
-   posée le 2026-07-27 par johann.lorber-linagora@interieur.gouv.fr dirige tout le parc vers
-   `<HOTE_DGX>` (`PUBLIC_BASE_URL`, `DM_BOOTSTRAP_URLS`). La chaîne Scaleway est
-   saine et vérifiée, mais aucun poste réel n'y envoie ses traces — le correctif n'y produira
-   donc aucun effet visible tant que l'environnement servant cet hôte n'est pas mis à jour
-   (`dm-dgx-test` tourne `0.7.0`). Rien n'a été modifié (§ 4.3).
-3. Reste, au démarrage de `telemetry-relay`, un `Failed to apply DB schema`
-   (`must be owner of table feature_flags`) préexistant et sans effet sur le service — à
-   traiter pour ne pas polluer les journaux.
-4. **Filtre d'identité inchangé** — tant que l'identité télémétrie n'est pas « user », seuls
-   les événements techniques sortent. Les spans `Assistant*` restent donc invisibles sur un
-   poste non lié à un utilisateur : décision conservée telle quelle. Les deux nouveaux spans
-   de coquille (`ConfigWaitAtTrigger`, `ActionUnhandled`) ont été ajoutés à la liste
-   technique — ils décrivent le poste, pas la personne, et sont justement ceux dont on a
-   besoin quand rien ne fonctionne encore.
-5. **Recette en LibreOffice réel non faite** — elle demande une session interactive. Les
-   chemins sont couverts par les tests, mais un passage manuel (un run par branche, une
-   annulation, un refus, fermeture de palette) confirmerait les valeurs affichées dans
-   `~/log.txt` avec `telemetrylogJson=true`.
-6. **`writer_replace_paragraphs` ne déclare pas `mutates=True`** alors qu'il écrit — il
-   n'ouvre donc pas le contexte d'annulation par le registre, et manque à la table des
-   libellés du journal. Constaté au passage, **non corrigé** : hors périmètre.
-7. **Les suggestions ne sont pas cliquables** — `core/suggestions.py` déclare pourtant
-   `preset_id` et `runs_immediately`. Le compteur de consultations est en place ; le clic
-   reste à implémenter.
+Tous suivis en issues (2026-08-01) :
+
+| # | Sujet | Dépôt |
+|---|---|---|
+| [#35](https://github.com/IA-Generative/AssistantMiraiLibreOffice/issues/35) | `writer_replace_paragraphs` s'affiche sous son nom technique dans le journal | plugin |
+| [#36](https://github.com/IA-Generative/AssistantMiraiLibreOffice/issues/36) | Suggestions non cliquables alors que le moteur le prévoit | plugin |
+| [#37](https://github.com/IA-Generative/AssistantMiraiLibreOffice/issues/37) | Recette de la télémétrie dans un LibreOffice réel | plugin |
+| [#38](https://github.com/IA-Generative/AssistantMiraiLibreOffice/issues/38) | Spans `Assistant*` jetés en silence avant liaison utilisateur | plugin |
+| [#20](https://github.com/IA-Generative/device-management/issues/20) | Trois pods sur cinq journalisent une pile d'erreurs au démarrage | DM |
+| [#21](https://github.com/IA-Generative/device-management/issues/21) | Trois tests passent isolément et échouent en suite | DM |
+| [#22](https://github.com/IA-Generative/device-management/issues/22) | `test_queue_load_smoke` : seuil de débit instable | DM |
+| [#16](https://github.com/IA-Generative/device-management/issues/16) | Versions divergentes entre environnements — DGX en `0.7.0` (commenté) | DM |
+
+Hors issues, deux gestes d'exploitation :
+
+- **Bascule du parc sur Scaleway** — une surcharge posée le 2026-07-27 par
+  johann.lorber-linagora@interieur.gouv.fr (`PUBLIC_BASE_URL`, `DM_BOOTSTRAP_URLS`) dirige
+  tout le parc vers `<HOTE_DGX>`. Rien n'a été modifié : à arbitrer avec son auteur.
+- **Les deux PR se fusionnent ensemble** — sans le correctif serveur, les compteurs du
+  plugin arrivent vides côté admin.
