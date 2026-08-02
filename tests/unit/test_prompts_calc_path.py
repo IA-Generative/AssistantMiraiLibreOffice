@@ -23,10 +23,24 @@ install()
 class TestPromptsCalcPath(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        # Filet de sécurité : si ces tests sont un jour rejoués contre un
+        # checkout ANTÉRIEUR au correctif (bisect, archéologie), l'ancien code
+        # repliait sur ~/prompts_calc.txt — et `_save_prompt_calc` fait un
+        # read-modify-write plafonné à 100 lignes, donc écrire 120 entrées de
+        # test chassait le vrai historique de l'utilisateur. C'est arrivé.
+        # On isole donc le HOME pour que ce repli ne puisse toucher personne.
+        self._fake_home = tempfile.mkdtemp()
+        self._real_home = os.environ.get("HOME")
+        os.environ["HOME"] = self._fake_home
         self.job = make_job(config_dir=self.tmpdir)
 
     def tearDown(self):
+        if self._real_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._real_home
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        shutil.rmtree(self._fake_home, ignore_errors=True)
 
     def _break_path_settings(self):
         """Simule un PathSettings indisponible (LO dégradé, contexte mocké)."""
