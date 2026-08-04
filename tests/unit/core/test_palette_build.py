@@ -93,6 +93,16 @@ class FakeControl:
         return self.visible
 
 
+class FakePeer:
+    """Peer minimal : `toFront()` est ce qui remonte une fenêtre autonome."""
+
+    def __init__(self):
+        self.front_calls = 0
+
+    def toFront(self):
+        self.front_calls += 1
+
+
 class FakeDialog:
     def __init__(self):
         self.controls = {}
@@ -100,6 +110,8 @@ class FakeDialog:
         self.top_listeners = []
         self.window_listeners = []
         self.visible = False
+        self.title = ""
+        self.peer = FakePeer()
 
     def setModel(self, _model):
         pass
@@ -110,8 +122,11 @@ class FakeDialog:
     def setVisible(self, value):
         self.visible = value
 
-    def setTitle(self, _title):
-        pass
+    def setTitle(self, title):
+        self.title = title
+
+    def getPeer(self):
+        return self.peer
 
     def setPosSize(self, *_args):
         pass
@@ -404,14 +419,28 @@ def test_set_text_tolerates_a_missing_control(palette_module):
 
 # ── Panneau de réflexion (le « ⓘ ») ─────────────────────────────────────
 
-def test_reasoning_pane_is_created_without_a_tab(palette_module):
-    """Contenu de la zone basse, mais sans onglet : on y accède par le ⓘ."""
+def test_reasoning_has_its_own_tab(palette_module):
+    """Le raisonnement porte son propre onglet, en plus du raccourci ⓘ.
+
+    Auparavant il partageait le rectangle sans onglet : cliquer sur « ⓘ »
+    remplaçait le contenu de l'onglet courant — la Conversation le plus
+    souvent — sans rien indiquer du déplacement ni du chemin de retour.
+    """
     _build(palette_module)
     names = palette_module._fake_dialog.model.names
 
     assert palette_module.REASONING_PANE in names
-    assert "reasoning_toggle" in names
-    assert f"tab_{palette_module.REASONING_PANE}" not in names
+    assert "reasoning_toggle" in names          # le raccourci reste
+    assert f"tab_{palette_module.REASONING_PANE}" in names
+    assert ("reasoning", "Raisonnement") in palette_module.TABS
+
+
+def test_reasoning_tab_is_never_blank(palette_module):
+    """Cliquer sur l'onglet avant tout run ne doit pas donner un rectangle vide,
+    qui se lit comme une panne."""
+    palette = _build(palette_module)
+    palette.set_reasoning("")
+    assert palette._models[palette_module.REASONING_PANE].Text.strip()
 
 
 def test_toggle_opens_then_closes_and_restores_the_tab(palette_module):
@@ -707,3 +736,318 @@ def test_heal_does_nothing_on_a_healthy_palette(palette_module):
     palette = _build(palette_module)
     palette.heal_if_stuck()
     assert _step_spans(palette.shell, "ui.heal_stuck") == []
+
+
+# ── Analyse asynchrone du document (onglet Suggestions) ─────────────────────
+#
+# La pompe du dispatcher NE TOURNE QUE PENDANT UN RUN (ui_thread.start_pump).
+# La première version lisait le document par `dispatcher.call` depuis le thread
+# d'analyse : hors run, l'appel expirait au bout de 10 s et l'onglet restait
+# muet — « le thread principal n'a pas répondu », constaté en recette le
+# 2026-08-04. Le texte est donc lu sur le THREAD PRINCIPAL avant de partir, et
+# la pompe est armée là aussi.
+
+class _Reponse:
+    def __init__(self, text="", error="", finish_reason="stop"):
+        self.text, self.error, self.finish_reason = text, error, finish_reason
+
+
+def _client(reponse=None, budgets=None, boum=False):
+    class _C:
+        def __init__(self, _shell, max_tokens=None):
+            if budgets is not None:
+                budgets.append(max_tokens)
+
+        def step(self, _messages, progress=None):
+            if boum:
+                raise RuntimeError("relais injoignable")
+            return reponse
+    return _C
+
+
+def _analyse(palette, palette_module, monkeypatch, client, doc="Un texte. " * 60):
+    """Déroule l'analyse de bout en bout, sans thread (déterministe)."""
+    monkeypatch.setattr(palette, "_document_text", lambda: doc)
+    monkeypatch.setattr(palette_module, "LLMClient", client)
+    lances = []
+    monkeypatch.setattr(
+        palette_module.threading, "Thread",
+        lambda target=None, args=(), **kw: type(
+            "T", (), {"start": lambda _s: lances.append((target, args))})())
+    demarre = palette.start_document_analysis()
+    for target, args in lances:
+        if target == palette._analyse_in_worker:      # on n'anime pas en test
+            target(*args)
+    return demarre
+
+
+def test_document_is_read_on_the_main_thread(palette_module, monkeypatch):
+    """Aucun `dispatcher.call` : c'est lui qui expirait hors run."""
+    palette = _build(palette_module)
+    appels = []
+    monkeypatch.setattr(palette.dispatcher, "call",
+                        lambda *a, **k: appels.append(1))
+    _analyse(palette, palette_module, monkeypatch,
+             _client(_Reponse(text="- Une proposition")))
+    assert appels == []
+
+
+def test_pump_is_armed_before_the_worker_starts(palette_module, monkeypatch):
+    """Sans pompe armée, le résultat ne serait jamais affiché."""
+    palette = _build(palette_module)
+    armee = []
+    monkeypatch.setattr(palette.dispatcher, "start_pump",
+                        lambda: armee.append(1))
+    _analyse(palette, palette_module, monkeypatch,
+             _client(_Reponse(text="- Une proposition")))
+    assert armee == [1]
+
+
+def test_successful_analysis_lands_in_the_tab(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    _analyse(palette, palette_module, monkeypatch, _client(
+        _Reponse(text="- Ajouter des intertitres\n- Scinder le paragraphe 4")))
+    assert "Ajouter des intertitres" in palette._analysis_text
+    assert "Ajouter des intertitres" in palette._models["suggestions"].Text
+
+
+def test_truncated_analysis_drops_the_cut_item(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    _analyse(palette, palette_module, monkeypatch, _client(_Reponse(
+        text="- Ajouter des intertitres\n- Fusionner les sections en une seule chron",
+        finish_reason="length")))
+    assert "Ajouter des intertitres" in palette._analysis_text
+    assert "chron" not in palette._analysis_text
+
+
+def test_analysis_asks_for_a_large_budget(palette_module, monkeypatch):
+    """Réflexion et réponse partagent le plafond : trop serré, gemma-4 ne rend rien."""
+    palette = _build(palette_module)
+    budgets = []
+    _analyse(palette, palette_module, monkeypatch,
+             _client(_Reponse(text="- Une proposition"), budgets=budgets))
+    assert budgets == [palette_module.doc_analysis.MAX_TOKENS]
+
+
+def test_failed_analysis_falls_back_to_static_suggestions(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    _analyse(palette, palette_module, monkeypatch, _client(boum=True))
+    assert palette._analysis_text == ""
+    assert palette._analysis_running is False
+    assert palette._models["suggestions"].Text == palette._analysis_base
+
+
+def test_empty_answer_falls_back_to_static_suggestions(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    _analyse(palette, palette_module, monkeypatch, _client(_Reponse(text="")))
+    assert palette._analysis_text == ""
+    assert palette._models["suggestions"].Text == palette._analysis_base
+
+
+def test_short_document_is_reported_without_calling_the_model(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    budgets = []
+    demarre = _analyse(palette, palette_module, monkeypatch,
+                       _client(_Reponse(), budgets=budgets), doc="Trois mots.")
+    assert demarre is False
+    assert budgets == []                  # aucun aller-retour réseau inutile
+    assert palette._analysis_text == palette_module.doc_analysis.TOO_SHORT
+
+
+def test_no_analysis_outside_writer(palette_module, monkeypatch):
+    palette = _build(palette_module, app="calc")
+    assert palette.start_document_analysis() is False
+
+
+def test_analysis_is_not_started_twice(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+    monkeypatch.setattr(palette_module.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda _s: None})())
+    assert palette.start_document_analysis() is True
+    assert palette.start_document_analysis() is False     # la première tourne
+
+
+def test_a_run_invalidates_a_previous_analysis(palette_module):
+    """Le document a changé : le constat précédent ne le décrit plus."""
+    palette = _build(palette_module)
+    palette._analysis_text = "constat périmé"
+    palette._finish_run()
+    assert palette._analysis_text == ""
+
+
+def test_wait_is_shown_in_the_status_line_like_a_run(palette_module, monkeypatch):
+    """Même endroit, même format que le run — une seule habitude à prendre.
+
+    L'onglet, lui, garde les suggestions statiques : une animation dans la zone
+    ET une autre dans la ligne d'état apprendraient deux endroits où regarder.
+    """
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+    monkeypatch.setattr(palette_module.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda _s: None})())
+    assert palette.start_document_analysis() is True
+    rendu = palette._progress.render()
+    assert palette_module.doc_analysis.PHASE in rendu
+    assert palette_module.doc_analysis.PHASE not in palette._models["suggestions"].Text
+
+
+def test_analysis_gauge_is_not_stopped_by_a_run_that_took_over(palette_module, monkeypatch):
+    """Un run démarré pendant l'analyse pose SA jauge : la couper afficherait
+    un run figé alors qu'il travaille."""
+    palette = _build(palette_module)
+    arrets = []
+    monkeypatch.setattr(palette, "_stop_pulse", lambda: arrets.append(1))
+    ancienne = palette_module.RunProgress()
+    palette._progress = palette_module.RunProgress()      # le run a pris la main
+    palette._publish_analysis(ancienne)
+    assert arrets == []
+
+
+# ── Lignes cliquables (Conversation et Suggestions) ─────────────────────────
+
+def _clic(palette, name, offset):
+    palette._pick_from_pane(name, offset)
+    return palette._models["prompt"].Text
+
+
+def test_clicking_a_suggestion_fills_the_prompt(palette_module):
+    palette = _build(palette_module)
+    palette._models["suggestions"].Text = ("1. ▸ Résumer la sélection\n"
+                                           "2. · Reformuler en langage clair")
+    assert _clic(palette, "suggestions", 26) == "Reformuler en langage clair"
+
+
+def test_clicking_a_conversation_turn_fills_the_prompt(palette_module):
+    palette = _build(palette_module)
+    palette._models["response"].Text = "Vous : résume ce document\nMIrAI : c'est fait."
+    assert _clic(palette, "response", 0) == "résume ce document"
+
+
+def test_clicking_a_section_title_leaves_the_prompt_alone(palette_module):
+    """Un clic pour LIRE ne doit pas écraser ce que l'utilisateur a tapé."""
+    palette = _build(palette_module)
+    palette._models["prompt"].Text = "ma demande en cours"
+    palette._models["suggestions"].Text = "Propositions d'amélioration :\n· Ajouter des titres"
+    assert _clic(palette, "suggestions", 0) == "ma demande en cours"
+
+
+def test_click_is_ignored_during_a_run(palette_module):
+    """Pendant un run la saisie est grisée : la modifier sèmerait la confusion."""
+    palette = _build(palette_module)
+    palette._models["prompt"].Text = "en cours"
+    palette._models["suggestions"].Text = "· Ajouter des intertitres"
+    palette.busy = True
+    assert _clic(palette, "suggestions", 0) == "en cours"
+
+
+def test_click_never_starts_a_run(palette_module, monkeypatch):
+    """Le clic REMPLIT la saisie, il ne lance rien : dans une zone où l'on
+    clique aussi pour lire, une action serait irrattrapable."""
+    palette = _build(palette_module)
+    lances = []
+    monkeypatch.setattr(palette, "_on_send", lambda *_a: lances.append(1))
+    palette._models["suggestions"].Text = "· Ajouter des intertitres"
+    _clic(palette, "suggestions", 0)
+    assert lances == []
+
+
+def test_clickable_panes_have_a_mouse_listener(palette_module):
+    """Sans écouteur posé, toute la logique de clic serait morte."""
+    _build(palette_module)
+    dialog = palette_module._fake_dialog
+    for name in ("response", "suggestions"):
+        listeners = dialog.getControl(name).listeners
+        assert any(isinstance(handler, palette_module._PaneClickHandler)
+                   for handler in listeners), f"aucun écouteur sur « {name} »"
+
+
+def test_journal_and_reasoning_are_not_clickable(palette_module):
+    """Un journal d'actions ou un raisonnement ne sont pas des demandes."""
+    _build(palette_module)
+    dialog = palette_module._fake_dialog
+    for name in ("journal", palette_module.REASONING_PANE):
+        listeners = dialog.getControl(name).listeners
+        assert not any(isinstance(handler, palette_module._PaneClickHandler)
+                       for handler in listeners), f"« {name} » ne doit pas être cliquable"
+
+
+# ── Fenêtre autonome, titre, et application courante ────────────────────────
+#
+# La palette était une fenêtre POSSÉDÉE par la fenêtre de document active à son
+# ouverture. Mesuré le 2026-08-04 sur un Mac à trois écrans : impossible de la
+# sortir de l'écran de son propriétaire, et elle le suivait au pixel près. Avec
+# plusieurs documents, elle restait collée au premier tout en agissant sur le
+# document courant — donc potentiellement un autre.
+
+def test_window_keeps_an_explicit_parent(palette_module, monkeypatch):
+    """Le parent EXPLICITE est conservé, faute de mieux.
+
+    Il est bien la cause du confinement à un écran — mais passer `None` ne le
+    corrige pas : VCL rattache alors le dialogue à la fenêtre active de
+    l'application, et le suivi mesuré est identique (+1500/+261 dans les deux
+    cas, 2026-08-04, trois écrans). Autant garder un parent prévisible, qui
+    tient au moins la palette au-dessus du document.
+    """
+    parents = []
+    monkeypatch.setattr(palette_module._fake_dialog, "createPeer",
+                        lambda _toolkit, parent: parents.append(parent))
+    _build(palette_module)
+    assert parents and parents[0] is not None
+
+
+def test_bring_to_front_raises_the_window(palette_module):
+    """`setFocus` seul donne le clavier sans changer l'ordre d'empilement."""
+    palette = _build(palette_module)
+    dialog = palette_module._fake_dialog
+    dialog.visible = False
+    palette.bring_to_front()
+    assert dialog.visible is True
+    assert dialog.peer.front_calls == 1
+
+
+def test_title_names_the_document(palette_module, monkeypatch):
+    """Avec plusieurs documents, rien ne disait sur lequel la demande portait."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_current_document_name", lambda: "rapport.odt")
+    palette.refresh_title()
+    assert palette_module._fake_dialog.title == "MIrAI — Assistant · rapport.odt"
+
+
+def test_title_falls_back_without_a_document(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_current_document_name", lambda: "")
+    palette.refresh_title()
+    assert palette_module._fake_dialog.title == "MIrAI — Assistant"
+
+
+def test_title_is_not_rewritten_when_unchanged(palette_module, monkeypatch):
+    """Reposer le même titre fait clignoter la barre de fenêtre."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_current_document_name", lambda: "rapport.odt")
+    palette.refresh_title()
+    poses = []
+    monkeypatch.setattr(palette_module._fake_dialog, "setTitle", poses.append)
+    palette.refresh_title()
+    assert poses == []
+
+
+def test_current_app_follows_the_active_document(palette_module, monkeypatch):
+    """`self.app` est figé à l'ouverture : suivre le document réel."""
+    palette = _build(palette_module, app="writer")
+
+    class _Calc:
+        Sheets = object()
+
+    desktop = MagicMock()
+    desktop.getCurrentComponent.return_value = _Calc()
+    palette.uno_ctx.getServiceManager.return_value.createInstanceWithContext.return_value = desktop
+    assert palette.current_app() == "calc"
+
+
+def test_current_app_falls_back_when_no_document(palette_module):
+    palette = _build(palette_module, app="writer")
+    desktop = MagicMock()
+    desktop.getCurrentComponent.return_value = None
+    palette.uno_ctx.getServiceManager.return_value.createInstanceWithContext.return_value = desktop
+    assert palette.current_app() == "writer"

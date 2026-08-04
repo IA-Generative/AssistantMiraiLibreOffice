@@ -59,7 +59,16 @@ class RunProgress:
     Thread-safe : le worker écrit, le thread principal lit pour afficher.
     """
 
-    def __init__(self, now=time.monotonic):
+    def __init__(self, now=time.monotonic, activity=None):
+        """`activity` nomme une tâche de fond et TIENT d'un bout à l'autre.
+
+        Les phases automatiques (« Rédaction », « Réflexion ») sont posées par
+        `on_text`/`on_reasoning` dès que les jetons arrivent. Pour un run c'est
+        ce qu'on veut : l'utilisateur a lancé l'action et suit son déroulé. Pour
+        une tâche partie d'un simple clic d'onglet — l'analyse du document —
+        elles effaceraient la seule information utile, et la ligne d'état
+        deviendrait indiscernable d'un run que l'utilisateur n'a pas demandé.
+        """
         self._now = now
         self._lock = threading.Lock()
         self._started = now()
@@ -69,7 +78,8 @@ class RunProgress:
         self._reasoning = ""
         self._preview = ""
         self._exact = None
-        self._phase = "Connexion…"
+        self._activity = activity
+        self._phase = activity or "Connexion…"
 
     # ── Alimentation (thread worker) ────────────────────────────────────
 
@@ -82,7 +92,8 @@ class RunProgress:
             # qui s'écrit : sans cela, elle resterait vide sur ces modèles-là et
             # l'indice de survol ne s'afficherait jamais.
             self._preview = (self._preview + chunk)[-REASONING_TOOLTIP_CHARS:]
-            self._phase = "Rédaction"
+            if self._activity is None:
+                self._phase = "Rédaction"
 
     def on_reasoning(self, text):
         with self._lock:
@@ -90,7 +101,8 @@ class RunProgress:
             self._reasoning_chars += len(chunk)
             # On ne garde que la fin : c'est l'état courant de la réflexion.
             self._reasoning = (self._reasoning + chunk)[-REASONING_TOOLTIP_CHARS:]
-            self._phase = "Réflexion"
+            if self._activity is None:
+                self._phase = "Réflexion"
 
     def exact_tokens(self, count):
         """Valeur faisant autorité, transmise par le relais."""
@@ -99,7 +111,8 @@ class RunProgress:
 
     def set_phase(self, phase):
         with self._lock:
-            self._phase = phase
+            if self._activity is None:
+                self._phase = phase
 
     # ── Lecture (thread principal) ──────────────────────────────────────
 

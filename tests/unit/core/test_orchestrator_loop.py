@@ -188,3 +188,80 @@ def test_conversation_not_polluted_by_failed_run():
                                 _registry(), ctx, conversation=store)
     orchestrator.run_agentic("x", PaletteSink())
     assert store.load() == []
+
+
+# ── Run stérile : rien produit, rien fait ────────────────────────────────────
+#
+# Constaté en recette le 2026-08-04 : le relais renvoyait un tool call complet
+# (229 chunks vérifiés hors plugin), le step n'en a rien récupéré, et le run se
+# déclarait RÉUSSI avec un texte vide. Écran muet pour l'utilisateur,
+# `assistant.ok=true` dans la télémétrie : l'incident était invisible partout.
+
+def test_empty_response_is_a_failure():
+    shell = FakeShell()
+    ctx = _Ctx(shell)
+    orchestrator = Orchestrator(FakeLLM([StepResult(text="")]),
+                                _registry(), ctx)
+    result = orchestrator.run_agentic("résume le document", PaletteSink())
+    assert not result.ok
+    assert result.reason == "empty_response"
+    assert result.iterations == 1
+    assert "n'a rien produit" in result.text
+
+
+def test_whitespace_only_response_is_empty():
+    shell = FakeShell()
+    ctx = _Ctx(shell)
+    orchestrator = Orchestrator(FakeLLM([StepResult(text="  \n\t ")]),
+                                _registry(), ctx)
+    result = orchestrator.run_agentic("x", PaletteSink())
+    assert not result.ok and result.reason == "empty_response"
+
+
+def test_empty_response_notifies_observer():
+    shell = FakeShell()
+    ctx = _Ctx(shell)
+    observer = _RecordingObserver()
+    orchestrator = Orchestrator(FakeLLM([StepResult(text="")]),
+                                _registry(), ctx, observer=observer)
+    orchestrator.run_agentic("x", PaletteSink())
+    assert ("error", "empty_response") in observer.events
+    assert not [e for e in observer.events if e[0] == "final"]
+
+
+def test_empty_response_does_not_pollute_conversation():
+    shell = FakeShell()
+    ctx = _Ctx(shell)
+    store = ConversationStore(tempfile.mkdtemp())
+    orchestrator = Orchestrator(FakeLLM([StepResult(text="")]),
+                                _registry(), ctx, conversation=store)
+    orchestrator.run_agentic("x", PaletteSink())
+    assert store.load() == []
+
+
+def test_empty_final_after_tool_stays_a_success():
+    """Un outil a modifié le document : un texte de clôture vide est légitime.
+
+    C'est la contre-épreuve de la garde — elle ne doit pas transformer un
+    travail réellement effectué en échec.
+    """
+    shell = FakeShell()
+    ctx = _Ctx(shell)
+    llm = FakeLLM([
+        StepResult(tool_calls=[ToolCall(id="c1", name="writer_probe", arguments={})]),
+        StepResult(text=""),
+    ])
+    orchestrator = Orchestrator(llm, _registry(), ctx)
+    result = orchestrator.run_agentic("réécris le document", PaletteSink())
+    assert result.ok
+    assert result.iterations == 2
+    assert result.reason == ""
+
+
+def test_undo_is_closed_even_on_sterile_run():
+    shell = FakeShell()
+    ctx = _Ctx(shell)
+    orchestrator = Orchestrator(FakeLLM([StepResult(text="")]),
+                                _registry(), ctx)
+    orchestrator.run_agentic("x", PaletteSink())
+    assert ctx.undo_ended == 1

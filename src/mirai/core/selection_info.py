@@ -40,18 +40,30 @@ def middle_ellipsis(text: str, limit: int = MAX_EXCERPT) -> str:
     return f"{head}…{tail}"
 
 
+NO_SELECTION_LABEL = ("Document entier — les actions rapides portent sur le "
+                      "paragraphe courant")
+
+
 def writer_label(selected_text: str, paragraph_text: str = "") -> str:
     """Libellé Writer, adapté au ciblage réel de l'action.
 
-    Sans sélection, les actions portent sur le paragraphe courant : le libellé
-    doit le dire, sinon l'utilisateur croit que rien n'est ciblé.
+    Sans sélection, le libellé citait le paragraphe sous le curseur. Curseur en
+    tête de document, il affichait donc le TITRE — « Paragraphe courant :
+    « OpenClaw » » — ce qui laissait croire que l'action ne porterait que sur
+    cette ligne. Or l'orchestrateur annonce au modèle « aucune sélection, donc
+    DOCUMENT ENTIER » (cf. `orchestrator._scope_line`).
+
+    Les deux cibles coexistent selon le chemin emprunté : une demande libre
+    porte sur tout le document, un preset sur le paragraphe courant
+    (`presets._target_selection_text`). Le libellé nomme donc la portée large,
+    la plus lourde de conséquences, et mentionne l'autre — plutôt que de citer
+    un extrait qui n'engage rien.
     """
     selected = compact_whitespace(selected_text)
     if selected:
         return f"Sélection : « {middle_ellipsis(selected)} »"
-    paragraph = compact_whitespace(paragraph_text)
-    if paragraph:
-        return f"Paragraphe courant : « {middle_ellipsis(paragraph)} »"
+    if compact_whitespace(paragraph_text):
+        return NO_SELECTION_LABEL
     return "Placez le curseur dans un paragraphe, ou sélectionnez du texte."
 
 

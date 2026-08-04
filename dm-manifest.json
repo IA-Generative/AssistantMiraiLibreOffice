@@ -26,6 +26,16 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.30",
+      "date": "2026-08-02",
+      "changes": [
+        "Nouvelle palette unique « MIrAI — Assistant » (Ctrl+Alt+Espace, macOS : Ctrl+Opt+Espace) pour Writer et Calc, adossée à un moteur d'outils interne",
+        "La génération ne fige plus LibreOffice : le traitement vit dans un thread de travail et l'interface reste utilisable pendant toute la réponse",
+        "Télémétrie fonctionnelle : durée, issue et cause de chaque run remontées au Device Management, y compris pour les runs en échec",
+        "Fix (#31) : l'historique des demandes Calc n'est plus écrit en clair dans le dossier personnel ; il se range dans le profil utilisateur LibreOffice, à côté de config.json"
+      ]
+    },
+    {
       "version": "0.0.1.0.22",
       "date": "2026-07-06",
       "changes": [

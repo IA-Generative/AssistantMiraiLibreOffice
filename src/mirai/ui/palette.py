@@ -47,6 +47,8 @@ except Exception:
 
 from ..core import (
     capabilities,
+    clickable,
+    doc_analysis,
     doc_rewrite,
     prompts,
     selection_info,
@@ -74,6 +76,7 @@ except Exception:
 TOOL_LABELS = {
     "writer_get_selection": "Lecture de la sélection",
     "writer_get_document_map": "Lecture du document",
+    "writer_replace_paragraphs": "Réécriture des paragraphes",
     "writer_replace_selection": "Remplacement de la sélection",
     "writer_insert_text": "Insertion de texte",
     "writer_find_replace": "Remplacements dans le document",
@@ -97,16 +100,21 @@ PULSE_INTERVAL_S = 0.2    # cadence d'animation de la jauge d'activité
 # « Conversation » et non « Historique » : cet onglet porte le FIL en cours,
 # restauré d'une session à l'autre. « Historique » laissait attendre une liste
 # de conversations passées, qui n'existe pas (une seule conversation en v1).
+# « Raisonnement » a désormais SON onglet. Il partageait le rectangle des
+# autres sans en porter un : le clic sur « ⓘ » remplaçait donc le contenu de
+# l'onglet courant — le plus souvent la Conversation — sans que rien n'indique
+# où l'on venait d'atterrir ni comment revenir. Un onglet nommé rend le
+# déplacement visible, réversible d'un clic, et lisible sans mode d'emploi.
 TABS = (("response", "Conversation"),
         ("suggestions", "Suggestions"),
+        ("reasoning", "Raisonnement"),
         ("journal", "Actions"))
 
-# La réflexion partage le même rectangle que les onglets, mais n'en a pas :
-# on y accède par le « ⓘ » de la ligne de statut, et on en sort de même. Une
-# infobulle de survol ne convenait pas — elle disparaît dès qu'on bouge, donc
-# impossible de LIRE un raisonnement, encore moins de le faire défiler.
 REASONING_PANE = "reasoning"
-BOTTOM_PANES = tuple(tab_id for tab_id, _ in TABS) + (REASONING_PANE,)
+BOTTOM_PANES = tuple(tab_id for tab_id, _ in TABS)
+
+REASONING_EMPTY = ("Le raisonnement du modèle s'affichera ici pendant "
+                   "la prochaine demande.")
 
 # Le retour d'un run doit se VOIR : une ligne de statut colorée selon l'issue,
 # pas un texte discret dans une zone grise. C'est la leçon du « il ne se passe
@@ -376,21 +384,64 @@ class _KeyHandler(unohelper.Base, XKeyListener):
         pass
 
 
+class _PaneClickHandler(unohelper.Base, dsfr.XMouseListener):
+    """Clic dans une zone de texte : reporte la ligne cliquée dans la saisie.
+
+    On lit la position au RELÂCHEMENT et non à l'appui : c'est le clic qui
+    déplace le curseur, donc à `mousePressed` la position est encore l'ancienne
+    et on rapporterait la ligne précédemment cliquée.
+    """
+
+    def __init__(self, control, on_pick):
+        self._control = control
+        self._on_pick = on_pick
+
+    def mouseReleased(self, _event):
+        try:
+            self._on_pick(self._control.getSelection().Min)
+        except Exception:
+            pass
+
+    def mousePressed(self, _event):
+        pass
+
+    def mouseEntered(self, _event):
+        pass
+
+    def mouseExited(self, _event):
+        pass
+
+
 class _JournalObserver(RunObserver):
     """Alimente le journal d'actions de la palette (optionnel, repliable)."""
 
     def __init__(self, palette):
         self._palette = palette
         self.lines = []
+        self.acted = False    # un outil a-t-il agi pendant CE run ?
 
     def _tool_label(self, call):
         return TOOL_LABELS.get(call.name, call.name)
+
+    def _capabilities(self):
+        """Libellés des outils réellement disponibles ici, sans doublon."""
+        try:
+            specs = self._palette.registry.list_tools(self._palette.app)
+        except Exception:
+            return []
+        labels = []
+        for spec in specs:
+            label = TOOL_LABELS.get(spec.name, spec.name)
+            if label not in labels:
+                labels.append(label)
+        return labels
 
     def _render(self):
         self._palette.set_journal_text("\n".join(self.lines))
 
     def on_run_start(self, mode):
         self.lines = [f"Mode outils : {mode}"]
+        self.acted = False
         self._render()
 
     def on_tool_calls(self, calls):
@@ -401,6 +452,7 @@ class _JournalObserver(RunObserver):
     def on_tool_result(self, call, result, duration_ms):
         icon = "✓" if result.ok else "✗"
         label = self._tool_label(call)
+        self.acted = True
         for index in range(len(self.lines) - 1, -1, -1):
             if self.lines[index] == f"⏳ {label}…":
                 self.lines[index] = f"{icon} {label} ({duration_ms} ms)"
@@ -409,6 +461,24 @@ class _JournalObserver(RunObserver):
             self.lines.append(f"{icon} {label} ({duration_ms} ms)")
         if not result.ok and result.error:
             self.lines.append(f"   ↳ {result.error[:120]}")
+        self._render()
+
+    def on_final(self, text):
+        """Run terminé SANS qu'aucun outil n'ait agi : le dire explicitement.
+
+        Sans cette trace, une demande que l'assistant ne sait pas satisfaire
+        — « sauvegarde le document », alors qu'aucun outil de sauvegarde
+        n'existe — se solde par une réponse en texte et un onglet Actions vide.
+        L'utilisateur ne peut alors pas distinguer trois situations très
+        différentes : l'action a eu lieu, elle a échoué, ou la capacité
+        n'existe pas. On lève le doute, et on annonce ce qui est faisable ici.
+        """
+        if self.acted:
+            return
+        self.lines.append("ℹ Aucune action sur le document — réponse en texte seul.")
+        labels = self._capabilities()
+        if labels:
+            self.lines.append(f"   Ici, l'assistant sait : {', '.join(labels)}.")
         self._render()
 
     def on_error(self, code, message):
@@ -429,6 +499,11 @@ class AssistantPalette:
         self._history_cache = None     # historique relu seulement quand il change
         self._journal_lines = []       # onglet « Actions » du run courant
         self._tab_before_reasoning = None   # onglet à restaurer en refermant
+        self._analysis_text = ""       # analyse du document, quand elle arrive
+        self._analysis_running = False  # une seule analyse à la fois
+        self._analysis_base = ""       # socle statique, repli si l'analyse échoue
+        self._analysis_progress = None  # jauge de l'analyse (partagée avec le run)
+        self._title_shown = ""         # dernier titre posé (évite le clignotement)
         self.append_mode = self._restore_append_mode(shell)
         self._progress = None          # jauge du run en cours
         self._pulse = None             # thread d'animation de la jauge
@@ -568,6 +643,11 @@ class AssistantPalette:
                 "Border": 2, "BorderColor": dsfr.TOKENS["border"],
             })
         self._models["response"] = response_model
+        response_click = _PaneClickHandler(
+            dialog.getControl("response"),
+            lambda offset: self._pick_from_pane("response", offset))
+        dialog.getControl("response").addMouseListener(response_click)
+        self._handlers.append(response_click)
 
         # Zone basse : UN seul rectangle, trois contenus superposés qu'on
         # bascule par setVisible(). Réempiler trois zones distinctes ferait
@@ -586,6 +666,14 @@ class AssistantPalette:
                 })
             self._models[name] = control_model
             control.setVisible(False)
+            # Conversation et Suggestions sont rejouables d'un clic : la ligne
+            # cliquée remonte dans la zone de saisie. Le journal d'actions et
+            # le raisonnement, eux, ne sont pas des demandes.
+            if name in ("suggestions",):
+                pane_handler = _PaneClickHandler(
+                    control, lambda offset, n=name: self._pick_from_pane(n, offset))
+                control.addMouseListener(pane_handler)
+                self._handlers.append(pane_handler)
 
         # Onglets : des FixedText cliquables (pas de UnoControlTabPageContainer,
         # capricieux et peu stylable). L'onglet actif porte la couleur accent.
@@ -616,7 +704,19 @@ class AssistantPalette:
             })
         self._models["hint"] = hint_model
 
-        # Peer d'abord : les métriques réelles (Retina) ne sont fiables qu'après.
+        # La palette est une fenêtre POSSÉDÉE par la fenêtre de document : sur
+        # macOS elle ne peut pas quitter l'écran de son propriétaire et le suit
+        # au pixel près. Mesuré le 2026-08-04 sur trois écrans.
+        #
+        # Passer `None` en parent NE LE CORRIGE PAS — essayé et mesuré le même
+        # jour : VCL rattache alors le dialogue à la fenêtre active de
+        # l'application, et le suivi reste identique (+1500/+261 dans les deux
+        # cas). On garde donc le parent explicite, qui a au moins le mérite
+        # d'être prévisible et de tenir la palette au-dessus du document.
+        #
+        # Une vraie fenêtre autonome demanderait `toolkit.createWindow` avec un
+        # WindowDescriptor de type TOP, au lieu d'un UnoControlDialog. Voir
+        # `bring_to_front` pour ce qui est faisable sans cette refonte.
         frame = self.uno_ctx.getServiceManager().createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.uno_ctx).getCurrentFrame()
         parent_window = frame.getContainerWindow() if frame else None
@@ -624,12 +724,20 @@ class AssistantPalette:
 
         self._layout()
 
+        # On s'ouvre toujours SUR la fenêtre de document — c'est là que regarde
+        # l'utilisateur. Autonome ne veut pas dire posée n'importe où : elle
+        # cesse seulement d'y être enchaînée ensuite.
         if parent_window is not None:
             try:
                 ps = parent_window.getPosSize()
-                dialog.setPosSize(ps.X + max(0, (ps.Width - self._width) // 2),
-                                  ps.Y + max(0, (ps.Height - self._height) // 3),
-                                  0, 0, 3)  # POS
+                x = ps.X + max(0, (ps.Width - self._width) // 2)
+                y = ps.Y + max(0, (ps.Height - self._height) // 3)
+                # Un parent qui rend des coordonnées relatives (0,0) placerait
+                # la palette dans le coin de l'écran principal, hors du champ de
+                # vision sur une configuration à plusieurs écrans. Dans ce cas
+                # on laisse le toolkit décider plutôt que de viser à l'aveugle.
+                if ps.Width > 0 and ps.Height > 0:
+                    dialog.setPosSize(x, y, 0, 0, 3)  # POS
             except Exception:
                 pass
 
@@ -1011,14 +1119,93 @@ class AssistantPalette:
         self.set_status("Terminé", tone="success")
         self.dispatcher.drain()
 
+    def bring_to_front(self):
+        """Remonte la fenêtre au premier plan, au-dessus du document.
+
+        `setFocus` seul ne suffit pas sur une fenêtre autonome : il donne le
+        focus clavier sans changer l'ordre d'empilement, et la palette reste
+        cachée derrière LibreOffice. `toFront()` (XTopWindow, porté par le peer)
+        est ce qui la fait remonter — et il faut être visible d'abord, sinon il
+        s'applique à une fenêtre masquée.
+        """
+        try:
+            self.dialog.setVisible(True)
+        except Exception:
+            return
+        try:
+            self.dialog.getPeer().toFront()
+        except Exception:
+            pass          # toolkit sans XTopWindow : on garde au moins le focus
+        try:
+            self.dialog.setFocus()
+        except Exception:
+            pass
+
     def refresh_selection_label(self):
-        """Recalcule le libellé de cible. Thread principal uniquement."""
+        """Recalcule le libellé de cible ET le titre. Thread principal uniquement."""
         if self.busy:
             return
         try:
             self._models["selection"].Label = self._describe_selection()
         except Exception:
             pass          # contrôle disposé : la palette se ferme, rien à signaler
+        self.refresh_title()
+
+    def refresh_title(self):
+        """Nomme dans le titre le document sur lequel la demande portera.
+
+        La palette agit sur le document ACTIF au moment de l'envoi, pas sur
+        celui qui était ouvert quand on l'a lancée. Avec plusieurs documents et
+        une fenêtre désormais autonome, rien ne disait plus lequel — le titre
+        le dit maintenant.
+        """
+        nom = self._current_document_name()
+        titre = f"MIrAI — Assistant · {nom}" if nom else "MIrAI — Assistant"
+        if titre == self._title_shown:
+            return                    # setTitle() fait clignoter la barre
+        self._title_shown = titre
+        try:
+            self.dialog.setTitle(titre)
+        except Exception:
+            pass
+
+    def _current_document_name(self):
+        """Nom court du document courant ; jamais d'exception, jamais None."""
+        try:
+            desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.uno_ctx)
+            model = desktop.getCurrentComponent()
+            if model is None:
+                return ""
+            titre = str(getattr(model, "Title", "") or "")
+            if titre:
+                return titre
+            url = str(getattr(model, "URL", "") or "")
+            return url.rsplit("/", 1)[-1] if url else ""
+        except Exception:
+            return ""
+
+    def current_app(self):
+        """Application du document ACTIF, pas celle de l'ouverture.
+
+        `self.app` est figé à la création : une palette ouverte sur Writer
+        gardait ce cap même passée sur un Calc, et l'analyse de document comme
+        les suggestions se calaient sur la mauvaise application. Les outils
+        envoyés au modèle, eux, suivaient déjà le document réel (`ctx.app`).
+        """
+        try:
+            desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.uno_ctx)
+            model = desktop.getCurrentComponent()
+            if model is None:
+                return self.app
+            if hasattr(model, "Text"):
+                return "writer"
+            if hasattr(model, "Sheets"):
+                return "calc"
+        except Exception:
+            pass
+        return self.app
 
     def _describe_selection(self):
         """Décrit la cible courante ; ne rend JAMAIS None ni ne lève."""
@@ -1082,9 +1269,9 @@ class AssistantPalette:
     def select_tab(self, tab_id):
         """Bascule la zone basse. L'onglet actif est mémorisé en configuration.
 
-        `reasoning` est un contenu sans onglet : on n'y accède que par le « ⓘ »,
-        et on ne le mémorise pas — rouvrir la palette sur un raisonnement
-        périmé n'aurait aucun sens.
+        `reasoning` fait exception : c'est bien un onglet, mais on ne le
+        mémorise pas — rouvrir la palette sur le raisonnement d'un run terminé
+        depuis longtemps n'apprendrait rien à personne.
         """
         if tab_id not in BOTTOM_PANES:
             return
@@ -1107,12 +1294,128 @@ class AssistantPalette:
         self._layout()
 
     def refresh_suggestions(self):
-        """Recalcule les propositions pour la cible courante."""
+        """Affiche l'analyse si elle est prête, sinon les règles statiques.
+
+        Les propositions statiques restent le socle : elles s'affichent
+        immédiatement, sans réseau. L'analyse du document les remplace quand
+        elle arrive — et si elle échoue, on garde le socle plutôt que d'exposer
+        un onglet vide.
+        """
+        if self._analysis_text:
+            self._set_text("suggestions", self._analysis_text)
+            return
         try:
-            self._set_text("suggestions",
-                           suggestions.render(self._current_suggestions()))
+            base = suggestions.render(self._current_suggestions())
         except Exception as exc:
             self.shell.log(f"[palette] suggestions indisponibles : {exc}")
+            base = ""
+        self._analysis_base = base
+        self._set_text("suggestions", base)
+        # L'attente n'est PAS annoncée dans l'onglet : elle s'affiche dans la
+        # ligne d'état, là où le run affiche déjà la sienne.
+        self.start_document_analysis()
+
+    # ── Analyse du document (asynchrone) ────────────────────────────────
+
+    def _document_text(self):
+        """Texte intégral du document Writer. Thread principal uniquement."""
+        desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+            "com.sun.star.frame.Desktop", self.uno_ctx)
+        model = desktop.getCurrentComponent()
+        if model is None or not hasattr(model, "Text"):
+            return ""
+        return model.Text.getString()
+
+    def start_document_analysis(self):
+        """Lance l'analyse en tâche de fond. Thread principal uniquement.
+
+        Le texte est lu ICI, avant de partir : la pompe du dispatcher ne tourne
+        que pendant un run, donc un `call` depuis le thread d'analyse expirait
+        au bout de 10 s (« le thread principal n'a pas répondu »). Même raison
+        pour `start_pump()` — il n'est fiable que depuis le thread principal,
+        et sans lui le résultat ne serait jamais affiché.
+
+        Rend True si l'analyse a bien démarré, pour que l'appelant sache s'il
+        doit annoncer « analyse en cours ».
+        """
+        if self._analysis_running or self._analysis_text or self.current_app() != "writer":
+            return False
+        try:
+            text = self._document_text()
+        except Exception as exc:
+            self.shell.log(f"[palette] lecture du document impossible : {exc}")
+            return False
+        messages = doc_analysis.build_messages(text)
+        if messages is None:
+            self._analysis_text = doc_analysis.TOO_SHORT
+            return False              # rien à analyser : pas d'attente à annoncer
+        self._analysis_running = True
+        self.dispatcher.start_pump()
+        # Même jauge que le run : l'attente s'affiche dans la ligne d'état, au
+        # format « ⠹ Analyse du document · 3 s ». Rien d'animé dans l'onglet —
+        # deux animations à deux endroits apprendraient deux habitudes.
+        progress = RunProgress(activity=doc_analysis.PHASE)
+        self._analysis_progress = progress
+        self._start_pulse(progress)
+        threading.Thread(target=self._analyse_in_worker, args=(messages, progress),
+                         daemon=True, name="mirai-doc-analysis").start()
+        return True
+
+    def _analyse_in_worker(self, messages, progress):
+        """Interroge le modèle et remplace l'onglet.
+
+        Toute sortie anormale laisse les suggestions statiques en place : une
+        analyse qui échoue ne doit jamais faire perdre ce qui marchait avant.
+        """
+        try:
+            step = LLMClient(self.shell,
+                             max_tokens=doc_analysis.MAX_TOKENS).step(
+                                 messages, progress=progress)
+            if step.error or not (step.text or "").strip():
+                self.shell.log("[palette] analyse du document indisponible : "
+                               f"{step.error or 'réponse vide'}")
+                return
+            items = doc_analysis.parse(
+                step.text, truncated=(step.finish_reason == "length"))
+            if not items:
+                self.shell.log("[palette] analyse du document : aucune "
+                               "proposition exploitable")
+                return
+            self.shell.log(f"[palette] analyse du document : {len(items)} proposition(s)")
+            self._analysis_text = doc_analysis.render(items)
+        except DispatcherClosed:
+            pass                      # palette fermée pendant l'analyse
+        except Exception as exc:
+            self.shell.log(f"[palette] analyse du document échouée : {exc}")
+        finally:
+            self._analysis_running = False
+            self._publish_analysis(progress)
+
+    def _publish_analysis(self, progress=None):
+        """Affiche le résultat — ou rend la main au socle statique en cas d'échec."""
+        final = self._analysis_text or self._analysis_base
+        # La jauge n'est arrêtée que si elle est encore la NÔTRE : un run
+        # démarré entre-temps a posé la sienne, et la couper afficherait un run
+        # figé alors qu'il travaille.
+        if progress is None or self._progress is progress:
+            self._stop_pulse()
+            self._analysis_progress = None
+            self.set_status("Prêt", tone="neutral")
+        try:
+            self.dispatcher.post(lambda: self._set_text("suggestions", final))
+            # La pompe a été armée pour cette analyse : on l'éteint, sauf si un
+            # run l'utilise encore — il la gère alors pour son propre compte.
+            self.dispatcher.post(self._stop_pump_if_idle)
+        except DispatcherClosed:
+            pass
+
+    def _stop_pump_if_idle(self):
+        if not self.busy:
+            self.dispatcher.stop_pump()
+
+    def invalidate_analysis(self):
+        """Le document a changé : l'analyse précédente ne le décrit plus."""
+        self._analysis_text = ""
 
     def _current_suggestions(self):
         """Décrit la situation au moteur de suggestions (aucun appel LLM)."""
@@ -1120,7 +1423,7 @@ class AssistantPalette:
             "com.sun.star.frame.Desktop", self.uno_ctx)
         model = desktop.getCurrentComponent()
         if model is None:
-            return suggestions.suggest(self.app)
+            return suggestions.suggest(self.current_app())
         if hasattr(model, "Text"):
             selected, paragraph = _writer_targets(model)
             return suggestions.suggest(
@@ -1128,7 +1431,7 @@ class AssistantPalette:
         if hasattr(model, "Sheets"):
             count, values = _calc_selection_sample(model)
             return suggestions.suggest("calc", cell_count=count, values=values)
-        return suggestions.suggest(self.app)
+        return suggestions.suggest(self.current_app())
 
     # ── Fil de conversation (main courante : le plus récent EN HAUT) ────
 
@@ -1157,12 +1460,40 @@ class AssistantPalette:
         joined = "\n".join(self._journal_lines)
         self.dispatcher.post(lambda: self._set_text("journal", joined))
 
-    def toggle_reasoning(self):
-        """Ouvre ou referme le panneau de réflexion.
+    def _pick_from_pane(self, name, offset):
+        """Reporte la ligne cliquée dans la zone de saisie.
 
-        Un clic l'affiche et l'y MAINTIENT — on peut lire et faire défiler ;
-        un second clic revient à l'onglet d'où l'on vient. C'est la différence
-        avec une infobulle de survol, qui s'évanouit au moindre mouvement.
+        On ne lance RIEN : l'utilisateur relit, ajuste, puis envoie. Un clic
+        qui déclencherait une action sur le document serait irrattrapable dans
+        une zone où l'on clique aussi pour lire.
+        """
+        if self.busy:
+            return
+        try:
+            texte = self._models[name].Text or ""
+        except Exception:
+            return
+        propos = clickable.payload_at(texte, offset)
+        # Une ligne par clic. Sans elle, un contrôle en lecture seule qui ne
+        # rendrait pas de position de curseur donnerait un clic sans effet ET
+        # sans trace — la panne muette qu'on a passé la journée à traquer.
+        self.shell.log(f"[palette] clic {name} offset={offset} "
+                       f"ligne={clickable.line_at(texte, offset)} "
+                       f"repris={len(propos)}c")
+        if not propos:
+            return                    # ligne vide, titre de section, statut
+        try:
+            self._models["prompt"].Text = propos
+            self.dialog.getControl("prompt").setFocus()
+        except Exception:
+            return
+
+    def toggle_reasoning(self):
+        """Raccourci « ⓘ » vers l'onglet Raisonnement, et retour.
+
+        L'onglet reste accessible normalement dans la barre ; le « ⓘ » n'est
+        qu'un chemin court depuis la ligne de statut, qui ramène d'un second
+        clic à l'onglet d'où l'on vient.
         """
         if self.active_tab == REASONING_PANE:
             self.select_tab(self._tab_before_reasoning or "response")
@@ -1172,8 +1503,13 @@ class AssistantPalette:
         self.select_tab(REASONING_PANE)
 
     def set_reasoning(self, text):
-        """Alimente le panneau et fait apparaître le « ⓘ » s'il y a à voir."""
-        self._set_text(REASONING_PANE, text)
+        """Alimente l'onglet et fait apparaître le « ⓘ » s'il y a à voir.
+
+        Onglet vide = onglet suspect : sans texte de repli, l'utilisateur qui
+        clique sur « Raisonnement » avant tout run voit un rectangle blanc et
+        croit à une panne.
+        """
+        self._set_text(REASONING_PANE, text or REASONING_EMPTY)
         label = "ⓘ" if text else ""
         model = self._models.get("reasoning_toggle")
         if model is not None:
@@ -1810,6 +2146,10 @@ class AssistantPalette:
 
     def _finish_run(self):
         """Statut de fin : arrêté, ou terminé avec le champ de prompt vidé."""
+        # Un run touche presque toujours au document : l'analyse précédente
+        # décrit alors un état révolu. La suivante sera relancée à la prochaine
+        # visite de l'onglet, plutôt que d'afficher un constat périmé.
+        self.invalidate_analysis()
         if self._cancelled():
             self.set_status("Arrêté.", tone="neutral")
             return
@@ -1842,10 +2182,16 @@ class AssistantPalette:
                     pass
         self.dispatcher.post(_apply)
 
-    def _start_pulse(self):
-        """Anime la jauge tant que le run dure — la seule preuve visible que
-        quelque chose se passe sur une opération longue."""
+    def _start_pulse(self, progress=None):
+        """Anime la ligne d'état tant qu'une opération longue dure.
+
+        Sert le run ET l'analyse du document : même emplacement, même format
+        (« ⠹ Analyse du document · 3 s »). Une seule mécanique à maintenir, et
+        surtout un seul endroit où l'utilisateur apprend à regarder.
+        """
         self._stop_pulse()
+        if progress is not None:
+            self._progress = progress
         stop = threading.Event()
 
         def _tick():
@@ -1896,12 +2242,17 @@ class AssistantPalette:
 
 
 def open_or_focus(uno_ctx, shell, app, callbacks):
-    """Ouvre la palette (ou la ramène au premier plan si déjà ouverte)."""
+    """Ouvre la palette (ou la ramène au premier plan si déjà ouverte).
+
+    Ce chemin sert le menu « 🤖 MIrAI », le bouton de la barre d'outils et le
+    raccourci : tous trois passent par l'action `OpenAssistant`. C'est donc ici,
+    et nulle part ailleurs, que se règle « ramène-moi la fenêtre » — devenu
+    indispensable depuis qu'elle est autonome et peut passer derrière.
+    """
     existing = _open_palette[0]
     if existing is not None:
         try:
-            existing.dialog.setVisible(True)
-            existing.dialog.setFocus()
+            existing.bring_to_front()
             # Rouvrir une palette DÉJÀ ouverte n'est pas une ouverture : le
             # confondre avec elle gonflerait AssistantOpen d'un geste qui dit
             # surtout que la fenêtre s'était perdue derrière le document.

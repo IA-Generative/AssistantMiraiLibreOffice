@@ -216,3 +216,50 @@ def test_encode_tool_exchange_json():
     assert messages[0] == {"role": "assistant", "content": raw}
     assert "RÉSULTATS DES OUTILS" in messages[1]["content"]
     assert "cassé" in messages[1]["content"]
+
+
+# ── Bilan de flux ────────────────────────────────────────────────────────────
+
+def _summary(shell):
+    lines = [line for line in shell.logs if line.startswith("[llm] step")]
+    assert len(lines) == 1, f"attendu 1 bilan, vu {len(lines)}"
+    return lines[0]
+
+
+def test_step_logs_stream_summary():
+    shell = FakeShell(responses=[FakeSSEResponse(text_chunks("Bon", "jour"))])
+    LLMClient(shell).step([{"role": "user", "content": "salut"}])
+    summary = _summary(shell)
+    assert "mode=text" in summary
+    assert "texte=7c" in summary
+    assert "tool_calls=0" in summary
+    assert "ok=True" in summary
+
+
+def test_empty_stream_is_visible_in_log():
+    """Un flux sans erreur qui ne livre RIEN doit rester lisible dans le log.
+
+    C'est le trou de l'incident du 2026-08-04 : sans ce bilan, « aucun chunk
+    reçu » et « chunks reçus mais non exploités » produisent exactement la même
+    trace, c'est-à-dire aucune.
+    """
+    shell = FakeShell(config={"llm_tool_mode": "native"},
+                      responses=[FakeSSEResponse([])])
+    step = LLMClient(shell).step([{"role": "user", "content": "x"}], tools=TOOLS)
+    assert step.text == "" and step.tool_calls == [] and not step.error
+    summary = _summary(shell)
+    assert "chunks=0" in summary
+    assert "texte=0c" in summary
+    assert "tool_calls=0" in summary
+
+
+def test_summary_reports_assembled_tool_calls():
+    shell = FakeShell(
+        config={"llm_tool_mode": "native"},
+        responses=[FakeSSEResponse(
+            native_tool_call_chunks("calc_read_range", '{"range": "A1:B2"}'))])
+    LLMClient(shell).step([{"role": "user", "content": "lis"}], tools=TOOLS)
+    summary = _summary(shell)
+    assert "mode=native" in summary
+    assert "tool_calls=1" in summary
+    assert "finish=tool_calls" in summary

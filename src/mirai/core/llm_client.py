@@ -261,6 +261,7 @@ class LLMClient:
         fragments = {}                # index → {id, name, arguments}
         finish = [""]
         reasoning_chars = [0]
+        chunks = [0]                  # chunks SSE effectivement traités
 
         def _handle_text(content):
             text_parts.append(content)
@@ -285,6 +286,7 @@ class LLMClient:
                     on_text_delta("".join(text_parts))
 
         def _on_event(event):
+            chunks[0] += 1
             chunk = event.chunk
             # Le relais peut envoyer un bloc `usage` en fin de flux — on le LIT
             # s'il vient, sans jamais le réclamer : ajouter `stream_options` au
@@ -323,6 +325,22 @@ class LLMClient:
 
         outcome = sse_pump.run_stream(self.shell, _build_request, _on_event,
                                       cancel_event=cancel_event)
+
+        # Bilan du flux — sans lui, un step qui ne rend RIEN est indiscernable
+        # d'un step qui rend une réponse vide, et l'on ne sait pas si les chunks
+        # ne sont pas arrivés ou s'ils n'ont pas été exploités. Une seule ligne,
+        # émise à chaque step : c'est ce qui manquait pour instruire l'incident
+        # du 2026-08-04 (run à 0 chunk exploité, sans erreur remontée).
+        try:
+            self.shell.log(
+                f"[llm] step mode={mode} chunks={chunks[0]} "
+                f"finish={finish[0] or '-'} texte={len(''.join(text_parts))}c "
+                f"tool_calls={len(fragments)} "
+                f"args={sum(len(f['arguments']) for f in fragments.values())}c "
+                f"raisonnement={reasoning_chars[0]}c ok={outcome.ok}")
+        except Exception:
+            pass
+
         if not outcome.ok:
             if isinstance(outcome.error, sse_pump.StreamHttpError):
                 return StepResult(error=f"http_{outcome.error.status}",
