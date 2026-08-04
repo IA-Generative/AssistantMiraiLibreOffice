@@ -404,14 +404,28 @@ def test_set_text_tolerates_a_missing_control(palette_module):
 
 # ── Panneau de réflexion (le « ⓘ ») ─────────────────────────────────────
 
-def test_reasoning_pane_is_created_without_a_tab(palette_module):
-    """Contenu de la zone basse, mais sans onglet : on y accède par le ⓘ."""
+def test_reasoning_has_its_own_tab(palette_module):
+    """Le raisonnement porte son propre onglet, en plus du raccourci ⓘ.
+
+    Auparavant il partageait le rectangle sans onglet : cliquer sur « ⓘ »
+    remplaçait le contenu de l'onglet courant — la Conversation le plus
+    souvent — sans rien indiquer du déplacement ni du chemin de retour.
+    """
     _build(palette_module)
     names = palette_module._fake_dialog.model.names
 
     assert palette_module.REASONING_PANE in names
-    assert "reasoning_toggle" in names
-    assert f"tab_{palette_module.REASONING_PANE}" not in names
+    assert "reasoning_toggle" in names          # le raccourci reste
+    assert f"tab_{palette_module.REASONING_PANE}" in names
+    assert ("reasoning", "Raisonnement") in palette_module.TABS
+
+
+def test_reasoning_tab_is_never_blank(palette_module):
+    """Cliquer sur l'onglet avant tout run ne doit pas donner un rectangle vide,
+    qui se lit comme une panne."""
+    palette = _build(palette_module)
+    palette.set_reasoning("")
+    assert palette._models[palette_module.REASONING_PANE].Text.strip()
 
 
 def test_toggle_opens_then_closes_and_restores_the_tab(palette_module):
@@ -707,3 +721,117 @@ def test_heal_does_nothing_on_a_healthy_palette(palette_module):
     palette = _build(palette_module)
     palette.heal_if_stuck()
     assert _step_spans(palette.shell, "ui.heal_stuck") == []
+
+
+# ── Analyse asynchrone du document (onglet Suggestions) ─────────────────────
+#
+# Les propositions étaient statiques : des règles sur la longueur de la
+# sélection, jamais sur le contenu. L'analyse les remplace quand elle arrive —
+# sans jamais faire perdre le socle si elle échoue.
+
+def _suggestions_text(palette, palette_module):
+    return palette._models["suggestions"].Text
+
+
+def test_static_suggestions_show_immediately(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "start_document_analysis", lambda: None)
+    monkeypatch.setattr(palette, "_current_suggestions", lambda: [])
+    palette.refresh_suggestions()
+    assert _suggestions_text(palette, palette_module)
+
+
+def test_analysis_replaces_the_tab_content(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "start_document_analysis", lambda: None)
+    palette._analysis_text = "Propositions :\n· Ajouter des intertitres"
+    palette.refresh_suggestions()
+    assert "Ajouter des intertitres" in _suggestions_text(palette, palette_module)
+
+
+def test_analysis_is_not_started_twice(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    lancements = []
+    monkeypatch.setattr(palette_module.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda _s: lancements.append(1)})())
+    palette.start_document_analysis()
+    palette.start_document_analysis()      # la première tourne encore
+    assert len(lancements) == 1
+
+
+def test_no_analysis_outside_writer(palette_module, monkeypatch):
+    palette = _build(palette_module, app="calc")
+    lancements = []
+    monkeypatch.setattr(palette_module.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda _s: lancements.append(1)})())
+    palette.start_document_analysis()
+    assert lancements == []
+
+
+def test_failed_analysis_keeps_the_static_suggestions(palette_module, monkeypatch):
+    """Une analyse qui échoue ne doit pas vider l'onglet."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+
+    class _Boom:
+        def __init__(self, _shell): pass
+        def step(self, _messages): raise RuntimeError("relais injoignable")
+
+    monkeypatch.setattr(palette_module, "LLMClient", _Boom)
+    palette._analyse_in_worker()
+    assert palette._analysis_text == ""
+    assert palette._analysis_running is False
+
+
+def test_empty_model_answer_keeps_the_static_suggestions(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+
+    class _Vide:
+        def __init__(self, _shell): pass
+        def step(self, _messages):
+            return type("S", (), {"error": "", "text": ""})()
+
+    monkeypatch.setattr(palette_module, "LLMClient", _Vide)
+    palette._analyse_in_worker()
+    assert palette._analysis_text == ""
+
+
+def test_successful_analysis_lands_in_the_tab(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+
+    class _Ok:
+        def __init__(self, _shell): pass
+        def step(self, _messages):
+            return type("S", (), {
+                "error": "",
+                "text": "- Ajouter des intertitres\n- Scinder le paragraphe 4"})()
+
+    monkeypatch.setattr(palette_module, "LLMClient", _Ok)
+    palette._analyse_in_worker()
+    assert "Ajouter des intertitres" in palette._analysis_text
+    assert "Ajouter des intertitres" in _suggestions_text(palette, palette_module)
+
+
+def test_short_document_is_reported_not_analysed(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Trois mots.")
+    appels = []
+
+    class _Espion:
+        def __init__(self, _shell): pass
+        def step(self, _messages): appels.append(1)
+
+    monkeypatch.setattr(palette_module, "LLMClient", _Espion)
+    palette._analyse_in_worker()
+    assert appels == []                       # aucun appel réseau inutile
+    assert palette._analysis_text == palette_module.doc_analysis.TOO_SHORT
+
+
+def test_a_run_invalidates_a_previous_analysis(palette_module):
+    """Le document a changé : le constat précédent ne le décrit plus."""
+    palette = _build(palette_module)
+    palette._analysis_text = "constat périmé"
+    palette._finish_run()
+    assert palette._analysis_text == ""

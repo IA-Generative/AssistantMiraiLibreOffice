@@ -47,6 +47,7 @@ except Exception:
 
 from ..core import (
     capabilities,
+    doc_analysis,
     doc_rewrite,
     prompts,
     selection_info,
@@ -98,16 +99,21 @@ PULSE_INTERVAL_S = 0.2    # cadence d'animation de la jauge d'activité
 # « Conversation » et non « Historique » : cet onglet porte le FIL en cours,
 # restauré d'une session à l'autre. « Historique » laissait attendre une liste
 # de conversations passées, qui n'existe pas (une seule conversation en v1).
+# « Raisonnement » a désormais SON onglet. Il partageait le rectangle des
+# autres sans en porter un : le clic sur « ⓘ » remplaçait donc le contenu de
+# l'onglet courant — le plus souvent la Conversation — sans que rien n'indique
+# où l'on venait d'atterrir ni comment revenir. Un onglet nommé rend le
+# déplacement visible, réversible d'un clic, et lisible sans mode d'emploi.
 TABS = (("response", "Conversation"),
         ("suggestions", "Suggestions"),
+        ("reasoning", "Raisonnement"),
         ("journal", "Actions"))
 
-# La réflexion partage le même rectangle que les onglets, mais n'en a pas :
-# on y accède par le « ⓘ » de la ligne de statut, et on en sort de même. Une
-# infobulle de survol ne convenait pas — elle disparaît dès qu'on bouge, donc
-# impossible de LIRE un raisonnement, encore moins de le faire défiler.
 REASONING_PANE = "reasoning"
-BOTTOM_PANES = tuple(tab_id for tab_id, _ in TABS) + (REASONING_PANE,)
+BOTTOM_PANES = tuple(tab_id for tab_id, _ in TABS)
+
+REASONING_EMPTY = ("Le raisonnement du modèle s'affichera ici pendant "
+                   "la prochaine demande.")
 
 # Le retour d'un run doit se VOIR : une ligne de statut colorée selon l'issue,
 # pas un texte discret dans une zone grise. C'est la leçon du « il ne se passe
@@ -464,6 +470,8 @@ class AssistantPalette:
         self._history_cache = None     # historique relu seulement quand il change
         self._journal_lines = []       # onglet « Actions » du run courant
         self._tab_before_reasoning = None   # onglet à restaurer en refermant
+        self._analysis_text = ""       # analyse du document, quand elle arrive
+        self._analysis_running = False  # une seule analyse à la fois
         self.append_mode = self._restore_append_mode(shell)
         self._progress = None          # jauge du run en cours
         self._pulse = None             # thread d'animation de la jauge
@@ -1117,9 +1125,9 @@ class AssistantPalette:
     def select_tab(self, tab_id):
         """Bascule la zone basse. L'onglet actif est mémorisé en configuration.
 
-        `reasoning` est un contenu sans onglet : on n'y accède que par le « ⓘ »,
-        et on ne le mémorise pas — rouvrir la palette sur un raisonnement
-        périmé n'aurait aucun sens.
+        `reasoning` fait exception : c'est bien un onglet, mais on ne le
+        mémorise pas — rouvrir la palette sur le raisonnement d'un run terminé
+        depuis longtemps n'apprendrait rien à personne.
         """
         if tab_id not in BOTTOM_PANES:
             return
@@ -1142,12 +1150,91 @@ class AssistantPalette:
         self._layout()
 
     def refresh_suggestions(self):
-        """Recalcule les propositions pour la cible courante."""
+        """Affiche l'analyse si elle est prête, sinon les règles statiques.
+
+        Les propositions statiques restent le socle : elles s'affichent
+        immédiatement, sans réseau. L'analyse du document les remplace quand
+        elle arrive — et si elle échoue, on garde le socle plutôt que d'exposer
+        un onglet vide.
+        """
+        if self._analysis_text:
+            self._set_text("suggestions", self._analysis_text)
+            return
         try:
-            self._set_text("suggestions",
-                           suggestions.render(self._current_suggestions()))
+            base = suggestions.render(self._current_suggestions())
         except Exception as exc:
             self.shell.log(f"[palette] suggestions indisponibles : {exc}")
+            base = ""
+        if self._analysis_running:
+            base = f"{base}\n\n{doc_analysis.ANALYZING}".strip()
+        self._set_text("suggestions", base)
+        self.start_document_analysis()
+
+    # ── Analyse du document (asynchrone) ────────────────────────────────
+
+    def _document_text(self):
+        """Texte intégral du document Writer. Thread principal uniquement."""
+        desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+            "com.sun.star.frame.Desktop", self.uno_ctx)
+        model = desktop.getCurrentComponent()
+        if model is None or not hasattr(model, "Text"):
+            return ""
+        return model.Text.getString()
+
+    def start_document_analysis(self):
+        """Lance l'analyse en tâche de fond, si elle a un sens ici.
+
+        Jamais sur le thread principal : l'appel au relais dure des secondes,
+        et LibreOffice paraîtrait figé pendant tout ce temps.
+        """
+        if self._analysis_running or self._analysis_text or self.app != "writer":
+            return
+        self._analysis_running = True
+        threading.Thread(target=self._analyse_in_worker, daemon=True,
+                         name="mirai-doc-analysis").start()
+
+    def _analyse_in_worker(self):
+        """Lit le document, interroge le modèle, remplace l'onglet.
+
+        Toute sortie anormale laisse les suggestions statiques en place : une
+        analyse qui échoue ne doit jamais faire perdre ce qui marchait avant.
+        """
+        try:
+            text = self.dispatcher.call(self._document_text, timeout=10) or ""
+            messages = doc_analysis.build_messages(text)
+            if messages is None:
+                self._show_analysis(doc_analysis.TOO_SHORT)
+                return
+            step = LLMClient(self.shell).step(messages)
+            if step.error or not (step.text or "").strip():
+                self.shell.log("[palette] analyse du document indisponible : "
+                               f"{step.error or 'réponse vide'}")
+                return
+            items = doc_analysis.parse(step.text)
+            if not items:
+                self.shell.log("[palette] analyse du document : aucune "
+                               "proposition exploitable")
+                return
+            self.shell.log(f"[palette] analyse du document : {len(items)} proposition(s)")
+            self._show_analysis(doc_analysis.render(items))
+        except DispatcherClosed:
+            pass                      # palette fermée pendant l'analyse
+        except Exception as exc:
+            self.shell.log(f"[palette] analyse du document échouée : {exc}")
+        finally:
+            self._analysis_running = False
+
+    def _show_analysis(self, text):
+        """Publie le résultat — depuis le thread de travail, donc par le dispatcher."""
+        self._analysis_text = text
+        try:
+            self.dispatcher.post(lambda: self._set_text("suggestions", text))
+        except DispatcherClosed:
+            pass
+
+    def invalidate_analysis(self):
+        """Le document a changé : l'analyse précédente ne le décrit plus."""
+        self._analysis_text = ""
 
     def _current_suggestions(self):
         """Décrit la situation au moteur de suggestions (aucun appel LLM)."""
@@ -1193,11 +1280,11 @@ class AssistantPalette:
         self.dispatcher.post(lambda: self._set_text("journal", joined))
 
     def toggle_reasoning(self):
-        """Ouvre ou referme le panneau de réflexion.
+        """Raccourci « ⓘ » vers l'onglet Raisonnement, et retour.
 
-        Un clic l'affiche et l'y MAINTIENT — on peut lire et faire défiler ;
-        un second clic revient à l'onglet d'où l'on vient. C'est la différence
-        avec une infobulle de survol, qui s'évanouit au moindre mouvement.
+        L'onglet reste accessible normalement dans la barre ; le « ⓘ » n'est
+        qu'un chemin court depuis la ligne de statut, qui ramène d'un second
+        clic à l'onglet d'où l'on vient.
         """
         if self.active_tab == REASONING_PANE:
             self.select_tab(self._tab_before_reasoning or "response")
@@ -1207,8 +1294,13 @@ class AssistantPalette:
         self.select_tab(REASONING_PANE)
 
     def set_reasoning(self, text):
-        """Alimente le panneau et fait apparaître le « ⓘ » s'il y a à voir."""
-        self._set_text(REASONING_PANE, text)
+        """Alimente l'onglet et fait apparaître le « ⓘ » s'il y a à voir.
+
+        Onglet vide = onglet suspect : sans texte de repli, l'utilisateur qui
+        clique sur « Raisonnement » avant tout run voit un rectangle blanc et
+        croit à une panne.
+        """
+        self._set_text(REASONING_PANE, text or REASONING_EMPTY)
         label = "ⓘ" if text else ""
         model = self._models.get("reasoning_toggle")
         if model is not None:
@@ -1845,6 +1937,10 @@ class AssistantPalette:
 
     def _finish_run(self):
         """Statut de fin : arrêté, ou terminé avec le champ de prompt vidé."""
+        # Un run touche presque toujours au document : l'analyse précédente
+        # décrit alors un état révolu. La suivante sera relancée à la prochaine
+        # visite de l'onglet, plutôt que d'afficher un constat périmé.
+        self.invalidate_analysis()
         if self._cancelled():
             self.set_status("Arrêté.", tone="neutral")
             return
