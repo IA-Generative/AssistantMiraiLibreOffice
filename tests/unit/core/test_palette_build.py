@@ -868,3 +868,71 @@ def test_refresh_announces_the_wait(palette_module, monkeypatch):
     monkeypatch.setattr(palette, "start_document_analysis", lambda: True)
     palette.refresh_suggestions()
     assert palette_module.doc_analysis.ANALYZING in palette._models["suggestions"].Text
+
+
+# ── Lignes cliquables (Conversation et Suggestions) ─────────────────────────
+
+def _clic(palette, name, offset):
+    palette._pick_from_pane(name, offset)
+    return palette._models["prompt"].Text
+
+
+def test_clicking_a_suggestion_fills_the_prompt(palette_module):
+    palette = _build(palette_module)
+    palette._models["suggestions"].Text = ("1. ▸ Résumer la sélection\n"
+                                           "2. · Reformuler en langage clair")
+    assert _clic(palette, "suggestions", 26) == "Reformuler en langage clair"
+
+
+def test_clicking_a_conversation_turn_fills_the_prompt(palette_module):
+    palette = _build(palette_module)
+    palette._models["response"].Text = "Vous : résume ce document\nMIrAI : c'est fait."
+    assert _clic(palette, "response", 0) == "résume ce document"
+
+
+def test_clicking_a_section_title_leaves_the_prompt_alone(palette_module):
+    """Un clic pour LIRE ne doit pas écraser ce que l'utilisateur a tapé."""
+    palette = _build(palette_module)
+    palette._models["prompt"].Text = "ma demande en cours"
+    palette._models["suggestions"].Text = "Propositions d'amélioration :\n· Ajouter des titres"
+    assert _clic(palette, "suggestions", 0) == "ma demande en cours"
+
+
+def test_click_is_ignored_during_a_run(palette_module):
+    """Pendant un run la saisie est grisée : la modifier sèmerait la confusion."""
+    palette = _build(palette_module)
+    palette._models["prompt"].Text = "en cours"
+    palette._models["suggestions"].Text = "· Ajouter des intertitres"
+    palette.busy = True
+    assert _clic(palette, "suggestions", 0) == "en cours"
+
+
+def test_click_never_starts_a_run(palette_module, monkeypatch):
+    """Le clic REMPLIT la saisie, il ne lance rien : dans une zone où l'on
+    clique aussi pour lire, une action serait irrattrapable."""
+    palette = _build(palette_module)
+    lances = []
+    monkeypatch.setattr(palette, "_on_send", lambda *_a: lances.append(1))
+    palette._models["suggestions"].Text = "· Ajouter des intertitres"
+    _clic(palette, "suggestions", 0)
+    assert lances == []
+
+
+def test_clickable_panes_have_a_mouse_listener(palette_module):
+    """Sans écouteur posé, toute la logique de clic serait morte."""
+    _build(palette_module)
+    dialog = palette_module._fake_dialog
+    for name in ("response", "suggestions"):
+        listeners = dialog.getControl(name).listeners
+        assert any(isinstance(handler, palette_module._PaneClickHandler)
+                   for handler in listeners), f"aucun écouteur sur « {name} »"
+
+
+def test_journal_and_reasoning_are_not_clickable(palette_module):
+    """Un journal d'actions ou un raisonnement ne sont pas des demandes."""
+    _build(palette_module)
+    dialog = palette_module._fake_dialog
+    for name in ("journal", palette_module.REASONING_PANE):
+        listeners = dialog.getControl(name).listeners
+        assert not any(isinstance(handler, palette_module._PaneClickHandler)
+                       for handler in listeners), f"« {name} » ne doit pas être cliquable"

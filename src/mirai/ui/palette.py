@@ -47,6 +47,7 @@ except Exception:
 
 from ..core import (
     capabilities,
+    clickable,
     doc_analysis,
     doc_rewrite,
     prompts,
@@ -383,6 +384,34 @@ class _KeyHandler(unohelper.Base, XKeyListener):
         pass
 
 
+class _PaneClickHandler(unohelper.Base, dsfr.XMouseListener):
+    """Clic dans une zone de texte : reporte la ligne cliquée dans la saisie.
+
+    On lit la position au RELÂCHEMENT et non à l'appui : c'est le clic qui
+    déplace le curseur, donc à `mousePressed` la position est encore l'ancienne
+    et on rapporterait la ligne précédemment cliquée.
+    """
+
+    def __init__(self, control, on_pick):
+        self._control = control
+        self._on_pick = on_pick
+
+    def mouseReleased(self, _event):
+        try:
+            self._on_pick(self._control.getSelection().Min)
+        except Exception:
+            pass
+
+    def mousePressed(self, _event):
+        pass
+
+    def mouseEntered(self, _event):
+        pass
+
+    def mouseExited(self, _event):
+        pass
+
+
 class _JournalObserver(RunObserver):
     """Alimente le journal d'actions de la palette (optionnel, repliable)."""
 
@@ -612,6 +641,11 @@ class AssistantPalette:
                 "Border": 2, "BorderColor": dsfr.TOKENS["border"],
             })
         self._models["response"] = response_model
+        response_click = _PaneClickHandler(
+            dialog.getControl("response"),
+            lambda offset: self._pick_from_pane("response", offset))
+        dialog.getControl("response").addMouseListener(response_click)
+        self._handlers.append(response_click)
 
         # Zone basse : UN seul rectangle, trois contenus superposés qu'on
         # bascule par setVisible(). Réempiler trois zones distinctes ferait
@@ -630,6 +664,14 @@ class AssistantPalette:
                 })
             self._models[name] = control_model
             control.setVisible(False)
+            # Conversation et Suggestions sont rejouables d'un clic : la ligne
+            # cliquée remonte dans la zone de saisie. Le journal d'actions et
+            # le raisonnement, eux, ne sont pas des demandes.
+            if name in ("suggestions",):
+                pane_handler = _PaneClickHandler(
+                    control, lambda offset, n=name: self._pick_from_pane(n, offset))
+                control.addMouseListener(pane_handler)
+                self._handlers.append(pane_handler)
 
         # Onglets : des FixedText cliquables (pas de UnoControlTabPageContainer,
         # capricieux et peu stylable). L'onglet actif porte la couleur accent.
@@ -1322,6 +1364,34 @@ class AssistantPalette:
             telemetry_steps.emit(self.shell, step, attributes)
         joined = "\n".join(self._journal_lines)
         self.dispatcher.post(lambda: self._set_text("journal", joined))
+
+    def _pick_from_pane(self, name, offset):
+        """Reporte la ligne cliquée dans la zone de saisie.
+
+        On ne lance RIEN : l'utilisateur relit, ajuste, puis envoie. Un clic
+        qui déclencherait une action sur le document serait irrattrapable dans
+        une zone où l'on clique aussi pour lire.
+        """
+        if self.busy:
+            return
+        try:
+            texte = self._models[name].Text or ""
+        except Exception:
+            return
+        propos = clickable.payload_at(texte, offset)
+        # Une ligne par clic. Sans elle, un contrôle en lecture seule qui ne
+        # rendrait pas de position de curseur donnerait un clic sans effet ET
+        # sans trace — la panne muette qu'on a passé la journée à traquer.
+        self.shell.log(f"[palette] clic {name} offset={offset} "
+                       f"ligne={clickable.line_at(texte, offset)} "
+                       f"repris={len(propos)}c")
+        if not propos:
+            return                    # ligne vide, titre de section, statut
+        try:
+            self._models["prompt"].Text = propos
+            self.dialog.getControl("prompt").setFocus()
+        except Exception:
+            return
 
     def toggle_reasoning(self):
         """Raccourci « ⓘ » vers l'onglet Raisonnement, et retour.
