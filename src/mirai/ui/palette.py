@@ -503,6 +503,7 @@ class AssistantPalette:
         self._analysis_running = False  # une seule analyse à la fois
         self._analysis_base = ""       # socle statique, repli si l'analyse échoue
         self._analysis_progress = None  # jauge de l'analyse (partagée avec le run)
+        self._title_shown = ""         # dernier titre posé (évite le clignotement)
         self.append_mode = self._restore_append_mode(shell)
         self._progress = None          # jauge du run en cours
         self._pulse = None             # thread d'animation de la jauge
@@ -703,7 +704,19 @@ class AssistantPalette:
             })
         self._models["hint"] = hint_model
 
-        # Peer d'abord : les métriques réelles (Retina) ne sont fiables qu'après.
+        # La palette est une fenêtre POSSÉDÉE par la fenêtre de document : sur
+        # macOS elle ne peut pas quitter l'écran de son propriétaire et le suit
+        # au pixel près. Mesuré le 2026-08-04 sur trois écrans.
+        #
+        # Passer `None` en parent NE LE CORRIGE PAS — essayé et mesuré le même
+        # jour : VCL rattache alors le dialogue à la fenêtre active de
+        # l'application, et le suivi reste identique (+1500/+261 dans les deux
+        # cas). On garde donc le parent explicite, qui a au moins le mérite
+        # d'être prévisible et de tenir la palette au-dessus du document.
+        #
+        # Une vraie fenêtre autonome demanderait `toolkit.createWindow` avec un
+        # WindowDescriptor de type TOP, au lieu d'un UnoControlDialog. Voir
+        # `bring_to_front` pour ce qui est faisable sans cette refonte.
         frame = self.uno_ctx.getServiceManager().createInstanceWithContext(
             "com.sun.star.frame.Desktop", self.uno_ctx).getCurrentFrame()
         parent_window = frame.getContainerWindow() if frame else None
@@ -711,12 +724,20 @@ class AssistantPalette:
 
         self._layout()
 
+        # On s'ouvre toujours SUR la fenêtre de document — c'est là que regarde
+        # l'utilisateur. Autonome ne veut pas dire posée n'importe où : elle
+        # cesse seulement d'y être enchaînée ensuite.
         if parent_window is not None:
             try:
                 ps = parent_window.getPosSize()
-                dialog.setPosSize(ps.X + max(0, (ps.Width - self._width) // 2),
-                                  ps.Y + max(0, (ps.Height - self._height) // 3),
-                                  0, 0, 3)  # POS
+                x = ps.X + max(0, (ps.Width - self._width) // 2)
+                y = ps.Y + max(0, (ps.Height - self._height) // 3)
+                # Un parent qui rend des coordonnées relatives (0,0) placerait
+                # la palette dans le coin de l'écran principal, hors du champ de
+                # vision sur une configuration à plusieurs écrans. Dans ce cas
+                # on laisse le toolkit décider plutôt que de viser à l'aveugle.
+                if ps.Width > 0 and ps.Height > 0:
+                    dialog.setPosSize(x, y, 0, 0, 3)  # POS
             except Exception:
                 pass
 
@@ -1098,14 +1119,93 @@ class AssistantPalette:
         self.set_status("Terminé", tone="success")
         self.dispatcher.drain()
 
+    def bring_to_front(self):
+        """Remonte la fenêtre au premier plan, au-dessus du document.
+
+        `setFocus` seul ne suffit pas sur une fenêtre autonome : il donne le
+        focus clavier sans changer l'ordre d'empilement, et la palette reste
+        cachée derrière LibreOffice. `toFront()` (XTopWindow, porté par le peer)
+        est ce qui la fait remonter — et il faut être visible d'abord, sinon il
+        s'applique à une fenêtre masquée.
+        """
+        try:
+            self.dialog.setVisible(True)
+        except Exception:
+            return
+        try:
+            self.dialog.getPeer().toFront()
+        except Exception:
+            pass          # toolkit sans XTopWindow : on garde au moins le focus
+        try:
+            self.dialog.setFocus()
+        except Exception:
+            pass
+
     def refresh_selection_label(self):
-        """Recalcule le libellé de cible. Thread principal uniquement."""
+        """Recalcule le libellé de cible ET le titre. Thread principal uniquement."""
         if self.busy:
             return
         try:
             self._models["selection"].Label = self._describe_selection()
         except Exception:
             pass          # contrôle disposé : la palette se ferme, rien à signaler
+        self.refresh_title()
+
+    def refresh_title(self):
+        """Nomme dans le titre le document sur lequel la demande portera.
+
+        La palette agit sur le document ACTIF au moment de l'envoi, pas sur
+        celui qui était ouvert quand on l'a lancée. Avec plusieurs documents et
+        une fenêtre désormais autonome, rien ne disait plus lequel — le titre
+        le dit maintenant.
+        """
+        nom = self._current_document_name()
+        titre = f"MIrAI — Assistant · {nom}" if nom else "MIrAI — Assistant"
+        if titre == self._title_shown:
+            return                    # setTitle() fait clignoter la barre
+        self._title_shown = titre
+        try:
+            self.dialog.setTitle(titre)
+        except Exception:
+            pass
+
+    def _current_document_name(self):
+        """Nom court du document courant ; jamais d'exception, jamais None."""
+        try:
+            desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.uno_ctx)
+            model = desktop.getCurrentComponent()
+            if model is None:
+                return ""
+            titre = str(getattr(model, "Title", "") or "")
+            if titre:
+                return titre
+            url = str(getattr(model, "URL", "") or "")
+            return url.rsplit("/", 1)[-1] if url else ""
+        except Exception:
+            return ""
+
+    def current_app(self):
+        """Application du document ACTIF, pas celle de l'ouverture.
+
+        `self.app` est figé à la création : une palette ouverte sur Writer
+        gardait ce cap même passée sur un Calc, et l'analyse de document comme
+        les suggestions se calaient sur la mauvaise application. Les outils
+        envoyés au modèle, eux, suivaient déjà le document réel (`ctx.app`).
+        """
+        try:
+            desktop = self.uno_ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.frame.Desktop", self.uno_ctx)
+            model = desktop.getCurrentComponent()
+            if model is None:
+                return self.app
+            if hasattr(model, "Text"):
+                return "writer"
+            if hasattr(model, "Sheets"):
+                return "calc"
+        except Exception:
+            pass
+        return self.app
 
     def _describe_selection(self):
         """Décrit la cible courante ; ne rend JAMAIS None ni ne lève."""
@@ -1238,7 +1338,7 @@ class AssistantPalette:
         Rend True si l'analyse a bien démarré, pour que l'appelant sache s'il
         doit annoncer « analyse en cours ».
         """
-        if self._analysis_running or self._analysis_text or self.app != "writer":
+        if self._analysis_running or self._analysis_text or self.current_app() != "writer":
             return False
         try:
             text = self._document_text()
@@ -1323,7 +1423,7 @@ class AssistantPalette:
             "com.sun.star.frame.Desktop", self.uno_ctx)
         model = desktop.getCurrentComponent()
         if model is None:
-            return suggestions.suggest(self.app)
+            return suggestions.suggest(self.current_app())
         if hasattr(model, "Text"):
             selected, paragraph = _writer_targets(model)
             return suggestions.suggest(
@@ -1331,7 +1431,7 @@ class AssistantPalette:
         if hasattr(model, "Sheets"):
             count, values = _calc_selection_sample(model)
             return suggestions.suggest("calc", cell_count=count, values=values)
-        return suggestions.suggest(self.app)
+        return suggestions.suggest(self.current_app())
 
     # ── Fil de conversation (main courante : le plus récent EN HAUT) ────
 
@@ -2142,12 +2242,17 @@ class AssistantPalette:
 
 
 def open_or_focus(uno_ctx, shell, app, callbacks):
-    """Ouvre la palette (ou la ramène au premier plan si déjà ouverte)."""
+    """Ouvre la palette (ou la ramène au premier plan si déjà ouverte).
+
+    Ce chemin sert le menu « 🤖 MIrAI », le bouton de la barre d'outils et le
+    raccourci : tous trois passent par l'action `OpenAssistant`. C'est donc ici,
+    et nulle part ailleurs, que se règle « ramène-moi la fenêtre » — devenu
+    indispensable depuis qu'elle est autonome et peut passer derrière.
+    """
     existing = _open_palette[0]
     if existing is not None:
         try:
-            existing.dialog.setVisible(True)
-            existing.dialog.setFocus()
+            existing.bring_to_front()
             # Rouvrir une palette DÉJÀ ouverte n'est pas une ouverture : le
             # confondre avec elle gonflerait AssistantOpen d'un geste qui dit
             # surtout que la fenêtre s'était perdue derrière le document.

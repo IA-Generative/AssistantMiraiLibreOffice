@@ -93,6 +93,16 @@ class FakeControl:
         return self.visible
 
 
+class FakePeer:
+    """Peer minimal : `toFront()` est ce qui remonte une fenêtre autonome."""
+
+    def __init__(self):
+        self.front_calls = 0
+
+    def toFront(self):
+        self.front_calls += 1
+
+
 class FakeDialog:
     def __init__(self):
         self.controls = {}
@@ -100,6 +110,8 @@ class FakeDialog:
         self.top_listeners = []
         self.window_listeners = []
         self.visible = False
+        self.title = ""
+        self.peer = FakePeer()
 
     def setModel(self, _model):
         pass
@@ -110,8 +122,11 @@ class FakeDialog:
     def setVisible(self, value):
         self.visible = value
 
-    def setTitle(self, _title):
-        pass
+    def setTitle(self, title):
+        self.title = title
+
+    def getPeer(self):
+        return self.peer
 
     def setPosSize(self, *_args):
         pass
@@ -955,3 +970,84 @@ def test_journal_and_reasoning_are_not_clickable(palette_module):
         listeners = dialog.getControl(name).listeners
         assert not any(isinstance(handler, palette_module._PaneClickHandler)
                        for handler in listeners), f"« {name} » ne doit pas être cliquable"
+
+
+# ── Fenêtre autonome, titre, et application courante ────────────────────────
+#
+# La palette était une fenêtre POSSÉDÉE par la fenêtre de document active à son
+# ouverture. Mesuré le 2026-08-04 sur un Mac à trois écrans : impossible de la
+# sortir de l'écran de son propriétaire, et elle le suivait au pixel près. Avec
+# plusieurs documents, elle restait collée au premier tout en agissant sur le
+# document courant — donc potentiellement un autre.
+
+def test_window_keeps_an_explicit_parent(palette_module, monkeypatch):
+    """Le parent EXPLICITE est conservé, faute de mieux.
+
+    Il est bien la cause du confinement à un écran — mais passer `None` ne le
+    corrige pas : VCL rattache alors le dialogue à la fenêtre active de
+    l'application, et le suivi mesuré est identique (+1500/+261 dans les deux
+    cas, 2026-08-04, trois écrans). Autant garder un parent prévisible, qui
+    tient au moins la palette au-dessus du document.
+    """
+    parents = []
+    monkeypatch.setattr(palette_module._fake_dialog, "createPeer",
+                        lambda _toolkit, parent: parents.append(parent))
+    _build(palette_module)
+    assert parents and parents[0] is not None
+
+
+def test_bring_to_front_raises_the_window(palette_module):
+    """`setFocus` seul donne le clavier sans changer l'ordre d'empilement."""
+    palette = _build(palette_module)
+    dialog = palette_module._fake_dialog
+    dialog.visible = False
+    palette.bring_to_front()
+    assert dialog.visible is True
+    assert dialog.peer.front_calls == 1
+
+
+def test_title_names_the_document(palette_module, monkeypatch):
+    """Avec plusieurs documents, rien ne disait sur lequel la demande portait."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_current_document_name", lambda: "rapport.odt")
+    palette.refresh_title()
+    assert palette_module._fake_dialog.title == "MIrAI — Assistant · rapport.odt"
+
+
+def test_title_falls_back_without_a_document(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_current_document_name", lambda: "")
+    palette.refresh_title()
+    assert palette_module._fake_dialog.title == "MIrAI — Assistant"
+
+
+def test_title_is_not_rewritten_when_unchanged(palette_module, monkeypatch):
+    """Reposer le même titre fait clignoter la barre de fenêtre."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_current_document_name", lambda: "rapport.odt")
+    palette.refresh_title()
+    poses = []
+    monkeypatch.setattr(palette_module._fake_dialog, "setTitle", poses.append)
+    palette.refresh_title()
+    assert poses == []
+
+
+def test_current_app_follows_the_active_document(palette_module, monkeypatch):
+    """`self.app` est figé à l'ouverture : suivre le document réel."""
+    palette = _build(palette_module, app="writer")
+
+    class _Calc:
+        Sheets = object()
+
+    desktop = MagicMock()
+    desktop.getCurrentComponent.return_value = _Calc()
+    palette.uno_ctx.getServiceManager.return_value.createInstanceWithContext.return_value = desktop
+    assert palette.current_app() == "calc"
+
+
+def test_current_app_falls_back_when_no_document(palette_module):
+    palette = _build(palette_module, app="writer")
+    desktop = MagicMock()
+    desktop.getCurrentComponent.return_value = None
+    palette.uno_ctx.getServiceManager.return_value.createInstanceWithContext.return_value = desktop
+    assert palette.current_app() == "writer"
