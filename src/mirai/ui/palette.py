@@ -1205,12 +1205,14 @@ class AssistantPalette:
             if messages is None:
                 self._show_analysis(doc_analysis.TOO_SHORT)
                 return
-            step = LLMClient(self.shell).step(messages)
+            step = LLMClient(self.shell,
+                             max_tokens=doc_analysis.MAX_TOKENS).step(messages)
             if step.error or not (step.text or "").strip():
                 self.shell.log("[palette] analyse du document indisponible : "
                                f"{step.error or 'réponse vide'}")
                 return
-            items = doc_analysis.parse(step.text)
+            items = doc_analysis.parse(
+                step.text, truncated=(step.finish_reason == "length"))
             if not items:
                 self.shell.log("[palette] analyse du document : aucune "
                                "proposition exploitable")

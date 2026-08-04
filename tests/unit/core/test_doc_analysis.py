@@ -107,3 +107,29 @@ def test_render_lists_the_items():
 
 def test_render_without_items_says_so():
     assert doc_analysis.render([]) == doc_analysis.UNAVAILABLE
+
+
+# ── Réponse tronquée (constaté en recette avec gemma-4) ──────────────────────
+
+def test_truncated_answer_drops_the_last_item():
+    """Le flux s'arrête sur `length` : la dernière ligne est coupée en plein mot.
+
+    Recette du 2026-08-04 : l'onglet affichait « Fusionner les sections en une
+    seule chron ». Une proposition tronquée ne vaut pas mieux qu'aucune.
+    """
+    raw = ("- Supprimer les redondances de l'introduction\n"
+           "- Fusionner les sections Historique et Version initiale en une seule chron")
+    items = doc_analysis.parse(raw, truncated=True)
+    assert items == ["Supprimer les redondances de l'introduction"]
+
+
+def test_truncation_keeps_a_lone_item():
+    """Tout jeter laisserait l'onglet vide, donc les suggestions statiques —
+    alors qu'une proposition complète est peut-être là."""
+    raw = "- Ajouter des intertitres"
+    assert doc_analysis.parse(raw, truncated=True) == ["Ajouter des intertitres"]
+
+
+def test_complete_answer_keeps_everything():
+    raw = "- Première proposition\n- Seconde proposition"
+    assert len(doc_analysis.parse(raw, truncated=False)) == 2

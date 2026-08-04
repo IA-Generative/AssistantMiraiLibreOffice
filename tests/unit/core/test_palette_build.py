@@ -774,7 +774,7 @@ def test_failed_analysis_keeps_the_static_suggestions(palette_module, monkeypatc
     monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
 
     class _Boom:
-        def __init__(self, _shell): pass
+        def __init__(self, _shell, max_tokens=None): pass
         def step(self, _messages): raise RuntimeError("relais injoignable")
 
     monkeypatch.setattr(palette_module, "LLMClient", _Boom)
@@ -788,7 +788,7 @@ def test_empty_model_answer_keeps_the_static_suggestions(palette_module, monkeyp
     monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
 
     class _Vide:
-        def __init__(self, _shell): pass
+        def __init__(self, _shell, max_tokens=None): pass
         def step(self, _messages):
             return type("S", (), {"error": "", "text": ""})()
 
@@ -802,10 +802,10 @@ def test_successful_analysis_lands_in_the_tab(palette_module, monkeypatch):
     monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
 
     class _Ok:
-        def __init__(self, _shell): pass
+        def __init__(self, _shell, max_tokens=None): pass
         def step(self, _messages):
             return type("S", (), {
-                "error": "",
+                "error": "", "finish_reason": "stop",
                 "text": "- Ajouter des intertitres\n- Scinder le paragraphe 4"})()
 
     monkeypatch.setattr(palette_module, "LLMClient", _Ok)
@@ -814,13 +814,49 @@ def test_successful_analysis_lands_in_the_tab(palette_module, monkeypatch):
     assert "Ajouter des intertitres" in _suggestions_text(palette, palette_module)
 
 
+def test_truncated_analysis_drops_the_cut_item(palette_module, monkeypatch):
+    """gemma-4 s'arrête sur `length` : la dernière ligne est coupée en plein mot."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+
+    class _Coupe:
+        def __init__(self, _shell, max_tokens=None): pass
+        def step(self, _messages):
+            return type("S", (), {
+                "error": "", "finish_reason": "length",
+                "text": "- Ajouter des intertitres\n- Fusionner les sections en une seule chron"})()
+
+    monkeypatch.setattr(palette_module, "LLMClient", _Coupe)
+    palette._analyse_in_worker()
+    assert "Ajouter des intertitres" in palette._analysis_text
+    assert "chron" not in palette._analysis_text
+
+
+def test_analysis_asks_for_a_large_budget(palette_module, monkeypatch):
+    """Réflexion et réponse partagent le même plafond : trop serré, le modèle
+    épuise tout à réfléchir et ne rend rien (mesuré avec gemma-4)."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+    budgets = []
+
+    class _Espion:
+        def __init__(self, _shell, max_tokens=None): budgets.append(max_tokens)
+        def step(self, _messages):
+            return type("S", (), {"error": "", "finish_reason": "stop",
+                                  "text": "- Une proposition"})()
+
+    monkeypatch.setattr(palette_module, "LLMClient", _Espion)
+    palette._analyse_in_worker()
+    assert budgets == [palette_module.doc_analysis.MAX_TOKENS]
+
+
 def test_short_document_is_reported_not_analysed(palette_module, monkeypatch):
     palette = _build(palette_module)
     monkeypatch.setattr(palette, "_document_text", lambda: "Trois mots.")
     appels = []
 
     class _Espion:
-        def __init__(self, _shell): pass
+        def __init__(self, _shell, max_tokens=None): pass
         def step(self, _messages): appels.append(1)
 
     monkeypatch.setattr(palette_module, "LLMClient", _Espion)
