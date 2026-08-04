@@ -725,144 +725,132 @@ def test_heal_does_nothing_on_a_healthy_palette(palette_module):
 
 # ── Analyse asynchrone du document (onglet Suggestions) ─────────────────────
 #
-# Les propositions étaient statiques : des règles sur la longueur de la
-# sélection, jamais sur le contenu. L'analyse les remplace quand elle arrive —
-# sans jamais faire perdre le socle si elle échoue.
+# La pompe du dispatcher NE TOURNE QUE PENDANT UN RUN (ui_thread.start_pump).
+# La première version lisait le document par `dispatcher.call` depuis le thread
+# d'analyse : hors run, l'appel expirait au bout de 10 s et l'onglet restait
+# muet — « le thread principal n'a pas répondu », constaté en recette le
+# 2026-08-04. Le texte est donc lu sur le THREAD PRINCIPAL avant de partir, et
+# la pompe est armée là aussi.
 
-def _suggestions_text(palette, palette_module):
-    return palette._models["suggestions"].Text
-
-
-def test_static_suggestions_show_immediately(palette_module, monkeypatch):
-    palette = _build(palette_module)
-    monkeypatch.setattr(palette, "start_document_analysis", lambda: None)
-    monkeypatch.setattr(palette, "_current_suggestions", lambda: [])
-    palette.refresh_suggestions()
-    assert _suggestions_text(palette, palette_module)
+class _Reponse:
+    def __init__(self, text="", error="", finish_reason="stop"):
+        self.text, self.error, self.finish_reason = text, error, finish_reason
 
 
-def test_analysis_replaces_the_tab_content(palette_module, monkeypatch):
-    palette = _build(palette_module)
-    monkeypatch.setattr(palette, "start_document_analysis", lambda: None)
-    palette._analysis_text = "Propositions :\n· Ajouter des intertitres"
-    palette.refresh_suggestions()
-    assert "Ajouter des intertitres" in _suggestions_text(palette, palette_module)
+def _client(reponse=None, budgets=None, boum=False):
+    class _C:
+        def __init__(self, _shell, max_tokens=None):
+            if budgets is not None:
+                budgets.append(max_tokens)
 
-
-def test_analysis_is_not_started_twice(palette_module, monkeypatch):
-    palette = _build(palette_module)
-    lancements = []
-    monkeypatch.setattr(palette_module.threading, "Thread",
-                        lambda **kw: type("T", (), {"start": lambda _s: lancements.append(1)})())
-    palette.start_document_analysis()
-    palette.start_document_analysis()      # la première tourne encore
-    assert len(lancements) == 1
-
-
-def test_no_analysis_outside_writer(palette_module, monkeypatch):
-    palette = _build(palette_module, app="calc")
-    lancements = []
-    monkeypatch.setattr(palette_module.threading, "Thread",
-                        lambda **kw: type("T", (), {"start": lambda _s: lancements.append(1)})())
-    palette.start_document_analysis()
-    assert lancements == []
-
-
-def test_failed_analysis_keeps_the_static_suggestions(palette_module, monkeypatch):
-    """Une analyse qui échoue ne doit pas vider l'onglet."""
-    palette = _build(palette_module)
-    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
-
-    class _Boom:
-        def __init__(self, _shell, max_tokens=None): pass
-        def step(self, _messages): raise RuntimeError("relais injoignable")
-
-    monkeypatch.setattr(palette_module, "LLMClient", _Boom)
-    palette._analyse_in_worker()
-    assert palette._analysis_text == ""
-    assert palette._analysis_running is False
-
-
-def test_empty_model_answer_keeps_the_static_suggestions(palette_module, monkeypatch):
-    palette = _build(palette_module)
-    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
-
-    class _Vide:
-        def __init__(self, _shell, max_tokens=None): pass
         def step(self, _messages):
-            return type("S", (), {"error": "", "text": ""})()
+            if boum:
+                raise RuntimeError("relais injoignable")
+            return reponse
+    return _C
 
-    monkeypatch.setattr(palette_module, "LLMClient", _Vide)
-    palette._analyse_in_worker()
-    assert palette._analysis_text == ""
+
+def _analyse(palette, palette_module, monkeypatch, client, doc="Un texte. " * 60):
+    """Déroule l'analyse de bout en bout, sans thread (déterministe)."""
+    monkeypatch.setattr(palette, "_document_text", lambda: doc)
+    monkeypatch.setattr(palette_module, "LLMClient", client)
+    lances = []
+    monkeypatch.setattr(
+        palette_module.threading, "Thread",
+        lambda target=None, args=(), **kw: type(
+            "T", (), {"start": lambda _s: lances.append((target, args))})())
+    demarre = palette.start_document_analysis()
+    for target, args in lances:
+        if target == palette._analyse_in_worker:      # on n'anime pas en test
+            target(*args)
+    return demarre
+
+
+def test_document_is_read_on_the_main_thread(palette_module, monkeypatch):
+    """Aucun `dispatcher.call` : c'est lui qui expirait hors run."""
+    palette = _build(palette_module)
+    appels = []
+    monkeypatch.setattr(palette.dispatcher, "call",
+                        lambda *a, **k: appels.append(1))
+    _analyse(palette, palette_module, monkeypatch,
+             _client(_Reponse(text="- Une proposition")))
+    assert appels == []
+
+
+def test_pump_is_armed_before_the_worker_starts(palette_module, monkeypatch):
+    """Sans pompe armée, le résultat ne serait jamais affiché."""
+    palette = _build(palette_module)
+    armee = []
+    monkeypatch.setattr(palette.dispatcher, "start_pump",
+                        lambda: armee.append(1))
+    _analyse(palette, palette_module, monkeypatch,
+             _client(_Reponse(text="- Une proposition")))
+    assert armee == [1]
 
 
 def test_successful_analysis_lands_in_the_tab(palette_module, monkeypatch):
     palette = _build(palette_module)
-    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
-
-    class _Ok:
-        def __init__(self, _shell, max_tokens=None): pass
-        def step(self, _messages):
-            return type("S", (), {
-                "error": "", "finish_reason": "stop",
-                "text": "- Ajouter des intertitres\n- Scinder le paragraphe 4"})()
-
-    monkeypatch.setattr(palette_module, "LLMClient", _Ok)
-    palette._analyse_in_worker()
+    _analyse(palette, palette_module, monkeypatch, _client(
+        _Reponse(text="- Ajouter des intertitres\n- Scinder le paragraphe 4")))
     assert "Ajouter des intertitres" in palette._analysis_text
-    assert "Ajouter des intertitres" in _suggestions_text(palette, palette_module)
+    assert "Ajouter des intertitres" in palette._models["suggestions"].Text
 
 
 def test_truncated_analysis_drops_the_cut_item(palette_module, monkeypatch):
-    """gemma-4 s'arrête sur `length` : la dernière ligne est coupée en plein mot."""
     palette = _build(palette_module)
-    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
-
-    class _Coupe:
-        def __init__(self, _shell, max_tokens=None): pass
-        def step(self, _messages):
-            return type("S", (), {
-                "error": "", "finish_reason": "length",
-                "text": "- Ajouter des intertitres\n- Fusionner les sections en une seule chron"})()
-
-    monkeypatch.setattr(palette_module, "LLMClient", _Coupe)
-    palette._analyse_in_worker()
+    _analyse(palette, palette_module, monkeypatch, _client(_Reponse(
+        text="- Ajouter des intertitres\n- Fusionner les sections en une seule chron",
+        finish_reason="length")))
     assert "Ajouter des intertitres" in palette._analysis_text
     assert "chron" not in palette._analysis_text
 
 
 def test_analysis_asks_for_a_large_budget(palette_module, monkeypatch):
-    """Réflexion et réponse partagent le même plafond : trop serré, le modèle
-    épuise tout à réfléchir et ne rend rien (mesuré avec gemma-4)."""
+    """Réflexion et réponse partagent le plafond : trop serré, gemma-4 ne rend rien."""
     palette = _build(palette_module)
-    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
     budgets = []
-
-    class _Espion:
-        def __init__(self, _shell, max_tokens=None): budgets.append(max_tokens)
-        def step(self, _messages):
-            return type("S", (), {"error": "", "finish_reason": "stop",
-                                  "text": "- Une proposition"})()
-
-    monkeypatch.setattr(palette_module, "LLMClient", _Espion)
-    palette._analyse_in_worker()
+    _analyse(palette, palette_module, monkeypatch,
+             _client(_Reponse(text="- Une proposition"), budgets=budgets))
     assert budgets == [palette_module.doc_analysis.MAX_TOKENS]
 
 
-def test_short_document_is_reported_not_analysed(palette_module, monkeypatch):
+def test_failed_analysis_falls_back_to_static_suggestions(palette_module, monkeypatch):
     palette = _build(palette_module)
-    monkeypatch.setattr(palette, "_document_text", lambda: "Trois mots.")
-    appels = []
+    _analyse(palette, palette_module, monkeypatch, _client(boum=True))
+    assert palette._analysis_text == ""
+    assert palette._analysis_running is False
+    assert palette._models["suggestions"].Text == palette._analysis_base
 
-    class _Espion:
-        def __init__(self, _shell, max_tokens=None): pass
-        def step(self, _messages): appels.append(1)
 
-    monkeypatch.setattr(palette_module, "LLMClient", _Espion)
-    palette._analyse_in_worker()
-    assert appels == []                       # aucun appel réseau inutile
+def test_empty_answer_falls_back_to_static_suggestions(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    _analyse(palette, palette_module, monkeypatch, _client(_Reponse(text="")))
+    assert palette._analysis_text == ""
+    assert palette._models["suggestions"].Text == palette._analysis_base
+
+
+def test_short_document_is_reported_without_calling_the_model(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    budgets = []
+    demarre = _analyse(palette, palette_module, monkeypatch,
+                       _client(_Reponse(), budgets=budgets), doc="Trois mots.")
+    assert demarre is False
+    assert budgets == []                  # aucun aller-retour réseau inutile
     assert palette._analysis_text == palette_module.doc_analysis.TOO_SHORT
+
+
+def test_no_analysis_outside_writer(palette_module, monkeypatch):
+    palette = _build(palette_module, app="calc")
+    assert palette.start_document_analysis() is False
+
+
+def test_analysis_is_not_started_twice(palette_module, monkeypatch):
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+    monkeypatch.setattr(palette_module.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda _s: None})())
+    assert palette.start_document_analysis() is True
+    assert palette.start_document_analysis() is False     # la première tourne
 
 
 def test_a_run_invalidates_a_previous_analysis(palette_module):
@@ -871,3 +859,12 @@ def test_a_run_invalidates_a_previous_analysis(palette_module):
     palette._analysis_text = "constat périmé"
     palette._finish_run()
     assert palette._analysis_text == ""
+
+
+def test_refresh_announces_the_wait(palette_module, monkeypatch):
+    """Sans annonce, l'onglet paraît figé et l'utilisateur reclique."""
+    palette = _build(palette_module)
+    monkeypatch.setattr(palette, "_current_suggestions", lambda: [])
+    monkeypatch.setattr(palette, "start_document_analysis", lambda: True)
+    palette.refresh_suggestions()
+    assert palette_module.doc_analysis.ANALYZING in palette._models["suggestions"].Text

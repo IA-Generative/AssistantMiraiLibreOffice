@@ -472,6 +472,7 @@ class AssistantPalette:
         self._tab_before_reasoning = None   # onglet à restaurer en refermant
         self._analysis_text = ""       # analyse du document, quand elle arrive
         self._analysis_running = False  # une seule analyse à la fois
+        self._analysis_base = ""       # socle statique, repli si l'analyse échoue
         self.append_mode = self._restore_append_mode(shell)
         self._progress = None          # jauge du run en cours
         self._pulse = None             # thread d'animation de la jauge
@@ -1165,10 +1166,10 @@ class AssistantPalette:
         except Exception as exc:
             self.shell.log(f"[palette] suggestions indisponibles : {exc}")
             base = ""
-        if self._analysis_running:
+        self._analysis_base = base
+        if self.start_document_analysis():
             base = f"{base}\n\n{doc_analysis.ANALYZING}".strip()
         self._set_text("suggestions", base)
-        self.start_document_analysis()
 
     # ── Analyse du document (asynchrone) ────────────────────────────────
 
@@ -1182,29 +1183,62 @@ class AssistantPalette:
         return model.Text.getString()
 
     def start_document_analysis(self):
-        """Lance l'analyse en tâche de fond, si elle a un sens ici.
+        """Lance l'analyse en tâche de fond. Thread principal uniquement.
 
-        Jamais sur le thread principal : l'appel au relais dure des secondes,
-        et LibreOffice paraîtrait figé pendant tout ce temps.
+        Le texte est lu ICI, avant de partir : la pompe du dispatcher ne tourne
+        que pendant un run, donc un `call` depuis le thread d'analyse expirait
+        au bout de 10 s (« le thread principal n'a pas répondu »). Même raison
+        pour `start_pump()` — il n'est fiable que depuis le thread principal,
+        et sans lui le résultat ne serait jamais affiché.
+
+        Rend True si l'analyse a bien démarré, pour que l'appelant sache s'il
+        doit annoncer « analyse en cours ».
         """
         if self._analysis_running or self._analysis_text or self.app != "writer":
-            return
+            return False
+        try:
+            text = self._document_text()
+        except Exception as exc:
+            self.shell.log(f"[palette] lecture du document impossible : {exc}")
+            return False
+        messages = doc_analysis.build_messages(text)
+        if messages is None:
+            self._analysis_text = doc_analysis.TOO_SHORT
+            return False              # rien à analyser : pas d'attente à annoncer
         self._analysis_running = True
-        threading.Thread(target=self._analyse_in_worker, daemon=True,
-                         name="mirai-doc-analysis").start()
+        self.dispatcher.start_pump()
+        threading.Thread(target=self._analyse_in_worker, args=(messages,),
+                         daemon=True, name="mirai-doc-analysis").start()
+        threading.Thread(target=self._animate_analysis,
+                         daemon=True, name="mirai-doc-analysis-anim").start()
+        return True
 
-    def _analyse_in_worker(self):
-        """Lit le document, interroge le modèle, remplace l'onglet.
+    def _animate_analysis(self):
+        """Points de suspension animés pendant l'attente.
+
+        Une analyse dure plusieurs secondes : sans mouvement, l'onglet paraît
+        figé et l'utilisateur reclique. L'animation s'arrête d'elle-même dès
+        que `_analysis_running` retombe.
+        """
+        frames = (".", "..", "...")
+        index = 0
+        while self._analysis_running:
+            suffixe = frames[index % len(frames)]
+            texte = f"{self._analysis_base}\n\n{doc_analysis.ANALYZING_BASE}{suffixe}".strip()
+            try:
+                self.dispatcher.post(lambda t=texte: self._set_text("suggestions", t))
+            except DispatcherClosed:
+                return
+            index += 1
+            time.sleep(0.6)
+
+    def _analyse_in_worker(self, messages):
+        """Interroge le modèle et remplace l'onglet.
 
         Toute sortie anormale laisse les suggestions statiques en place : une
         analyse qui échoue ne doit jamais faire perdre ce qui marchait avant.
         """
         try:
-            text = self.dispatcher.call(self._document_text, timeout=10) or ""
-            messages = doc_analysis.build_messages(text)
-            if messages is None:
-                self._show_analysis(doc_analysis.TOO_SHORT)
-                return
             step = LLMClient(self.shell,
                              max_tokens=doc_analysis.MAX_TOKENS).step(messages)
             if step.error or not (step.text or "").strip():
@@ -1218,21 +1252,29 @@ class AssistantPalette:
                                "proposition exploitable")
                 return
             self.shell.log(f"[palette] analyse du document : {len(items)} proposition(s)")
-            self._show_analysis(doc_analysis.render(items))
+            self._analysis_text = doc_analysis.render(items)
         except DispatcherClosed:
             pass                      # palette fermée pendant l'analyse
         except Exception as exc:
             self.shell.log(f"[palette] analyse du document échouée : {exc}")
         finally:
-            self._analysis_running = False
+            self._analysis_running = False    # arrête aussi l'animation
+            self._publish_analysis()
 
-    def _show_analysis(self, text):
-        """Publie le résultat — depuis le thread de travail, donc par le dispatcher."""
-        self._analysis_text = text
+    def _publish_analysis(self):
+        """Affiche le résultat — ou rend la main au socle statique en cas d'échec."""
+        final = self._analysis_text or self._analysis_base
         try:
-            self.dispatcher.post(lambda: self._set_text("suggestions", text))
+            self.dispatcher.post(lambda: self._set_text("suggestions", final))
+            # La pompe a été armée pour cette analyse : on l'éteint, sauf si un
+            # run l'utilise encore — il la gère alors pour son propre compte.
+            self.dispatcher.post(self._stop_pump_if_idle)
         except DispatcherClosed:
             pass
+
+    def _stop_pump_if_idle(self):
+        if not self.busy:
+            self.dispatcher.stop_pump()
 
     def invalidate_analysis(self):
         """Le document a changé : l'analyse précédente ne le décrit plus."""

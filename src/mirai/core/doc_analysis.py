@@ -38,7 +38,8 @@ SYSTEM_PROMPT = (
     "ni conclusion, ni numérotation, ni texte réécrit."
 )
 
-ANALYZING = "Analyse du document en cours…"
+ANALYZING_BASE = "Analyse du document en cours"
+ANALYZING = ANALYZING_BASE + "…"
 TOO_SHORT = ("Document trop court pour une analyse de structure.\n"
              "Écrivez quelques paragraphes, puis rouvrez cet onglet.")
 UNAVAILABLE = "Analyse indisponible pour le moment."
