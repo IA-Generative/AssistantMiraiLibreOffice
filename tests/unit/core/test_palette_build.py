@@ -743,7 +743,7 @@ def _client(reponse=None, budgets=None, boum=False):
             if budgets is not None:
                 budgets.append(max_tokens)
 
-        def step(self, _messages):
+        def step(self, _messages, progress=None):
             if boum:
                 raise RuntimeError("relais injoignable")
             return reponse
@@ -861,13 +861,32 @@ def test_a_run_invalidates_a_previous_analysis(palette_module):
     assert palette._analysis_text == ""
 
 
-def test_refresh_announces_the_wait(palette_module, monkeypatch):
-    """Sans annonce, l'onglet paraît figé et l'utilisateur reclique."""
+def test_wait_is_shown_in_the_status_line_like_a_run(palette_module, monkeypatch):
+    """Même endroit, même format que le run — une seule habitude à prendre.
+
+    L'onglet, lui, garde les suggestions statiques : une animation dans la zone
+    ET une autre dans la ligne d'état apprendraient deux endroits où regarder.
+    """
     palette = _build(palette_module)
-    monkeypatch.setattr(palette, "_current_suggestions", lambda: [])
-    monkeypatch.setattr(palette, "start_document_analysis", lambda: True)
-    palette.refresh_suggestions()
-    assert palette_module.doc_analysis.ANALYZING in palette._models["suggestions"].Text
+    monkeypatch.setattr(palette, "_document_text", lambda: "Un texte. " * 60)
+    monkeypatch.setattr(palette_module.threading, "Thread",
+                        lambda **kw: type("T", (), {"start": lambda _s: None})())
+    assert palette.start_document_analysis() is True
+    rendu = palette._progress.render()
+    assert palette_module.doc_analysis.PHASE in rendu
+    assert palette_module.doc_analysis.PHASE not in palette._models["suggestions"].Text
+
+
+def test_analysis_gauge_is_not_stopped_by_a_run_that_took_over(palette_module, monkeypatch):
+    """Un run démarré pendant l'analyse pose SA jauge : la couper afficherait
+    un run figé alors qu'il travaille."""
+    palette = _build(palette_module)
+    arrets = []
+    monkeypatch.setattr(palette, "_stop_pulse", lambda: arrets.append(1))
+    ancienne = palette_module.RunProgress()
+    palette._progress = palette_module.RunProgress()      # le run a pris la main
+    palette._publish_analysis(ancienne)
+    assert arrets == []
 
 
 # ── Lignes cliquables (Conversation et Suggestions) ─────────────────────────

@@ -502,6 +502,7 @@ class AssistantPalette:
         self._analysis_text = ""       # analyse du document, quand elle arrive
         self._analysis_running = False  # une seule analyse à la fois
         self._analysis_base = ""       # socle statique, repli si l'analyse échoue
+        self._analysis_progress = None  # jauge de l'analyse (partagée avec le run)
         self.append_mode = self._restore_append_mode(shell)
         self._progress = None          # jauge du run en cours
         self._pulse = None             # thread d'animation de la jauge
@@ -1209,9 +1210,10 @@ class AssistantPalette:
             self.shell.log(f"[palette] suggestions indisponibles : {exc}")
             base = ""
         self._analysis_base = base
-        if self.start_document_analysis():
-            base = f"{base}\n\n{doc_analysis.ANALYZING}".strip()
         self._set_text("suggestions", base)
+        # L'attente n'est PAS annoncée dans l'onglet : elle s'affiche dans la
+        # ligne d'état, là où le run affiche déjà la sienne.
+        self.start_document_analysis()
 
     # ── Analyse du document (asynchrone) ────────────────────────────────
 
@@ -1249,32 +1251,17 @@ class AssistantPalette:
             return False              # rien à analyser : pas d'attente à annoncer
         self._analysis_running = True
         self.dispatcher.start_pump()
-        threading.Thread(target=self._analyse_in_worker, args=(messages,),
+        # Même jauge que le run : l'attente s'affiche dans la ligne d'état, au
+        # format « ⠹ Analyse du document · 3 s ». Rien d'animé dans l'onglet —
+        # deux animations à deux endroits apprendraient deux habitudes.
+        progress = RunProgress(activity=doc_analysis.PHASE)
+        self._analysis_progress = progress
+        self._start_pulse(progress)
+        threading.Thread(target=self._analyse_in_worker, args=(messages, progress),
                          daemon=True, name="mirai-doc-analysis").start()
-        threading.Thread(target=self._animate_analysis,
-                         daemon=True, name="mirai-doc-analysis-anim").start()
         return True
 
-    def _animate_analysis(self):
-        """Points de suspension animés pendant l'attente.
-
-        Une analyse dure plusieurs secondes : sans mouvement, l'onglet paraît
-        figé et l'utilisateur reclique. L'animation s'arrête d'elle-même dès
-        que `_analysis_running` retombe.
-        """
-        frames = (".", "..", "...")
-        index = 0
-        while self._analysis_running:
-            suffixe = frames[index % len(frames)]
-            texte = f"{self._analysis_base}\n\n{doc_analysis.ANALYZING_BASE}{suffixe}".strip()
-            try:
-                self.dispatcher.post(lambda t=texte: self._set_text("suggestions", t))
-            except DispatcherClosed:
-                return
-            index += 1
-            time.sleep(0.6)
-
-    def _analyse_in_worker(self, messages):
+    def _analyse_in_worker(self, messages, progress):
         """Interroge le modèle et remplace l'onglet.
 
         Toute sortie anormale laisse les suggestions statiques en place : une
@@ -1282,7 +1269,8 @@ class AssistantPalette:
         """
         try:
             step = LLMClient(self.shell,
-                             max_tokens=doc_analysis.MAX_TOKENS).step(messages)
+                             max_tokens=doc_analysis.MAX_TOKENS).step(
+                                 messages, progress=progress)
             if step.error or not (step.text or "").strip():
                 self.shell.log("[palette] analyse du document indisponible : "
                                f"{step.error or 'réponse vide'}")
@@ -1300,12 +1288,19 @@ class AssistantPalette:
         except Exception as exc:
             self.shell.log(f"[palette] analyse du document échouée : {exc}")
         finally:
-            self._analysis_running = False    # arrête aussi l'animation
-            self._publish_analysis()
+            self._analysis_running = False
+            self._publish_analysis(progress)
 
-    def _publish_analysis(self):
+    def _publish_analysis(self, progress=None):
         """Affiche le résultat — ou rend la main au socle statique en cas d'échec."""
         final = self._analysis_text or self._analysis_base
+        # La jauge n'est arrêtée que si elle est encore la NÔTRE : un run
+        # démarré entre-temps a posé la sienne, et la couper afficherait un run
+        # figé alors qu'il travaille.
+        if progress is None or self._progress is progress:
+            self._stop_pulse()
+            self._analysis_progress = None
+            self.set_status("Prêt", tone="neutral")
         try:
             self.dispatcher.post(lambda: self._set_text("suggestions", final))
             # La pompe a été armée pour cette analyse : on l'éteint, sauf si un
@@ -2087,10 +2082,16 @@ class AssistantPalette:
                     pass
         self.dispatcher.post(_apply)
 
-    def _start_pulse(self):
-        """Anime la jauge tant que le run dure — la seule preuve visible que
-        quelque chose se passe sur une opération longue."""
+    def _start_pulse(self, progress=None):
+        """Anime la ligne d'état tant qu'une opération longue dure.
+
+        Sert le run ET l'analyse du document : même emplacement, même format
+        (« ⠹ Analyse du document · 3 s »). Une seule mécanique à maintenir, et
+        surtout un seul endroit où l'utilisateur apprend à regarder.
+        """
         self._stop_pulse()
+        if progress is not None:
+            self._progress = progress
         stop = threading.Event()
 
         def _tick():

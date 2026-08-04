@@ -38,8 +38,10 @@ SYSTEM_PROMPT = (
     "ni conclusion, ni numérotation, ni texte réécrit."
 )
 
-ANALYZING_BASE = "Analyse du document en cours"
-ANALYZING = ANALYZING_BASE + "…"
+# Libellé de phase pour la jauge partagée avec le run : l'attente s'affiche
+# dans la ligne d'état, au même endroit et au même format (« ⠹ Analyse du
+# document · 3 s »).
+PHASE = "Analyse du document"
 TOO_SHORT = ("Document trop court pour une analyse de structure.\n"
              "Écrivez quelques paragraphes, puis rouvrez cet onglet.")
 UNAVAILABLE = "Analyse indisponible pour le moment."
