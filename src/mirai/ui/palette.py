@@ -74,6 +74,7 @@ except Exception:
 TOOL_LABELS = {
     "writer_get_selection": "Lecture de la sélection",
     "writer_get_document_map": "Lecture du document",
+    "writer_replace_paragraphs": "Réécriture des paragraphes",
     "writer_replace_selection": "Remplacement de la sélection",
     "writer_insert_text": "Insertion de texte",
     "writer_find_replace": "Remplacements dans le document",
@@ -382,15 +383,30 @@ class _JournalObserver(RunObserver):
     def __init__(self, palette):
         self._palette = palette
         self.lines = []
+        self.acted = False    # un outil a-t-il agi pendant CE run ?
 
     def _tool_label(self, call):
         return TOOL_LABELS.get(call.name, call.name)
+
+    def _capabilities(self):
+        """Libellés des outils réellement disponibles ici, sans doublon."""
+        try:
+            specs = self._palette.registry.list_tools(self._palette.app)
+        except Exception:
+            return []
+        labels = []
+        for spec in specs:
+            label = TOOL_LABELS.get(spec.name, spec.name)
+            if label not in labels:
+                labels.append(label)
+        return labels
 
     def _render(self):
         self._palette.set_journal_text("\n".join(self.lines))
 
     def on_run_start(self, mode):
         self.lines = [f"Mode outils : {mode}"]
+        self.acted = False
         self._render()
 
     def on_tool_calls(self, calls):
@@ -401,6 +417,7 @@ class _JournalObserver(RunObserver):
     def on_tool_result(self, call, result, duration_ms):
         icon = "✓" if result.ok else "✗"
         label = self._tool_label(call)
+        self.acted = True
         for index in range(len(self.lines) - 1, -1, -1):
             if self.lines[index] == f"⏳ {label}…":
                 self.lines[index] = f"{icon} {label} ({duration_ms} ms)"
@@ -409,6 +426,24 @@ class _JournalObserver(RunObserver):
             self.lines.append(f"{icon} {label} ({duration_ms} ms)")
         if not result.ok and result.error:
             self.lines.append(f"   ↳ {result.error[:120]}")
+        self._render()
+
+    def on_final(self, text):
+        """Run terminé SANS qu'aucun outil n'ait agi : le dire explicitement.
+
+        Sans cette trace, une demande que l'assistant ne sait pas satisfaire
+        — « sauvegarde le document », alors qu'aucun outil de sauvegarde
+        n'existe — se solde par une réponse en texte et un onglet Actions vide.
+        L'utilisateur ne peut alors pas distinguer trois situations très
+        différentes : l'action a eu lieu, elle a échoué, ou la capacité
+        n'existe pas. On lève le doute, et on annonce ce qui est faisable ici.
+        """
+        if self.acted:
+            return
+        self.lines.append("ℹ Aucune action sur le document — réponse en texte seul.")
+        labels = self._capabilities()
+        if labels:
+            self.lines.append(f"   Ici, l'assistant sait : {', '.join(labels)}.")
         self._render()
 
     def on_error(self, code, message):
