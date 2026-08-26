@@ -10,6 +10,7 @@ import time
 from unittest.mock import MagicMock
 
 from tests.stubs.uno_stubs import install, make_job
+
 install()
 
 

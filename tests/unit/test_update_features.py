@@ -7,21 +7,15 @@ Run with:
 """
 import hashlib
 import json
-import sys
-import threading
 import time
-import types
-from io import BytesIO
-from unittest.mock import MagicMock, patch, call
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 # ── Stubs must be installed before importing entrypoint ──────────────
 from tests.stubs.uno_stubs import install, make_job
+
 install()
 
 from src.mirai.entrypoint import MainJob
-
 
 # ── helpers ──────────────────────────────────────────────────────────
 
@@ -139,6 +133,10 @@ def test_lo05_fetch_v2_calls_schedule_update():
     payload = _enriched_v2(features={}, update=directive)
     job._urlopen = MagicMock(return_value=_json_response(payload))
 
+    # Le rafraîchissement de configuration lancé par __init__ peut encore être
+    # en vol et appeler _fetch_config lui aussi : on ne compte QUE les appels
+    # déclenchés par ce test, sinon l'assertion dépend de la charge machine.
+    job._schedule_update.reset_mock()
     job._fetch_config(force=True)
 
     job._schedule_update.assert_called_once_with(directive)
@@ -254,7 +252,7 @@ def test_lo09_perform_update_checksum_ok_stages():
 def test_lo09b_download_fails_over_to_next_bootstrap():
     """Si la 1re base bootstrap est injoignable (DGX hors réseau : Errno 8), le
     download bascule sur la suivante au lieu d'abandonner (bug observé : figé sur
-    onyxia.gpu.minint.fr)."""
+    l'hôte GPU interne)."""
     job = make_job()
     fake_binary = b"oxt bytes for failover test"
     checksum = "sha256:" + hashlib.sha256(fake_binary).hexdigest()

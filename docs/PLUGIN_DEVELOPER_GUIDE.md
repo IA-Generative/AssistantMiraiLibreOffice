@@ -626,7 +626,7 @@ def download_and_verify(bootstrap_url, slug, expected_sha256, relay_id, relay_ke
 
 | Variable | Rôle | Exemple |
 |---|---|---|
-| `KEYCLOAK_ISSUER_URL` | URL de base Keycloak (sans `/realms/...`) | `https://onyxia.gpu.minint.fr/relay-assistant/keycloak` |
+| `KEYCLOAK_ISSUER_URL` | URL de base Keycloak (sans `/realms/...`) | `https://<HOTE_INTERNE>/relay-assistant/keycloak` |
 | `KEYCLOAK_REALM` | Nom du realm | `mirai` |
 | `KEYCLOAK_CLIENT_ID` | Client OIDC du plug-in | `mirai-libreoffice` |
 | `LLM_BASE_URL` | Endpoint OpenAI-compatible | `https://api.scaleway.ai/v1` |

@@ -22,15 +22,15 @@ Output:
 """
 
 import argparse
-import json
 import hashlib
+import json
 import random
 import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 def _make_uuid(index: int) -> str:
@@ -156,7 +156,7 @@ def main():
     parser.add_argument("--output", default=None, help="Output JSON report file path")
     args = parser.parse_args()
 
-    print(f"MIrAI Deployment Simulator")
+    print("MIrAI Deployment Simulator")
     print(f"  Devices: {args.devices}")
     print(f"  Concurrency: {args.concurrency}")
     print(f"  Bootstrap: {args.bootstrap_url}")

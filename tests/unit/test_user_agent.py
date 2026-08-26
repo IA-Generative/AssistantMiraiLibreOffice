@@ -5,18 +5,17 @@ Run with:
     .venv/bin/pytest tests/unit/test_user_agent.py -v
 """
 import unittest
-from unittest.mock import patch, MagicMock
 
 from tests.stubs.uno_stubs import install
 
 install()
 
 from src.mirai.entrypoint import (  # noqa: E402
-    build_user_agent,
-    set_user_agent,
-    get_user_agent,
-    _with_user_agent,
     PLUGIN_NAME,
+    _with_user_agent,
+    build_user_agent,
+    get_user_agent,
+    set_user_agent,
 )
 
 

@@ -27,10 +27,10 @@ import time
 import unittest
 import urllib.parse
 import urllib.request
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-from tests.stubs.uno_stubs import install, make_job
 from tests.integration.mock_http import MockHttpRouter
+from tests.stubs.uno_stubs import install, make_job
 
 install()
 
@@ -163,6 +163,13 @@ class TestFullEnrollmentFlow(unittest.TestCase):
             "config_path": "/config/libreoffice/config.json",
             # PKCE client settings (read by _authorization_code_flow from local file)
             "keycloakClientId": "libreoffice-plugin",
+            # L'URL d'AUTORISATION (celle ouverte dans le navigateur) est
+            # toujours dérivée de l'émetteur + du realm lus ICI, jamais de
+            # l'`authorization_endpoint` servi par le DM : le navigateur doit
+            # atteindre le vrai SSO, jamais le relais. Le token_endpoint, lui,
+            # reste surchargeable par le DM (appel programmatique, relayable).
+            "keycloakIssuerUrl": "http://keycloak.test",
+            "keycloakRealm": "mirai",
             "keycloak_redirect_uri": "http://localhost:19876/callback",
             "keycloak_allowed_redirect_uri": ["http://localhost:19876/callback"],
         }
@@ -201,6 +208,21 @@ class TestFullEnrollmentFlow(unittest.TestCase):
 
     def _patch_confirm(self, result=True):
         return patch.object(self.job, "_confirm_message", return_value=result)
+
+    def _patch_enrollment_wizard(self, proceed=True):
+        """Neutralise l'assistant d'enrôlement graphique.
+
+        Au PREMIER enrôlement, `_authorization_code_flow` passe par
+        `_show_enrollment_wizard` au lieu d'un simple `_confirm_message`. Hors
+        LibreOffice, le wizard échoue à construire son dialogue et retombe sur
+        `(False, None, None, None, None)` — le flux sortait donc avant même
+        d'ouvrir le navigateur, et ces tests étaient rouges depuis l'ajout du
+        wizard sans que personne ne le voie. On rend ici la décision de
+        l'utilisateur, sans la couche graphique.
+        """
+        return patch.object(
+            self.job, "_show_enrollment_wizard",
+            return_value=(proceed, None, None, None, None))
 
     def _patch_show_message(self):
         return patch.object(self.job, "_show_message", return_value=None)
@@ -250,9 +272,10 @@ class TestFullEnrollmentFlow(unittest.TestCase):
 
         with self._patch_urlopen(), \
              self._patch_confirm(True), \
+             self._patch_enrollment_wizard(True), \
              self._patch_show_message(), \
              patch("webbrowser.open", side_effect=fake_browser_open):
-            result = self.job._authorization_code_flow(DM_PUBLIC_CONFIG)
+            self.job._authorization_code_flow(DM_PUBLIC_CONFIG)
 
         self.assertIn("auth_url", captured, "webbrowser.open must have been called")
 
@@ -413,6 +436,7 @@ class TestFullEnrollmentFlow(unittest.TestCase):
 
         with self._patch_urlopen(), \
              self._patch_confirm(True), \
+             self._patch_enrollment_wizard(True), \
              self._patch_show_message(), \
              patch("webbrowser.open", side_effect=fake_browser):
             self.job._authorization_code_flow(DM_PUBLIC_CONFIG)
@@ -445,11 +469,17 @@ class TestFullEnrollmentFlow(unittest.TestCase):
         # ── Steps 7-8: Re-fetch with relay headers ──────────────────────
         self.job.config_cache = None
         self.job.config_loaded_at = 0
+        # Garde de récursion : _ensure_device_management_state a pu la laisser
+        # armée. Sans cette remise à zéro, _fetch_config sort immédiatement et
+        # l'assertion suivante porte sur une liste d'appels vide — donc verte
+        # pour de mauvaises raisons, ou rouge sans rapport avec les en-têtes.
+        self.job._fetching_config = False
 
         with self._patch_urlopen():
             self.job._fetch_config(force=True)
 
         dm_calls = self.router.calls_for("GET", "/config/libreoffice/config.json")
+        self.assertTrue(dm_calls, "Steps 7-8: le re-fetch doit réellement partir")
         has_relay = any(
             "x-relay-client" in {k.lower(): v for k, v in c["headers"].items()}
             for c in dm_calls

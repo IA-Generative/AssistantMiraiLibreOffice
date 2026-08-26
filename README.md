@@ -1,8 +1,13 @@
 # MIrAI — Assistant LibreOffice
 
+> ⚠️ **EXPÉRIMENTATION JETABLE — ne pas merger vers master.**
+> Cette branche (`exp-jetable/demonstrateur-v2`) est un **démonstrateur jetable** : réécriture du cœur du plugin autour d'un moteur interne de type MCP (outils UNO orchestrés par le LLM) et d'une fenêtre de prompt universelle proche du DSFR. La coquille (enrôlement, SSO, device management, mises à jour, télémétrie) est inchangée, **hors** la chaîne d'authentification `/llm/v1` qui a été corrigée. Toute PR issue de cette branche reste en draft.
+>
+> Deux documents décrivent l'état réel du code : [docs/QUALIFICATION-master-2026-07-26.md](docs/QUALIFICATION-master-2026-07-26.md) (ce qui n'allait pas dans la baseline) et [docs/RAPPORT-EXECUTION-2026-07-26.md](docs/RAPPORT-EXECUTION-2026-07-26.md) (ce qui a été corrigé, et ce qui ne l'a pas été).
+
 Extension LibreOffice intégrant un assistant IA directement dans Writer et Calc. Elle se connecte à un backend compatible OpenAI (OpenWebUI, Ollama, Scaleway, etc.) et inclut un mécanisme d'enrôlement via Device Management pour préconfigurer les URLs, tokens et modèles.
 
-**Origine :** cette application est une version bêta développée dans le cadre du programme MIrAI du ministère de l'Intérieur. Elle s'appuie sur le travail de **John Balis**, auteur de l'extension [localwriter](https://github.com/balisujohn/localwriter), et sur des portions de code LibreOffice (MPL 2.0 — [gerrit.libreoffice.org](https://gerrit.libreoffice.org/c/core/+/159938)). Voir `registration/license.txt` pour les attributions complètes.
+**Origine :** cette application est développée dans le cadre du programme MIrAI du ministère de l'Intérieur.
 
 **Comparaison de modèles LLM :** une évaluation des modèles Scaleway sur les scénarios Writer (extension, résumé, reformulation) a été réalisée avec des textes issus de Wikipédia. Les résultats sont disponibles dans [bench/scaleway_model_comparison.md](bench/scaleway_model_comparison.md).
 
@@ -27,19 +32,27 @@ Extension LibreOffice intégrant un assistant IA directement dans Writer et Calc
 
 ## Fonctionnalités Writer
 
-### ✏️ Modifier la sélection — `Ctrl+E`
+> **Accès unique — `Ctrl+Alt+Espace`** (macOS : `Ctrl+Opt+Espace`), ou l'entrée
+> **🤖 MIrAI — Assistant** du menu, ou le clic droit sur une sélection dans Writer.
+> Les raccourcis par fonction ont été **supprimés** : ils écrasaient des commandes
+> de LibreOffice (`Ctrl+Q` = Quitter, `Ctrl+E` = centrer, `Ctrl+R` = aligner à
+> droite, `Ctrl+L` = aligner à gauche, `Ctrl+K` = insérer un hyperlien), et l'un
+> d'eux — `Ctrl+J` — était annoncé partout sans avoir jamais existé.
+> Chaque fonction ci-dessous est une **chip** de la palette.
+
+### ✏️ Modifier la sélection
 
 Ouvre un dialogue avec des suggestions IA contextuelles. Saisir une instruction libre (traduction, reformulation, correction…) ou choisir une suggestion. Le résultat remplace la sélection. Filtrage automatique des blocs `<think>` (deepseek-r1).
 
-### 📏 Ajuster la longueur — `Ctrl+J`
+### 📏 Ajuster la longueur
 
 Mini-dialogue flottant avec boutons **−** (réduire ~35%) et **+** (développer ~40%). Remplacement en place, preview streaming, itératif.
 
-### 📝 Résumer la sélection — `Ctrl+R`
+### 📝 Résumer la sélection
 
 Résumé concis inséré après la sélection avec délimiteurs.
 
-### 💬 Reformuler la sélection — `Ctrl+L`
+### 💬 Reformuler la sélection
 
 Reformulation en langage clair, insérée après la sélection avec délimiteurs.
 
@@ -51,15 +64,15 @@ Ouvre l'URL de documentation configurée via le bootstrap (`doc_url`).
 
 ## Fonctionnalités Calc
 
-### 🔄 Transformer → colonne résultat — `Ctrl+T`
+### 🔄 Transformer → colonne résultat
 
 Applique une instruction sur une plage de cellules et écrit les résultats dans une colonne adjacente (non destructif).
 
-### 🧮 Générer une formule — `Ctrl+G`
+### 🧮 Générer une formule
 
 Génère une formule LibreOffice Calc à partir d'une description en langage naturel. Injecte automatiquement le contexte de la feuille (en-têtes, plage, valeurs). Boucle de correction si erreur.
 
-### 📊 Analyser la plage — `Ctrl+K`
+### 📊 Analyser la plage
 
 Analyse la plage sélectionnée et insère un résumé des tendances et anomalies sous la sélection.
 
@@ -369,10 +382,7 @@ sequenceDiagram
 
 ## License
 
-- Code original : licence de John Balis (voir `registration/license.txt`)
-- Portions LibreOffice : MPL 2.0
-- Adaptations ministère de l'Intérieur : voir `registration/license.txt`
+- Voir `registration/license.txt`
 
-Dépôts de référence :
-- [balisujohn/localwriter](https://github.com/balisujohn/localwriter) — projet original
+Dépôt de référence :
 - [IA-Generative/AssistantMiraiLibreOffice](https://github.com/IA-Generative/AssistantMiraiLibreOffice) — ce dépôt

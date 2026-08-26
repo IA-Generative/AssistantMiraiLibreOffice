@@ -87,14 +87,14 @@ Si l'assistant d'enrôlement ne s'affiche pas, la configuration a été fournie 
 
 Toutes les fonctionnalités Writer sont accessibles depuis le menu **🤖 MIrAI 🤖** ou par raccourci clavier. Elles agissent sur le **texte sélectionné** dans votre document.
 
-### 3.1 ✨ Générer la suite (⌘Q)
+### 3.1 ✨ Générer la suite 
 
 Génère la continuation naturelle du texte sélectionné. L'IA écrit la suite comme si elle en était l'auteur.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez un passage de texte (un début de phrase, un paragraphe…)
-> 2. Appuyez sur **⌘Q** (ou menu MIrAI → Générer la suite)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Générer la suite**
 > 3. Le texte généré apparaît directement après votre sélection, entre des marqueurs `---début-du-texte-généré---` et `---fin-du-texte-généré---`
 > 4. Relisez le résultat et supprimez les marqueurs si le texte vous convient
 >
@@ -102,14 +102,14 @@ Génère la continuation naturelle du texte sélectionné. L'IA écrit la suite 
 
 > 🔵 **Expert** — Le prompt système injecte une directive de continuation directe (pas de question, pas de reformulation). Si le modèle répond par une question malgré tout, un **retry automatique** est déclenché avec un prompt renforcé. Le budget de tokens est configurable via `extend_selection_max_tokens` (défaut : 15 000). Le prompt système additionnel peut être personnalisé via `extend_selection_system_prompt`.
 
-### 3.2 🖊️ Modifier la sélection (⌘E)
+### 3.2 🖊️ Modifier la sélection 
 
 Ouvre une boîte de dialogue pour donner une instruction libre à l'IA sur le texte sélectionné.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez le texte à modifier
-> 2. Appuyez sur **⌘E** (ou menu MIrAI → Modifier la sélection)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Modifier la sélection**
 > 3. Une fenêtre s'ouvre avec un champ de saisie
 > 4. Tapez votre instruction (ex. : "Traduis en anglais", "Rends plus formel", "Corrige les fautes")
 > 5. Cliquez sur **Envoyer**
@@ -136,21 +136,21 @@ Si la génération IA échoue, des suggestions génériques sont proposées (cor
 
 > 🔵 **Expert** — Les suggestions sont générées via un appel LLM séparé (max 600 tokens). Le prompt impose une liste numérotée de 8 instructions en français. Les blocs `<think>` et les lignes non numérotées sont filtrés pour éviter que le raisonnement du modèle n'apparaisse dans les suggestions. Le prompt système de la modification est configurable via `edit_selection_system_prompt`.
 
-### 3.3 📏 Ajuster la longueur (⌘J)
+### 3.3 📏 Ajuster la longueur 
 
 Ouvre un mini-dialogue flottant avec deux boutons **−** et **+** pour réduire ou développer le texte sélectionné.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez le paragraphe à ajuster
-> 2. Appuyez sur **⌘J** (ou menu MIrAI → Ajuster la longueur)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Ajuster la longueur**
 > 3. Un petit dialogue apparaît avec deux boutons : **−** (raccourcir) et **+** (allonger)
 > 4. Cliquez sur le bouton souhaité
 > 5. Le texte sélectionné est **remplacé** par la version ajustée
 > 6. Le label de statut indique le résultat : "OK (42 mots, -18). Ctrl+Z pour annuler."
 > 7. Si le résultat ne vous convient pas, faites **Ctrl+Z** pour revenir en arrière
 >
-> *Exemple : votre résumé fait 200 mots mais il en faut 130 ? Sélectionnez-le, ⌘J, cliquez −, et l'IA le raccourcit.*
+> *Exemple : votre résumé fait 200 mots mais il en faut 130 ? Sélectionnez-le, Ctrl+Alt+Espace, cliquez −, et l'IA le raccourcit.*
 
 #### Mini-dialogue − / +
 
@@ -169,33 +169,33 @@ Après chaque clic, re-sélectionnez le nouveau texte et cliquez à nouveau. Cha
 
 > 🔵 **Expert** — Le prompt inclut le nombre de mots de l'original et un objectif précis (ex. : "57 mots maximum" pour une réduction). Le résultat est appliqué via `rng.setString()` (remplacement en place, pas d'insertion après). Les blocs `<think>` sont filtrés avec trois passes regex (blocs complets, `</think>` en début, `<think>` non fermé en fin). La zone de prévisualisation affiche le flux brut y compris le raisonnement pour transparence, mais seul le texte nettoyé est écrit dans le document.
 
-### 3.4 📝 Résumer la sélection (⌘R)
+### 3.4 📝 Résumer la sélection 
 
 Génère un résumé concis du texte sélectionné.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez un long passage (rapport, article, notes…)
-> 2. Appuyez sur **⌘R** (ou menu MIrAI → Résumer la sélection)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Résumer la sélection**
 > 3. Le résumé apparaît après votre sélection, entre `---début-du-résumé---` et `---fin-du-résumé---`
 > 4. Votre texte original est conservé intact
 >
-> *Exemple : sélectionnez un compte-rendu de réunion de 3 pages, ⌘R, et obtenez les points clés en quelques lignes.*
+> *Exemple : sélectionnez un compte-rendu de réunion de 3 pages, Ctrl+Alt+Espace, et obtenez les points clés en quelques lignes.*
 
 > 🔵 **Expert** — Le prompt impose un résumé "ultra-concis" dans la même langue que l'original. Le budget de tokens est configurable via `summarize_selection_max_tokens`. Des stop phrases (`[END]`, `---END---`) sont détectées en streaming pour couper le flux si le modèle tente d'ajouter du contenu superflu.
 
-### 3.5 💬 Reformuler la sélection (⌘L)
+### 3.5 💬 Reformuler la sélection 
 
 Réécrit le texte sélectionné en langage clair et accessible, en conservant le sens.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez un passage complexe ou technique
-> 2. Appuyez sur **⌘L** (ou menu MIrAI → Reformuler la sélection)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Reformuler la sélection**
 > 3. La version simplifiée apparaît après votre sélection, entre `---reformulation-du-texte---` et `---fin-de-reformulation---`
 > 4. Votre texte original est conservé intact
 >
-> *Exemple : sélectionnez un article juridique, ⌘L, et obtenez une version compréhensible par tous.*
+> *Exemple : sélectionnez un article juridique, Ctrl+Alt+Espace, et obtenez une version compréhensible par tous.*
 
 > 🔵 **Expert** — Le prompt système demande des phrases courtes, des mots courants, la voix active. La détection de questions conversationnelles est active (patterns : "voulez-vous", "souhaitez-vous", "would you like"…). Si le modèle pose une question, un message d'avertissement remplace le résultat. Le budget de tokens est configurable via `simplify_selection_max_tokens`.
 
@@ -205,48 +205,48 @@ Réécrit le texte sélectionné en langage clair et accessible, en conservant l
 
 Les fonctionnalités Calc sont accessibles depuis le menu **🤖 MIrAI 🤖** dans LibreOffice Calc.
 
-### 4.1 🔄 Transformer → colonne résultat (⌘T)
+### 4.1 🔄 Transformer → colonne résultat (Ctrl+Alt+Espace)
 
 Applique une instruction IA sur une plage de cellules et écrit les résultats dans une colonne adjacente.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez une colonne de données (ex. : une liste de noms de produits)
-> 2. Appuyez sur **⌘T** (ou menu MIrAI → Transformer → colonne résultat)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Transformer → colonne résultat**
 > 3. Tapez votre instruction (ex. : "Traduire en anglais", "Classifier par catégorie")
 > 4. Les résultats apparaissent dans la **colonne libre suivante**, avec l'en-tête "Résultat IA"
 > 5. Vos données originales ne sont pas modifiées
 >
-> *Exemple : vous avez 50 descriptions de produits en français ? Sélectionnez la colonne, ⌘T, tapez "Traduire en anglais", et la traduction apparaît à côté.*
+> *Exemple : vous avez 50 descriptions de produits en français ? Sélectionnez la colonne, Ctrl+Alt+Espace, tapez "Traduire en anglais", et la traduction apparaît à côté.*
 
 > 🔵 **Expert** — L'extension détecte automatiquement la première colonne libre à droite de la sélection. L'en-tête de la colonne de résultat reprend le style de la ligne d'en-tête existante. Le traitement est séquentiel (cellule par cellule) avec le contexte de chaque ligne.
 
-### 4.2 🧮 Générer une formule (⌘G)
+### 4.2 🧮 Générer une formule (Ctrl+Alt+Espace)
 
 Crée une formule LibreOffice Calc à partir d'une description en langage naturel.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez la cellule où vous voulez la formule
-> 2. Appuyez sur **⌘G** (ou menu MIrAI → Générer une formule)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Générer une formule**
 > 3. Décrivez ce que vous voulez (ex. : "Somme des ventes si région = Nord")
 > 4. La formule est insérée directement dans la cellule
 >
-> *Exemple : placez-vous en D2, ⌘G, tapez "Moyenne de la colonne B si la colonne A contient 'Paris'", et l'IA génère la formule AVERAGEIF correspondante.*
+> *Exemple : placez-vous en D2, Ctrl+Alt+Espace, tapez "Moyenne de la colonne B si la colonne A contient 'Paris'", et l'IA génère la formule AVERAGEIF correspondante.*
 
 > 🔵 **Expert** — Le prompt injecte automatiquement le contexte de la feuille (en-têtes de colonnes, plage de données, valeurs de la ligne courante). Si une plage multi-lignes est sélectionnée, la formule est répliquée sur toutes les lignes avec ajustement des références. En cas d'erreur (`#VALEUR!`, `#REF!`…), la formule est renvoyée au modèle pour correction (conversation multi-tour).
 
-### 4.3 📊 Analyser la plage (⌘K)
+### 4.3 📊 Analyser la plage (Ctrl+Alt+Espace)
 
 Analyse une plage de cellules et produit un résumé des tendances, anomalies et points notables.
 
 > 🟢 **Novice** — Mode d'emploi :
 >
 > 1. Sélectionnez une plage de données (ex. : un tableau de chiffres de ventes)
-> 2. Appuyez sur **⌘K** (ou menu MIrAI → Analyser la plage)
+> 2. Ouvrez l'assistant (**Ctrl+Alt+Espace**, macOS **Ctrl+Opt+Espace**) puis cliquez sur **Analyser la plage**
 > 3. Le résumé apparaît dans une cellule fusionnée sous votre sélection
 >
-> *Exemple : sélectionnez un tableau trimestriel, ⌘K, et obtenez "Hausse de 12% au T3, baisse notable en juillet, valeur aberrante en cellule C7".*
+> *Exemple : sélectionnez un tableau trimestriel, Ctrl+Alt+Espace, et obtenez "Hausse de 12% au T3, baisse notable en juillet, valeur aberrante en cellule C7".*
 
 > 🔵 **Expert** — Le résultat est inséré deux lignes sous la sélection. La cellule de résultat est fusionnée sur la largeur de la sélection pour une meilleure lisibilité.
 
@@ -382,19 +382,19 @@ Un fichier `prompt.txt` placé à côté du document est détecté automatiqueme
 
 | Raccourci | Action |
 |-----------|--------|
-| ⌘Q | ✨ Générer la suite |
-| ⌘E | 🖊️ Modifier la sélection |
-| ⌘J | 📏 Ajuster la longueur |
-| ⌘R | 📝 Résumer la sélection |
-| ⌘L | 💬 Reformuler la sélection |
+| Ctrl+Alt+Espace | ✨ Générer la suite |
+| Ctrl+Alt+Espace | 🖊️ Modifier la sélection |
+| Ctrl+Alt+Espace | 📏 Ajuster la longueur |
+| Ctrl+Alt+Espace | 📝 Résumer la sélection |
+| Ctrl+Alt+Espace | 💬 Reformuler la sélection |
 
 ### Calc
 
 | Raccourci | Action |
 |-----------|--------|
-| ⌘T | 🔄 Transformer → colonne résultat |
-| ⌘G | 🧮 Générer une formule |
-| ⌘K | 📊 Analyser la plage |
+| Ctrl+Alt+Espace | 🔄 Transformer → colonne résultat |
+| Ctrl+Alt+Espace | 🧮 Générer une formule |
+| Ctrl+Alt+Espace | 📊 Analyser la plage |
 
 ### Communs
 

@@ -283,7 +283,57 @@ def _curl_headers_for_log(headers):
     return " ".join(parts)
 
 def log_to_file(message):
-    logging.info(message)
+    """Journalise sans jamais pouvoir faire échouer l'appelant.
+
+    `logging.info` peut lever (handler fermé, disque plein, fichier de log
+    verrouillé). Comme les appels à cette fonction sont disséminés au milieu de
+    chemins critiques eux-mêmes enveloppés dans des `except Exception` larges,
+    une panne de JOURNALISATION se transformait en perte silencieuse de
+    données : observé sur `_persist_bootstrap_config`, où un log levé entre
+    deux `set_config` faisait perdre `llmTokenExpiresAt` — donc un jeton LLM
+    sans date d'expiration, rejoué jusqu'au 401.
+    """
+    try:
+        logging.info(message)
+    except Exception:
+        pass
+
+
+def is_main_thread():
+    """Vrai si l'appelant est le thread principal du processus."""
+    return threading.current_thread() is threading.main_thread()
+
+
+def pump_events(toolkit):
+    """Pompe la file d'événements VCL — UNIQUEMENT depuis le thread principal.
+
+    `processEventsToIdle()` appelé depuis un thread de fond ne « ralentit » pas
+    LibreOffice : il l'ABORTE. La séquence observée est toujours la même —
+    `DispatchUserEvents` → `std::terminate()` → le gestionnaire de signal tente
+    d'ouvrir la boîte de récupération d'urgence, qui réclame le SolarMutex que
+    le thread fautif détient encore. Résultat : interblocage total, le thread
+    principal reste figé dans `SalYieldMutex::doAcquire` et l'application ne
+    répond plus à un seul clic.
+
+    Vécu le 2026-07-26 pendant l'enrôlement SSO : `stream_request` (qui pompe)
+    lancé hors du thread principal.
+
+    Hors thread principal, on ne pompe donc pas — on trace et on rend la main.
+    L'appelant n'a rien à changer : c'est un no-op sûr, jamais un abort.
+    """
+    if toolkit is None:
+        return False
+    if not is_main_thread():
+        log_to_file(
+            "[threading] processEventsToIdle ignoré : appel depuis "
+            f"{threading.current_thread().name!r} et non le thread principal"
+        )
+        return False
+    try:
+        toolkit.processEventsToIdle()
+        return True
+    except Exception:
+        return False
 
 
 def generate_trace_id():
@@ -294,6 +344,32 @@ def generate_trace_id():
 def generate_span_id():
     """Generate a random 8-byte span ID in hexadecimal format."""
     return uuid.uuid4().hex[:16]
+
+
+def otel_attributes(mapping):
+    """Convertit un dict d'attributs au format OTLP/JSON, EN CONSERVANT LES TYPES.
+
+    Tout aplatir en `stringValue` (comportement d'origine) rend la trace
+    inexploitable comme mesure : un nombre de paragraphes rendu « 45 » ne peut
+    plus être agrégé, moyenné ni seuillé côté Tempo/Grafana.
+
+    `bool` est testé AVANT `int` : en Python, `True` est un entier, et l'ordre
+    inverse enverrait `intValue: "1"` pour un drapeau.
+    Les entiers voyagent en chaîne : OTLP/JSON code les int64 ainsi, pour ne pas
+    perdre de précision au passage par un flottant JavaScript.
+    """
+    out = []
+    for key, value in (mapping or {}).items():
+        if isinstance(value, bool):
+            typed = {"boolValue": value}
+        elif isinstance(value, int):
+            typed = {"intValue": str(value)}
+        elif isinstance(value, float):
+            typed = {"doubleValue": value}
+        else:
+            typed = {"stringValue": str(value)}
+        out.append({"key": key, "value": typed})
+    return out
 
 
 def send_telemetry_trace_async(config, span_name, attributes=None):
@@ -361,13 +437,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
         if attributes:
             span_attributes.update(attributes)
         
-        # Convert attributes to OpenTelemetry format
-        otel_attributes = []
-        for key, value in span_attributes.items():
-            otel_attributes.append({
-                "key": key,
-                "value": {"stringValue": str(value)}
-            })
+        encoded_attributes = otel_attributes(span_attributes)
         
         # Build OpenTelemetry JSON payload
         payload = {
@@ -394,7 +464,7 @@ def _send_telemetry_trace_impl(config, span_name, attributes=None):
                                     "kind": 1,  # SPAN_KIND_INTERNAL
                                     "startTimeUnixNano": str(timestamp_ns),
                                     "endTimeUnixNano": str(timestamp_ns + 1000000),  # Add 1ms duration
-                                    "attributes": otel_attributes,
+                                    "attributes": encoded_attributes,
                                     "status": {"code": 1}  # STATUS_CODE_OK
                                 }
                             ]
@@ -525,6 +595,14 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._auth_prompt_lock = threading.Lock()
         self._auth_prompt_in_progress = False
         self._auth_prompted_at = 0
+        # Récupération d'auth LLM : ré-enrôlement de fond (creds relay manquants
+        # ou révoqués) et reprise après un 401 du proxy DM. Les deux sont
+        # backoffées — un DM volontairement sans relais ne doit pas être matraqué.
+        self._relay_recovery_lock = threading.Lock()
+        self._relay_recovery_in_progress = False
+        self._relay_recovery_last_at = 0
+        self._llm_auth_recovery_lock = threading.Lock()
+        self._llm_auth_recovery_last_at = 0
         self._config_write_lock = threading.Lock()
         self._edit_dialog = None
         self._resize_dialog = None
@@ -849,6 +927,30 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         "EnrollSuccess": "enroll.ok",
         "EnrollFailed": "enroll.fail",
         "BootstrapConfig": "bootstrap",
+        "LlmRelayError": "llm.error",
+        "ConfigWaitAtTrigger": "config.wait",
+        "ActionUnhandled": "dispatch.unhandled",
+    }
+
+    # Une action non gérée signalée une fois par nom et par session : un
+    # utilisateur qui reclique sur une entrée de menu morte ne doit pas
+    # produire une rafale de traces.
+    _unhandled_reported_cls = set()
+
+    # Spans émis AVANT que le poste ne soit lié à un utilisateur. Les autres
+    # sont jetés tant que l'identité télémétrie n'est pas "user" — ceux-ci
+    # décrivent le poste, pas la personne, et sont justement ceux dont on a
+    # besoin quand rien ne fonctionne encore.
+    _TECHNICAL_EVENTS = {
+        "ExtensionLoaded",
+        "OpenSettings",
+        "OpenmiraiWebsite",
+        "OpenWebsite",
+        "ReloadConfig",
+        "ProxyCheck",
+        "ProxyTest",
+        "ConfigWaitAtTrigger",
+        "ActionUnhandled",
     }
 
     def _send_telemetry(self, span_name, attributes=None):
@@ -856,6 +958,120 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         attrs.setdefault("plugin.action", self._ACTION_NAMES.get(span_name, span_name))
         attrs.setdefault("trigger.source", getattr(self, "_trigger_source", "auto"))
         send_telemetry_trace_async(self, span_name, attrs)
+
+    # Anti-tempête : au plus un événement LlmRelayError par code d'erreur et par
+    # fenêtre de 60 s — un utilisateur au quota qui insiste ne doit pas générer
+    # une rafale de télémétrie (contrat DM, protocole § 8 bis).
+    _LLM_ERROR_DEDUP_SECONDS = 60
+
+    @staticmethod
+    def _parse_llm_error(status_code, body, headers=None):
+        """Extrait (error_code, retry_after) d'une réponse d'erreur du relais LLM.
+
+        Corps attendu (proxy DM /llm/v1) : {"error": {"code", "type", ...}} avec,
+        pour le 429, "retry_after" (secondes) — sinon repli sur l'en-tête
+        Retry-After, puis sur un code générique http_<statut>.
+        """
+        error_code = ""
+        retry_after = None
+        try:
+            data = json.loads(body) if body else {}
+            if isinstance(data, dict):
+                err = data.get("error")
+                if isinstance(err, dict):
+                    error_code = str(err.get("code") or err.get("type") or "").strip()
+                retry_after = data.get("retry_after")
+        except Exception:
+            pass
+        if retry_after is None and headers is not None:
+            try:
+                retry_after = headers.get("Retry-After")
+            except Exception:
+                retry_after = None
+        if not error_code:
+            error_code = f"http_{int(status_code or 0)}"
+        return error_code, retry_after
+
+    def _send_llm_relay_error(self, status_code, error_code, retry_after=None,
+                              request_id="", endpoint="chat/completions",
+                              will_retry=False):
+        """Journalisation fonctionnelle des erreurs du relais LLM (429/401/403/5xx).
+
+        Vue « parc côté client » complémentaire de l'audit serveur du proxy —
+        `llm.request_id` (recopie de X-Request-Id) est la clé de corrélation de
+        bout en bout. Jamais de contenu de prompt ni de réponse. Contrat :
+        device-management, docs/plugin-developer/…-update-features.md § 8 bis.
+        """
+        try:
+            now = time.time()
+            if not hasattr(self, "_llm_error_last_sent"):
+                self._llm_error_last_sent = {}
+            key = str(error_code or "unknown")
+            if now - self._llm_error_last_sent.get(key, 0) < self._LLM_ERROR_DEDUP_SECONDS:
+                return
+            self._llm_error_last_sent[key] = now
+            attrs = {
+                "llm.status_code": int(status_code or 0),
+                "llm.error_code": key,
+                "llm.endpoint": str(endpoint or "chat/completions"),
+                "llm.model": str(self.get_config("llm_default_models", "") or ""),
+                "llm.will_retry": bool(will_retry),
+            }
+            if retry_after is not None:
+                try:
+                    attrs["llm.retry_after_s"] = int(retry_after)
+                except (TypeError, ValueError):
+                    pass
+            if request_id:
+                attrs["llm.request_id"] = str(request_id)[:64]
+            self._send_telemetry("LlmRelayError", attrs)
+        except Exception as e:
+            log_to_file(f"Failed to send LlmRelayError telemetry: {str(e)}")
+
+    def _wait_for_config(self, action):
+        """Attend une configuration en vol, et DIT combien de temps ça a duré.
+
+        Au démarrage à froid, un déclenchement peut rester bloqué jusqu'à 15 s
+        sur un fetch réseau : l'utilisateur voit une extension qui « ne fait
+        rien ». Cette attente n'était mesurée nulle part — impossible de dire
+        si elle touche tout le parc ou trois postes au réseau lent. Retourne
+        la durée d'attente en millisecondes (0 = aucune attente).
+        """
+        if not (self._fetching_config and not self.config_cache):
+            return 0
+        log_to_file(f"trigger: waiting for config fetch to complete before {action}")
+        started = time.time()
+        while self._fetching_config and time.time() - started < 15:
+            time.sleep(0.3)
+        waited_ms = int((time.time() - started) * 1000)
+        available = bool(self.config_cache)
+        log_to_file("trigger: config now available" if available
+                    else "trigger: config still unavailable after wait")
+        self._send_telemetry("ConfigWaitAtTrigger", {
+            "config.wait_ms": waited_ms,
+            "config.available": available,
+            "action": str(action),
+        })
+        return waited_ms
+
+    def _report_unhandled_action(self, action, model):
+        """Une action déclarée mais non implémentée : le dire au parc.
+
+        Le clic sans effet laissait un message à l'écran et une ligne dans le
+        journal local — invisible pour le support. Une entrée de menu morte
+        après une mise à jour ne se voyait donc que si un utilisateur pensait
+        à la signaler.
+        """
+        try:
+            if action in MainJob._unhandled_reported_cls:
+                return
+            MainJob._unhandled_reported_cls.add(action)
+            self._send_telemetry("ActionUnhandled", {
+                "action": str(action),
+                "document": type(model).__name__,
+            })
+        except Exception as exc:
+            log_to_file(f"Failed to send ActionUnhandled telemetry: {str(exc)}")
 
     def _get_user_config_dir(self):
         path_settings = self.sm.createInstanceWithContext('com.sun.star.util.PathSettings', self.ctx)
@@ -977,18 +1193,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             access_token = str(self._get_config_from_file("access_token", "") or "").strip()
             has_valid_login = bool(access_token) and (not self._token_is_expired(access_token))
             if current_kind != "user":
-                technical_events = {
-                    "ExtensionLoaded",
-                    "OpenSettings",
-                    "OpenmiraiWebsite",
-                    "OpenWebsite",
-                    "ReloadConfig",
-                    "ProxyCheck",
-                    "ProxyTest",
-                }
                 if not has_valid_login:
                     return True
-                if _span_name and _span_name not in technical_events:
+                if _span_name and _span_name not in self._TECHNICAL_EVENTS:
                     return True
             handled = bool(flow.send_trace(payload))
             if flow.rebind_required():
@@ -1384,6 +1591,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             pass
                         self._persist_bootstrap_config(config_data)
                         self._persist_config_cache(config_data)
+                        # Le DM signale ici une auth relais manquante/refusée.
+                        # Réagir tout de suite évite de découvrir le problème
+                        # seulement au premier 401 sur /llm/v1.
+                        try:
+                            self._check_relay_auth_notice(config_data)
+                        except Exception as exc:
+                            log_to_file(f"[ENROLL] auth notice check failed: {str(exc)}")
                         return config_data
                     last_error = f"Invalid JSON root type: {type(config_data).__name__}"
                     log_to_file(f"Failed to fetch device management config ({mode}): {last_error}")
@@ -1420,7 +1634,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             if not isinstance(inner, dict):
                 return
             keys_to_sync = [
-                "llm_base_urls", "llm_api_tokens",
+                "llm_base_urls", "llm_api_tokens", "llmTokenExpiresAt",
                 "llm_default_models", "systemPrompt",
                 "telemetryEndpoint", "telemetryKey",
                 "telemetryAuthorizationType", "telemetrySel",
@@ -1435,18 +1649,31 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             ]
             # Keys that are only written locally if the user has no local value yet
             user_preference_keys = {"llm_default_models"}
+            # Clés dont la valeur VIDE est significative : le DM nous dit « ce
+            # credential n'est plus valable ». L'ignorer laisse un llmToken
+            # périmé ou révoqué sur disque, rejoué indéfiniment en 401.
+            clearable_keys = {"llm_api_tokens", "llmTokenExpiresAt"}
             for key in keys_to_sync:
-                if key in inner:
-                    val = inner[key]
-                    current = self._get_config_from_file(key, None)
-                    if key in user_preference_keys:
-                        # Only set from DM if user has no local preference
-                        if not current and val:
-                            self.set_config(key, val)
-                    elif val != current and val != "":
+                if key not in inner:
+                    continue
+                val = inner[key]
+                current = self._get_config_from_file(key, None)
+                if key in user_preference_keys:
+                    # Only set from DM if user has no local preference
+                    if not current and val:
                         self.set_config(key, val)
-                        if key == "llm_api_tokens":
-                            log_to_file(f"[persist] llm_api_tokens synced from DM ({len(str(val))} chars)")
+                    continue
+                if val == current:
+                    continue
+                if val == "" and key not in clearable_keys:
+                    continue
+                self.set_config(key, val)
+                if key == "llm_api_tokens":
+                    log_to_file(
+                        f"[persist] llm_api_tokens synced from DM ({len(str(val))} chars)"
+                        if val else
+                        "[persist] llm_api_tokens vidé par le DM (aucun llmToken minté)"
+                    )
             log_to_file("Bootstrap config persisted to local file")
         except Exception as e:
             log_to_file(f"Failed to persist bootstrap config: {str(e)}")
@@ -2381,11 +2608,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             return self._get_config_from_file("llm_base_urls", default, telemetry_defaults=telemetry_defaults)
 
         if key == "llm_api_tokens":
-            config_value = self._get_setting("llm_api_tokens")
-            if config_value is not None:
-                if len(str(config_value)) >= 6:
-                    return config_value
-            return self._get_config_from_file("llm_api_tokens", default, telemetry_defaults=telemetry_defaults)
+            return self._resolve_llm_token(default, telemetry_defaults=telemetry_defaults)
 
         if key == "llm_default_models":
             local_model = str(self._get_config_from_file("llm_default_models", "", telemetry_defaults=telemetry_defaults)).strip()
@@ -2456,11 +2679,26 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             if key == "llm_default_models":
                 log_to_file(f"Model saved (local): {value}")
 
+            # Écriture ATOMIQUE : fichier temporaire puis remplacement.
+            # Écrire en place expose tout lecteur concurrent — un autre thread
+            # du plugin, une seconde instance de LibreOffice — à un JSON
+            # tronqué. Le lecteur repart alors sur les valeurs par défaut et
+            # PERD les credentials : c'est une façon d'entrer dans l'état
+            # absorbant (enrôlé sans paire relais) sans que personne ne l'ait
+            # demandé. os.replace est atomique sur POSIX comme sur Windows.
+            temporary_path = f"{config_file_path}.tmp"
             try:
-                with open(config_file_path, 'w', encoding='utf-8') as file:
+                with open(temporary_path, 'w', encoding='utf-8') as file:
                     json.dump(config_data, file, indent=4, ensure_ascii=False)
-            except IOError as e:
+                    file.flush()
+                    os.fsync(file.fileno())
+                os.replace(temporary_path, config_file_path)
+            except OSError as e:
                 log_to_file(f"Error writing to {config_file_path}: {e}")
+                try:
+                    os.remove(temporary_path)
+                except OSError:
+                    pass
 
     def _jwt_payload(self, token):
         try:
@@ -2574,10 +2812,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             self._thinking_container = dlg
             self._thinking_dots_count = 0
 
-            try:
-                toolkit.processEventsToIdle()
-            except Exception:
-                pass
+            pump_events(toolkit)
         except Exception:
             pass
 
@@ -2856,7 +3091,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     fill_w = (WIDTH - MARGIN * 2) * (step_idx + 1) // TOTAL_STEPS
                     dialog.getControl("wiz_bar_fill").setPosSize(
                         MARGIN, 0, fill_w, 4, SIZE)
-                    toolkit.processEventsToIdle()
+                    pump_events(toolkit)
                 except Exception as e:
                     log_to_file(f"Wizard update step error: {str(e)}")
 
@@ -2895,7 +3130,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                                 (WIDTH - BTN_W) // 2, btn_y, BTN_W, BTN_H, POSSIZE)
                     except Exception:
                         pass
-                    toolkit.processEventsToIdle()
+                    pump_events(toolkit)
                 except Exception as e:
                     log_to_file(f"Wizard custom step error: {str(e)}")
 
@@ -3537,7 +3772,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         f"En attente de la connexion{dots}\n\n"
                         "Connectez-vous dans le navigateur puis revenez."
                     )
-                    wiz_toolkit.processEventsToIdle()
+                    pump_events(wiz_toolkit)
                 except Exception:
                     pass
 
@@ -3601,7 +3836,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         wait_label.getModel().Label = "Annulation..."
                     else:
                         wait_label.getModel().Label = f"Authentification Keycloak{dots}"
-                    wait_toolkit.processEventsToIdle()
+                    pump_events(wait_toolkit)
                 except Exception:
                     pass
 
@@ -3642,10 +3877,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             wiz_state["cancelled"] = False
             step_snap = wiz_state["step"]
             while wiz_state["step"] == step_snap:
-                try:
-                    wiz_toolkit.processEventsToIdle()
-                except Exception:
-                    pass
+                pump_events(wiz_toolkit)
                 time.sleep(0.1)
             _wiz_dispose()
 
@@ -3725,7 +3957,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             wiz_dialog.getControl("wiz_text").getModel().Label = (
                                 f"Enregistrement en cours{dots}"
                             )
-                            wiz_toolkit.processEventsToIdle()
+                            pump_events(wiz_toolkit)
                         except Exception:
                             pass
                         time.sleep(0.4)
@@ -3769,10 +4001,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         )
 
                     while wiz_state["step"] == step_snap:
-                        try:
-                            wiz_toolkit.processEventsToIdle()
-                        except Exception:
-                            pass
+                        pump_events(wiz_toolkit)
                         time.sleep(0.1)
 
                     _wiz_dispose()
@@ -3850,11 +4079,14 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _ensure_device_management_state_with_dialog(self):
-        """Enrollment feedback is now handled inside the wizard — delegates to async."""
-        self._ensure_device_management_state_async()
 
-    def _ensure_device_management_state(self):
+    def _ensure_device_management_state(self, force_enroll=False):
+        """Synchronise l'état DM et enrôle le poste si nécessaire.
+
+        `force_enroll` outrepasse le court-circuit « déjà enrôlé » : utilisé par
+        la récupération d'auth, quand le DM nous a explicitement signalé que nos
+        creds relay sont absents ou refusés.
+        """
         if not self._device_management_enabled():
             return
         config_data = self._fetch_config()
@@ -3919,8 +4151,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         if not enroll_endpoint:
             return
 
-        if self._as_bool(self._get_config_from_file("enrolled", False)):
+        # Court-circuit sur les CREDS RELAY, pas sur le drapeau `enrolled`.
+        # `enrolled=True` ne prouve que « /enroll a répondu 200 » : un poste
+        # marqué enrôlé mais sans creds relay est dans un état absorbant — le DM
+        # ne minte alors jamais de llmToken et tout /llm/v1 tombe en 401, sans
+        # aucun chemin de sortie. On re-tente donc l'enrôlement (POST /enroll est
+        # idempotent côté DM : il ré-émet une paire).
+        if self._relay_credentials_valid() and not force_enroll:
             return
+        if self._as_bool(self._get_config_from_file("enrolled", False)):
+            log_to_file(
+                "[ENROLL] enrolled=True mais creds relay absents/expirés"
+                f"{' (ré-enrôlement forcé)' if force_enroll else ''} — nouvel enrôlement"
+            )
 
         inner = config_data.get("config", {}) if isinstance(config_data, dict) else {}
         device_name = (
@@ -3982,8 +4225,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     self._fetch_config(force=True)
                 except Exception as _e:
                     log_to_file(f"Post-enroll config refresh failed: {_e}")
+                token_after = str(self.get_config("llm_api_tokens", "") or "").strip()
+                log_to_file(
+                    f"[ENROLL] post-enroll llmToken={'obtenu' if token_after else 'TOUJOURS ABSENT'}"
+                )
             else:
-                log_to_file("Device management enroll succeeded without relay credentials")
+                # Enrôlement « à moitié » : accepté par le DM mais sans creds
+                # relay. On le trace explicitement — c'est cet état, marqué
+                # `enrolled` sans creds, qui bloquait le poste indéfiniment.
+                log_to_file(
+                    "Device management enroll succeeded WITHOUT relay credentials — "
+                    "le DM ne pourra minter aucun llmToken (relais désactivé côté "
+                    "serveur ?) ; l'enrôlement sera re-tenté"
+                )
             self.set_config("enrolled", True)
         except Exception as e:
             error_body = ""
@@ -4011,7 +4265,222 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         token = str(preferred_token or "").strip()
         if token:
             return token
+        if self._llm_proxy_mode():
+            # Le proxy DM /llm/v1 n'accepte QUE le llmToken HMAC qu'il a minté
+            # (app/llm/tokens.py : format payload_b64.sig_b64). Un access_token
+            # Keycloak est un JWT à 3 segments : la vérification de signature
+            # échoue et le 401 renvoyé accuse le token au lieu de l'enrôlement.
+            # On refuse donc ce repli, qui ne peut structurellement pas marcher.
+            log_to_file(
+                "[llm-auth] aucun llmToken et proxy DM actif — repli sur "
+                "l'access_token Keycloak refusé (format incompatible)"
+            )
+            return ""
         return str(self._get_openwebui_access_token() or "").strip()
+
+    # ── Credentials du proxy LLM (llmToken / relay) ─────────────────────
+
+    @staticmethod
+    def _token_expired_at(raw_expires_at, skew_seconds=60):
+        """True si l'horodatage d'expiration (epoch) est atteint.
+
+        Absent ou <= 0 = expiration inconnue → False : on ne périme jamais un
+        credential sur une absence d'information, c'est le serveur qui tranche.
+        """
+        try:
+            expires_at = int(raw_expires_at or 0)
+        except (TypeError, ValueError):
+            return False
+        if expires_at <= 0:
+            return False
+        return time.time() >= (expires_at - skew_seconds)
+
+    def _llm_proxy_mode(self):
+        """True quand le DM annonce SON proxy /llm/v1 comme endpoint LLM.
+
+        Deux signaux, du plus fiable au plus robuste : la clé `llmToken` que le
+        DM ne pose que dans ce mode (app/main.py _apply_llm_proxy_overrides), et
+        à défaut la forme de l'endpoint (<bootstrap>/llm/v1) quand le cache DM
+        est froid.
+        """
+        settings = self._select_settings(self.config_cache)
+        if isinstance(settings, dict) and "llmToken" in settings:
+            return True
+        endpoint = str(self._get_config_from_file("llm_base_urls", "") or "").strip().rstrip("/")
+        if not endpoint.endswith("/llm/v1"):
+            return False
+        bootstrap = str(self._active_bootstrap_url() or "").strip().rstrip("/")
+        return bool(bootstrap) and endpoint.startswith(bootstrap)
+
+    def _relay_credentials_valid(self, skew_seconds=300):
+        """True si le poste a des credentials relay exploitables.
+
+        C'est LA source de vérité de l'enrôlement effectif : le drapeau
+        `enrolled` ne dit que « un POST /enroll a répondu 200 ». Sans ces creds,
+        /config repart sans X-Relay-*, le DM ne mint aucun llmToken, et tous les
+        appels /llm/v1 finissent en 401.
+        """
+        client_id = str(self._get_config_from_file("relay_client_id", "") or "").strip()
+        client_key = str(self._get_config_from_file("relay_client_key", "") or "").strip()
+        if not client_id or not client_key:
+            return False
+        return not self._token_expired_at(
+            self._get_config_from_file("relay_key_expires_at", 0), skew_seconds
+        )
+
+    def _resolve_llm_token(self, default, telemetry_defaults=None):
+        """Résout le llmToken en gardant token et expiration SOLIDAIRES.
+
+        Le llmToken est court (TTL DM 3600 s par défaut) alors que le cache de
+        config vit 300 s : le servir sans vérifier son expiration produit un 401
+        `invalid_api_key` que rien ne rattrape. Token et `llmTokenExpiresAt`
+        sont donc lus depuis la même source, cache DM d'abord puis disque.
+        """
+        cached = self._get_setting("llm_api_tokens")
+        settings = self._select_settings(self.config_cache) or {}
+        if cached is not None and len(str(cached)) >= 6:
+            if not self._token_expired_at(settings.get("llmTokenExpiresAt")):
+                return cached
+            log_to_file("[llm-auth] llmToken du cache DM expiré — refresh forcé")
+            self._schedule_config_refresh(force=True, reason="llm_token_expired")
+
+        stored = self._get_config_from_file(
+            "llm_api_tokens", default, telemetry_defaults=telemetry_defaults)
+        if stored and self._token_expired_at(
+                self._get_config_from_file("llmTokenExpiresAt", 0)):
+            log_to_file("[llm-auth] llmToken persisté expiré — ignoré, refresh forcé")
+            self._schedule_config_refresh(force=True, reason="llm_token_expired")
+            return default
+        return stored
+
+    def _llm_auth_debug(self):
+        """Une ligne sans ambiguïté sur le credential retenu pour l'appel LLM.
+
+        Distingue les trois cas que les logs confondaient : jeton présent,
+        aucun jeton faute d'enrôlement relais, et mode direct hors proxy DM.
+        """
+        proxy = self._llm_proxy_mode()
+        relay = "yes" if self._relay_credentials_valid() else "no"
+        token = str(self.get_config("llm_api_tokens", "") or "").strip()
+        if not token:
+            vector = "none"
+            detail = ""
+        elif proxy:
+            vector = "llmToken"
+            expires_at = self._get_config_from_file("llmTokenExpiresAt", 0)
+            try:
+                remaining = int(expires_at or 0) - int(time.time())
+            except (TypeError, ValueError):
+                remaining = 0
+            detail = f" expires_in={remaining}s" if remaining else ""
+        else:
+            vector = "api_key"
+            detail = ""
+        return (f"vector={vector}{detail} proxy_mode={proxy} relay_creds={relay} "
+                f"enrolled={self._as_bool(self._get_config_from_file('enrolled', False))}")
+
+    def _check_relay_auth_notice(self, config_data):
+        """Réagit au signal d'auth manquante que le DM place dans /config.
+
+        Le DM répond `_auth_notice` (+ `llmToken:""`) quand la requête /config
+        n'a pas présenté de paire X-Relay-Client/Key valide. C'est le diagnostic
+        le plus fiable dont dispose le plugin : sans creds relay, aucun llmToken
+        ne sera jamais minté et TOUS les appels /llm/v1 finiront en 401. Ignorer
+        ce signal, c'est rester bloqué indéfiniment.
+        """
+        if not self._device_management_enabled():
+            return False
+        inner = config_data.get("config", {}) if isinstance(config_data, dict) else {}
+        if not isinstance(inner, dict):
+            return False
+        notice = str(inner.get("_auth_notice", "") or "").strip()
+        proxy_mode = "llmToken" in inner
+        minted = str(inner.get("llmToken", "") or "").strip()
+        if not notice and not (proxy_mode and not minted):
+            return False
+        if self._relay_credentials_valid():
+            # Deux causes possibles, indiscernables côté client : creds révoqués
+            # côté serveur, ou DM_LLM_TOKEN_SIGNING_KEY absente côté DM (le mint
+            # rend alors "" sans erreur). Le ré-enrôlement traite la première ;
+            # la seconde se voit dans les logs DM.
+            log_to_file(
+                "[ENROLL] le DM n'a minté aucun llmToken malgré des creds relay "
+                "valides — creds révoqués, ou clé de signature absente côté DM ; "
+                "ré-enrôlement"
+            )
+        else:
+            log_to_file(
+                "[ENROLL] aucun llmToken minté et aucun cred relay valide — "
+                "ré-enrôlement planifié"
+            )
+        return self._schedule_relay_recovery()
+
+    def _schedule_relay_recovery(self, min_interval_seconds=900):
+        """Relance un enrôlement en tâche de fond pour récupérer des creds relay.
+
+        Jamais sur le thread appelant (/config tourne déjà dans un worker, et le
+        POST /enroll est bloquant). Backoff long : un DM délibérément sans relais
+        renverra toujours le même signal, on ne le matraque pas.
+        """
+        now = time.time()
+        with self._relay_recovery_lock:
+            if self._relay_recovery_in_progress:
+                return False
+            if now - self._relay_recovery_last_at < min_interval_seconds:
+                log_to_file("[ENROLL] relay recovery ignorée (backoff)")
+                return False
+            self._relay_recovery_in_progress = True
+            self._relay_recovery_last_at = now
+
+        def _worker():
+            try:
+                self._ensure_device_management_state(force_enroll=True)
+            except Exception as exc:
+                log_to_file(f"[ENROLL] relay recovery échouée: {str(exc)}")
+            finally:
+                self._relay_recovery_in_progress = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+        return True
+
+    def _recover_llm_auth(self, min_interval_seconds=30):
+        """Restaure un credential LLM exploitable après un 401 du proxy DM.
+
+        APPELÉ DEPUIS LE THREAD RÉSEAU du pump SSE, jamais depuis le thread
+        principal : les deux étapes font du réseau bloquant et gèleraient
+        LibreOffice (cf. core/sse_pump.py).
+
+        1. /config forcé — suffit quand les creds relay sont bons : le DM mint un
+           llmToken frais à chaque réponse /config authentifiée.
+        2. ré-enrôlement synchrone — nécessaire quand les creds relay manquent ou
+           ont été révoqués, sans quoi l'étape 1 ne rendra jamais de token.
+        """
+        now = time.time()
+        with self._llm_auth_recovery_lock:
+            if now - self._llm_auth_recovery_last_at < min_interval_seconds:
+                log_to_file("[llm-auth] recovery ignorée (backoff)")
+                return bool(str(self.get_config("llm_api_tokens", "") or "").strip())
+            self._llm_auth_recovery_last_at = now
+
+        try:
+            self._fetch_config(force=True)
+        except Exception as exc:
+            log_to_file(f"[llm-auth] recovery: refresh /config échoué: {str(exc)}")
+        if str(self.get_config("llm_api_tokens", "") or "").strip():
+            log_to_file("[llm-auth] recovery: llmToken renouvelé via /config")
+            return True
+
+        if not self._relay_credentials_valid():
+            log_to_file("[llm-auth] recovery: creds relay absents/expirés — ré-enrôlement")
+            try:
+                self._ensure_device_management_state(force_enroll=True)
+            except Exception as exc:
+                log_to_file(f"[llm-auth] recovery: ré-enrôlement échoué: {str(exc)}")
+                return False
+
+        ok = bool(str(self.get_config("llm_api_tokens", "") or "").strip())
+        log_to_file(f"[llm-auth] recovery {'réussie' if ok else 'échouée'} — {self._llm_auth_debug()}")
+        return ok
 
     def _auth_header(self):
         name = str(self.get_config("authHeaderName", "Authorization")).strip() or "Authorization"
@@ -4026,6 +4495,10 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         if not relay_client_id or not relay_client_key:
             log_to_file(f"[RELAY] no relay creds: id={'yes' if relay_client_id else 'no'} key={'yes' if relay_client_key else 'no'}")
             return {}
+        if self._token_expired_at(self._get_config_from_file("relay_key_expires_at", 0)):
+            # On envoie quand même : le serveur reste l'autorité sur la validité.
+            # La trace sert à distinguer « creds absents » de « creds périmés ».
+            log_to_file("[RELAY] relay creds expirés d'après relay_key_expires_at")
         log_to_file(f"[RELAY] injecting relay headers: id={relay_client_id[:12]}...")
         return {
             "X-Relay-Client": relay_client_id,
@@ -4121,6 +4594,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     def _urlopen(self, request, context=None, timeout=None, use_proxy=True):
         try:
             req_url = str(getattr(request, "full_url", "") or "")
+            # NE PAS étendre cette règle à /llm/v1 : le trafic LLM s'authentifie
+            # avec le llmToken SEUL (scopé "llm", TTL 1 h). Décision du
+            # 2026-07-25, surface d'attaque : la paire relay est le credential
+            # maître (config + télémétrie + LLM) et vit 30 jours. De plus, côté
+            # DM, la présence de X-Relay-Client engage la branche relais qui
+            # échoue en 401 SANS repli vers le Bearer — les en-têtes masqueraient
+            # donc un llmToken valide. Voir prompts/fix-llm-token-auth.md.
             if "/relay-assistant/" in req_url:
                 for header_name, header_value in self._relay_headers().items():
                     try:
@@ -4213,30 +4693,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             log_to_file(f"Failed to read LibreOffice proxy settings: {str(e)}")
         return settings
 
-    def _proxy_mismatch(self):
-        cfg = self._get_proxy_config()
-        lo = self._lo_proxy_settings()
-        mismatches = []
-        if cfg["enabled"] != lo["enabled"]:
-            mismatches.append("enabled")
-        cfg_host = ""
-        cfg_port = ""
-        if cfg["proxy_url"]:
-            normalized = self._normalize_proxy_url(cfg["proxy_url"])
-            try:
-                parsed = urllib.parse.urlparse(normalized)
-                cfg_host = parsed.hostname or ""
-                cfg_port = str(parsed.port) if parsed.port else ""
-            except Exception:
-                pass
-        if cfg["enabled"] and lo["enabled"]:
-            if cfg_host and lo["host"] and cfg_host != lo["host"]:
-                mismatches.append("host")
-            if cfg_port and lo["port"] and cfg_port != lo["port"]:
-                mismatches.append("port")
-            if cfg["username"] and lo["username"] and cfg["username"] != lo["username"]:
-                mismatches.append("username")
-        return mismatches, cfg, lo
 
     def _schedule_enrollment_check(self):
         """Deferred enrollment check — fires ~3s after init to let UI start."""
@@ -4892,25 +5348,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         self._models_cache_loaded_at = now
         return models
 
-    def _api_reachable(self, endpoint, headers, is_openwebui, path):
-        endpoint = (endpoint or "").rstrip("/")
-        if path.startswith("http://") or path.startswith("https://"):
-            url = path
-        else:
-            if path.startswith("/"):
-                url = endpoint + path
-            else:
-                url = endpoint + "/" + path
-        try:
-            request = urllib.request.Request(url, headers=_with_user_agent(headers))
-            with self._urlopen(request, context=self.get_ssl_context(), timeout=5) as response:
-                if response.status < 200 or response.status >= 300:
-                    return False
-                payload = response.read().decode("utf-8")
-            json.loads(payload)
-            return True
-        except Exception:
-            return False
 
     def _api_probe(self, endpoint, headers, path):
         endpoint = (endpoint or "").rstrip("/")
@@ -4985,72 +5422,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
         return anon_ok, auth_ok
 
-    def _choose_model_via_ai(self, description, endpoint, api_key, is_openwebui):
-        api_key = self._effective_api_token(api_key)
-        models = self._fetch_models_list(endpoint, api_key, is_openwebui)
-        if not models:
-            return None
-
-        current_model = str(self.get_config("llm_default_models", "")).strip()
-        model_for_request = current_model or models[0]
-        endpoint, api_path = self._split_endpoint_api_path(endpoint, is_openwebui)
-        if api_path:
-            url = endpoint + api_path + "/chat/completions"
-        else:
-            url = endpoint + "/chat/completions"
-
-        headers = {"Content-Type": "application/json"}
-        if is_openwebui:
-            header_name, header_prefix = self._auth_header()
-            if api_key:
-                headers[header_name] = f"{header_prefix}{api_key}"
-        elif api_key:
-            header_name, header_prefix = self._auth_header()
-            headers[header_name] = f"{header_prefix}{api_key}"
-
-        system_prompt = (
-            "Select the best model id from the provided list. "
-            "Return exactly one model id from the list and nothing else."
-        )
-        user_prompt = f"Use case: {description}\n\nModel list:\n" + "\n".join(models)
-        data = {
-            "model": model_for_request,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "max_tokens": 32,
-            "temperature": 0,
-            "stream": False
-        }
-
-        try:
-            json_data = json.dumps(data).encode("utf-8")
-            request = urllib.request.Request(url, data=json_data, headers=_with_user_agent(headers))
-            request.get_method = lambda: 'POST'
-            with self._urlopen(request, context=self.get_ssl_context(), timeout=20) as response:
-                payload = response.read().decode("utf-8")
-            response_data = json.loads(payload)
-            choice = None
-            if isinstance(response_data, dict) and response_data.get("choices"):
-                first = response_data["choices"][0]
-                if isinstance(first, dict):
-                    message = first.get("message", {})
-                    if isinstance(message, dict):
-                        choice = message.get("content")
-                    if not choice:
-                        choice = first.get("text")
-            if choice:
-                candidate = choice.strip()
-                if candidate in models:
-                    return candidate
-                for model_id in models:
-                    if candidate.lower() in model_id.lower():
-                        return model_id
-        except Exception as e:
-            log_to_file(f"Model AI search failed: {str(e)}")
-
-        return models[0] if models else None
 
 
     def make_api_request(self, prompt, system_prompt="", max_tokens=15000, api_type=None):
@@ -5106,6 +5477,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         header_name, header_prefix = self._auth_header()
         if api_key:
             headers[header_name] = f'{header_prefix}{api_key}'
+        log_to_file(f"[llm-auth] {self._llm_auth_debug()}")
 
         url = endpoint + api_path + "/chat/completions"
         log_to_file(f"Full URL: {url}")
@@ -5179,6 +5551,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         header_name, header_prefix = self._auth_header()
         if api_key:
             headers[header_name] = f"{header_prefix}{api_key}"
+        log_to_file(f"[llm-auth] {self._llm_auth_debug()}")
 
         url = endpoint + api_path + "/chat/completions"
         data = {
@@ -5305,6 +5678,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         _DONE = object()          # sentinel
         _ERROR_401 = object()     # sentinel for auth error
         _ERROR_403 = object()     # sentinel for permission error (token not yet synced)
+        _ERROR_429 = object()     # sentinel for quota exceeded (paired with retry_after)
         chunk_queue = _queue.Queue()
 
         def _network_thread():
@@ -5344,16 +5718,34 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     body = e.read().decode("utf-8")
                 except Exception:
                     body = ""
-                if e.code == 401 or ("\"401\"" in body or "status\":401" in body
-                                     or "code\":401" in body):
+                error_code, retry_after = self._parse_llm_error(e.code, body, e.headers)
+                request_id = ""
+                try:
+                    if e.headers:
+                        request_id = str(e.headers.get("X-Request-Id", "") or "")
+                except Exception:
+                    pass
+                if e.code == 429:
+                    chunk_queue.put((_ERROR_429, retry_after))
+                elif e.code == 401 or ("\"401\"" in body or "status\":401" in body
+                                       or "code\":401" in body):
                     chunk_queue.put(_ERROR_401)
                 elif e.code == 403:
                     chunk_queue.put(_ERROR_403)
+                # Vue « parc côté client » : journalisation fonctionnelle de
+                # l'erreur relais (429/401/403/5xx), corrélée à l'audit serveur
+                # par X-Request-Id — jamais de contenu (protocole DM § 8 bis).
+                self._send_llm_relay_error(
+                    e.code, error_code, retry_after=retry_after,
+                    request_id=request_id, will_retry=(e.code == 403))
                 log_to_file(
                     f"ERROR in stream_request: HTTP {e.code} {e.reason} "
-                    f"body={body[:2000]}")
+                    f"request_id={request_id} body={body[:2000]}")
             except Exception as e:
-                log_to_file(f"ERROR in stream_request: {str(e)}")
+                reason = str(e)
+                self._send_llm_relay_error(
+                    0, "timeout" if "timed out" in reason.lower() else "network_error")
+                log_to_file(f"ERROR in stream_request: {reason}")
             finally:
                 chunk_queue.put(_DONE)
 
@@ -5375,10 +5767,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     _dots_tick += 1
                     if _dots_tick % 6 == 0:  # ~every 300ms
                         self._update_thinking_dots()
-                    try:
-                        toolkit.processEventsToIdle()
-                    except Exception:
-                        pass
+                    pump_events(toolkit)
                     continue
 
                 if item is _DONE:
@@ -5396,6 +5785,22 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 if item is _ERROR_403:
                     log_to_file("[stream] 403 received — caller should retry after config refresh")
                     continue
+                if isinstance(item, tuple) and len(item) == 2 and item[0] is _ERROR_429:
+                    # Quota atteint : respecter retry_after (pas de réessai
+                    # automatique) et l'afficher à l'utilisateur.
+                    try:
+                        delay = f"{int(item[1])} secondes" if item[1] else "quelques instants"
+                    except (TypeError, ValueError):
+                        delay = "quelques instants"
+                    try:
+                        self._show_message(
+                            "Quota de requêtes atteint",
+                            "Le quota de requêtes vers l'assistant IA est atteint "
+                            "pour le moment.\n\n"
+                            f"Merci de réessayer dans {delay}.")
+                    except Exception:
+                        pass
+                    continue
 
                 # Close thinking widget on first real chunk
                 if not _got_first_chunk:
@@ -5403,10 +5808,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     self._close_thinking()
 
                 append_callback(item)
-                try:
-                    toolkit.processEventsToIdle()
-                except Exception:
-                    pass
+                pump_events(toolkit)
         finally:
             self._close_thinking()
 
@@ -5716,7 +6118,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     wait_dialog["label"].getModel().Label = f"Bloc {chunk_idx + 1} / {total}..."
                     wait_dialog["bg"].getModel().Text = ""
                 if wait_dialog["toolkit"]:
-                    wait_dialog["toolkit"].processEventsToIdle()
+                    pump_events(wait_dialog["toolkit"])
             except Exception:
                 pass
 
@@ -5739,7 +6141,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     except Exception:
                         pass
                 if wait_dialog["toolkit"]:
-                    wait_dialog["toolkit"].processEventsToIdle()
+                    pump_events(wait_dialog["toolkit"])
             except Exception:
                 pass
 
@@ -5947,10 +6349,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         bg.getModel().Text = wait_buffer["text"]
                     except Exception:
                         pass
-                try:
-                    toolkit.processEventsToIdle()
-                except Exception:
-                    pass
+                pump_events(toolkit)
                 time.sleep(0.05)
             except Exception:
                 pass
@@ -5971,7 +6370,7 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 except Exception:
                     pass
                 if wait_dialog.get("toolkit"):
-                    wait_dialog["toolkit"].processEventsToIdle()
+                    pump_events(wait_dialog["toolkit"])
                 time.sleep(0.01)
             except Exception:
                 pass
@@ -8612,153 +9011,6 @@ EDITED VERSION:
         dlg.setVisible(True)
         self._formula_dialog = dlg
 
-    def credentials_box(self, title="Device Management", login_label="Login", password_label="Mot de passe"):
-        """Dialog with login + password and a show/hide toggle."""
-        WIDTH = 540
-        HORI_MARGIN = 16
-        VERT_MARGIN = 14
-        BUTTON_WIDTH = 110
-        BUTTON_HEIGHT = 30
-        HORI_SEP = 10
-        VERT_SEP = 8
-        LABEL_HEIGHT = 20
-        EDIT_HEIGHT = 28
-        TOGGLE_WIDTH = 90
-        HEIGHT = VERT_MARGIN * 2 + (LABEL_HEIGHT + EDIT_HEIGHT + VERT_SEP) * 2 + BUTTON_HEIGHT + VERT_SEP * 2
-        import uno
-        from com.sun.star.awt.PosSize import POS, SIZE, POSSIZE
-        from com.sun.star.awt.PushButtonType import OK, CANCEL
-        ctx = uno.getComponentContext()
-        def create(name):
-            return ctx.getServiceManager().createInstanceWithContext(name, ctx)
-        dialog = create("com.sun.star.awt.UnoControlDialog")
-        dialog_model = create("com.sun.star.awt.UnoControlDialogModel")
-        dialog.setModel(dialog_model)
-        try:
-            dialog_model.BackgroundColor = _UI["bg"]
-        except Exception:
-            pass
-        dialog.setVisible(False)
-        dialog.setTitle(title)
-        dialog.setPosSize(0, 0, WIDTH, HEIGHT, SIZE)
-
-        def add(name, type, x_, y_, width_, height_, props):
-            try:
-                model = dialog_model.createInstance("com.sun.star.awt.UnoControl" + type + "Model")
-            except Exception as e:
-                log_to_file(f"Dialog control type unsupported: name={name} type={type} error={str(e)}")
-                return None
-            try:
-                dialog_model.insertByName(name, model)
-            except Exception as e:
-                log_to_file(f"Dialog insert failed: name={name} type={type} error={str(e)}")
-                return None
-            control = dialog.getControl(name)
-            try:
-                control.setPosSize(x_, y_, width_, height_, POSSIZE)
-            except Exception as e:
-                log_to_file(f"Dialog size failed: name={name} type={type} error={str(e)}")
-            for key, value in props.items():
-                try:
-                    setattr(model, key, value)
-                except Exception as e:
-                    log_to_file(f"Dialog prop unsupported: control={name} type={type} prop={key} error={str(e)}")
-            return control
-
-        current_y = VERT_MARGIN
-        # Section header
-        add("section_auth", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
-            "Label": "Authentification", "NoLabel": True,
-            "FontHeight": _UI["font_section"],
-            "TextColor": _UI["primary"],
-            "FontWeight": 150,
-        })
-        current_y += LABEL_HEIGHT + VERT_SEP
-
-        add("label_login", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
-            "Label": str(login_label), "NoLabel": True,
-            "FontHeight": _UI["font_label"],
-            "TextColor": _UI["text"],
-        })
-        current_y += LABEL_HEIGHT + VERT_SEP
-        add("edit_login", "Edit", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, EDIT_HEIGHT, {
-            "Text": "", "BackgroundColor": _UI["bg_input"],
-        })
-        current_y += EDIT_HEIGHT + VERT_SEP
-
-        add("label_password", "FixedText", HORI_MARGIN, current_y, WIDTH - HORI_MARGIN * 2, LABEL_HEIGHT, {
-            "Label": str(password_label), "NoLabel": True,
-            "FontHeight": _UI["font_label"],
-            "TextColor": _UI["text"],
-        })
-        current_y += LABEL_HEIGHT + VERT_SEP
-        password_width = WIDTH - HORI_MARGIN * 2 - TOGGLE_WIDTH - HORI_SEP
-        add("edit_password", "Edit", HORI_MARGIN, current_y, password_width, EDIT_HEIGHT, {
-            "Text": "", "EchoChar": ord("*"),
-            "BackgroundColor": _UI["bg_input"],
-        })
-        add("btn_toggle", "Button", HORI_MARGIN + password_width + HORI_SEP, current_y,
-            TOGGLE_WIDTH, EDIT_HEIGHT, {
-                "Label": "Afficher",
-                "FontHeight": _UI["font_small"],
-            })
-
-        current_y += EDIT_HEIGHT + VERT_SEP * 2
-        # Separator
-        add("line_before_btns", "FixedLine", HORI_MARGIN, current_y,
-            WIDTH - HORI_MARGIN * 2, 2, {})
-        current_y += VERT_SEP
-
-        add("btn_ok", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH * 2 - HORI_SEP, current_y,
-            BUTTON_WIDTH, BUTTON_HEIGHT, {
-                "PushButtonType": OK, "DefaultButton": True,
-                "FontHeight": _UI["font_label"],
-            })
-        add("btn_cancel", "Button", WIDTH - HORI_MARGIN - BUTTON_WIDTH, current_y,
-            BUTTON_WIDTH, BUTTON_HEIGHT, {
-                "PushButtonType": CANCEL, "Label": "Annuler",
-                "FontHeight": _UI["font_label"],
-            })
-
-        frame = create("com.sun.star.frame.Desktop").getCurrentFrame()
-        window = frame.getContainerWindow() if frame else None
-        dialog.createPeer(create("com.sun.star.awt.Toolkit"), window)
-        if window:
-            ps = window.getPosSize()
-            _x = ps.Width / 2 - WIDTH / 2
-            _y = ps.Height / 2 - HEIGHT / 2
-            dialog.setPosSize(_x, _y, 0, 0, POS)
-
-        edit_login = dialog.getControl("edit_login")
-        edit_password = dialog.getControl("edit_password")
-        btn_toggle = dialog.getControl("btn_toggle")
-        is_masked = {"value": True}
-
-        class ToggleListener(unohelper.Base, XActionListener):
-            def actionPerformed(self, event):
-                is_masked["value"] = not is_masked["value"]
-                try:
-                    edit_password.getModel().EchoChar = ord("*") if is_masked["value"] else 0
-                except Exception:
-                    pass
-                try:
-                    btn_toggle.getModel().Label = "Afficher" if is_masked["value"] else "Masquer"
-                except Exception:
-                    pass
-            def disposing(self, event):
-                return
-
-        try:
-            btn_toggle.addActionListener(ToggleListener())
-        except Exception:
-            pass
-
-        edit_login.setFocus()
-        ok = dialog.execute()
-        username = edit_login.getModel().Text.strip() if ok else ""
-        password = edit_password.getModel().Text if ok else ""
-        dialog.dispose()
-        return username, password
 
     def settings_box(self,title="", x=None, y=None):
         """ Settings dialog with configurable backend options """
@@ -8894,7 +9146,7 @@ EDITED VERSION:
                 try:
                     dots = "." * ((i % 3) + 1)
                     label.getModel().Label = f"Contacte MIrAI{dots}"
-                    toolkit.processEventsToIdle()
+                    pump_events(toolkit)
                 except Exception:
                     pass
                 time.sleep(delay)
@@ -9485,10 +9737,7 @@ EDITED VERSION:
                         _y = ps.Height / 2 - 55
                         dialog.setPosSize(_x, _y, 0, 0, POS)
                     dialog.setVisible(True)
-                    try:
-                        toolkit.processEventsToIdle()
-                    except Exception:
-                        pass
+                    pump_events(toolkit)
                     log_to_file("Reload config dialog shown")
                     return dialog, label, btn, toolkit
                 except Exception as e:
@@ -9526,7 +9775,7 @@ EDITED VERSION:
                     if label:
                         label.getModel().Label = f"Connexion à Mirai{dots}"
                     if toolkit:
-                        toolkit.processEventsToIdle()
+                        pump_events(toolkit)
                 except Exception:
                     pass
                 time.sleep(0.2)
@@ -9759,10 +10008,21 @@ EDITED VERSION:
             if not self._device_management_enabled():
                 return False
             enrolled = self._as_bool(self._get_config_from_file("enrolled", False))
-            if enrolled:
-                return False
             access_token = str(self._get_config_from_file("access_token", "")).strip()
-            if access_token and not self._token_is_expired(access_token):
+            has_login = bool(access_token) and not self._token_is_expired(access_token)
+            if enrolled:
+                # Enrôlé « à moitié » : sans creds relay le DM ne mint aucun
+                # llmToken, et le ré-enrôlement de fond a lui-même besoin d'une
+                # session valide (il dérive l'email du token). Sans les deux, le
+                # poste ne peut plus sortir de l'impasse tout seul → wizard.
+                if not self._relay_credentials_valid() and not has_login:
+                    log_to_file(
+                        "[ENROLL] enrolled=True mais ni creds relay ni session "
+                        "valide — wizard d'enrôlement requis"
+                    )
+                    return True
+                return False
+            if has_login:
                 return False
             return True
         except Exception:
@@ -9816,6 +10076,57 @@ EDITED VERSION:
             log_to_file(f"[context-menu] execute failed: {e}")
         return
 
+    # Actions qui ne portent ni sur le document ni sur une sélection : elles
+    # doivent aboutir dans TOUS les contextes, Writer comme Calc, avec ou sans
+    # sélection, et même sans document ouvert.
+    _SHELL_ACTIONS = ("settings", "proxy_settings", "AboutDialog",
+                      "Documentation", "OpenmiraiWebsite", "MenuSeparator",
+                      "TestModel")
+
+    def _handle_shell_action(self, action):
+        """Traite les actions non textuelles. Retourne True si prise en charge."""
+        if action not in self._SHELL_ACTIONS:
+            return False
+        if action == "MenuSeparator":
+            return True
+        try:
+            if action == "settings":
+                self._send_telemetry("OpenSettings", {"action": "open_settings"})
+                from .menu_actions.shared import apply_settings_result
+                apply_settings_result(self, self.settings_box("Settings"))
+            elif action == "proxy_settings":
+                self.proxy_settings_box()
+            elif action == "AboutDialog":
+                self._send_telemetry("AboutDialog", {"action": "about"})
+                self._show_about_dialog()
+            elif action == "Documentation":
+                self._send_telemetry("OpenDocumentation",
+                                     {"action": "open_documentation"})
+                self._open_url_config("doc_url")
+            elif action == "OpenmiraiWebsite":
+                self._send_telemetry("OpenmiraiWebsite", {"action": "open_website"})
+                self._open_url_config("portal_url")
+            elif action == "TestModel":
+                # Import paresseux : le moteur n'est chargé qu'à l'usage.
+                from .core.entry import test_model_capabilities
+                test_model_capabilities(self)
+        except Exception as exc:
+            # Une action de coquille qui échoue doit se VOIR : jusqu'ici la
+            # panne était avalée et l'utilisateur concluait « ça ne marche pas ».
+            log_to_file(f"[dispatch] action {action} en échec : {exc}")
+            self._show_message(
+                "Action impossible",
+                f"« {action} » n'a pas pu s'exécuter.\n\n{exc}")
+        return True
+
+    def _open_url_config(self, key):
+        """Ouvre l'URL d'une clé de configuration, avec repli sur le portail."""
+        import webbrowser
+        url = self.get_config(key, "") or self.get_config("portal_url", "")
+        if not url:
+            raise RuntimeError(f"aucune URL configurée ({key})")
+        webbrowser.open(url)
+
     def trigger(self, args):
         # Parse &src= suffix if present (menu, toolbar, key)
         if "&src=" in args:
@@ -9842,15 +10153,7 @@ EDITED VERSION:
 
         # Wait for any in-progress config fetch to finish (e.g. from __init__)
         # so the trigger has access to config/token for LLM calls
-        if self._fetching_config and not self.config_cache:
-            log_to_file(f"trigger: waiting for config fetch to complete before {action}")
-            _t0 = time.time()
-            while self._fetching_config and time.time() - _t0 < 15:
-                time.sleep(0.3)
-            if self.config_cache:
-                log_to_file("trigger: config now available")
-            else:
-                log_to_file("trigger: config still unavailable after wait")
+        self._wait_for_config(action)
 
         # First-time enrollment: intercept before any action
         # Informational/navigation actions bypass enrollment check
@@ -9873,11 +10176,41 @@ EDITED VERSION:
         model = desktop.getCurrentComponent()
         self._log(f"Current component type: {type(model)}")
 
+        # Palette universelle (démonstrateur moteur MCP) — import paresseux :
+        # zéro coût au chargement de l'extension.
+        if action == "OpenAssistant":
+            from .core.entry import open_palette
+            open_palette(self, model)
+            return
+
+        # Actions non textuelles : elles ne dépendent NI du type de document NI
+        # d'une sélection. Elles doivent donc être traitées AVANT les handlers
+        # par module. Le dispatch historique les faisait passer par
+        # handle_writer_action, qui sortait sur `return True` dès que la
+        # sélection était vide — un clic sur « Paramètres » ne produisait alors
+        # rien du tout ; et en Calc, « Documentation » et « Site mirai »
+        # n'étaient tout simplement pas branchées.
+        if self._handle_shell_action(action):
+            return
+
         if handle_writer_action(self, action, model):
             return
 
         if handle_calc_action(self, action, model):
             return
+
+        # Aucune branche n'a traité l'action : le dire, plutôt que de rendre la
+        # main en silence. Une action déclarée dans un manifeste mais non
+        # implémentée produisait jusqu'ici un clic sans le moindre effet, sans
+        # la moindre trace — impossible à diagnostiquer, pour l'utilisateur
+        # comme pour le support.
+        log_to_file(f"[dispatch] action non gérée : {action!r} "
+                    f"(document={type(model).__name__}, src={source})")
+        self._report_unhandled_action(action, model)
+        self._show_message(
+            "Action indisponible",
+            f"L'action « {action} » n'est pas disponible ici.\n\n"
+            "Ouvrez un document Writer ou Calc, puis réessayez.")
 
 # Starting from Python IDE
 def main():

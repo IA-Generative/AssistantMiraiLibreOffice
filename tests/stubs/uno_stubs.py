@@ -9,6 +9,7 @@ Usage — call install() before importing anything from src.mirai.entrypoint:
     from src.mirai.entrypoint import MainJob
 """
 import sys
+import time
 from unittest.mock import MagicMock
 
 
@@ -20,6 +21,7 @@ class _XJob:             pass
 class _XActionListener:  pass
 class _XItemListener:    pass
 class _XMouseListener:   pass
+class _XKeyListener:     pass
 class _XWindowListener:  pass
 class _XTopWindowListener: pass
 class _XNamed:           pass
@@ -68,6 +70,7 @@ def install():
     com_sun_star_awt.XActionListener  = _XActionListener
     com_sun_star_awt.XItemListener    = _XItemListener
     com_sun_star_awt.XMouseListener   = _XMouseListener
+    com_sun_star_awt.XKeyListener     = _XKeyListener
     com_sun_star_awt.XWindowListener  = _XWindowListener
     com_sun_star_awt.XTopWindowListener = _XTopWindowListener
     com_sun_star_awt.XCallback         = _XCallback
@@ -143,4 +146,22 @@ def make_job(config_dir=None):
     ctx.ServiceManager = service_manager
     ctx.getServiceManager.return_value = service_manager
 
-    return MainJob(ctx)
+    # Le rafraîchissement de configuration est désarmé AVANT la construction :
+    # `MainJob.__init__` le lance en tâche de fond, et ce thread réécrit
+    # config.json. Le neutraliser après coup laisse la course ouverte — selon la
+    # charge, il écrase la valeur que le test vient d'écrire, et l'échec se
+    # déplace d'un test à l'autre. On patche donc la CLASSE le temps de
+    # l'instanciation, puis on la restaure pour ne rien laisser fuir.
+    original_schedule = MainJob._schedule_config_refresh
+    MainJob._schedule_config_refresh = lambda self, *a, **k: None
+    try:
+        job = MainJob(ctx)
+    finally:
+        MainJob._schedule_config_refresh = original_schedule
+
+    deadline = time.time() + 2.0
+    while getattr(job, "_fetching_config", False) and time.time() < deadline:
+        time.sleep(0.01)
+    job._fetching_config = False
+    job._schedule_config_refresh = MagicMock()
+    return job

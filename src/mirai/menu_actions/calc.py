@@ -1146,7 +1146,18 @@ def handle_calc_action(job, args, model):
                 _transform_to_column(job, sheet, col_range, row_range, user_input)
         elif args == "AnalyzeRange":
             _analyze_range(job, sheet, col_range, row_range)
-    except Exception:
-        pass
+    except Exception as exc:
+        # Ce bloc couvrait TOUT le corps de la fonction en `pass` : n'importe
+        # quelle panne d'une action Calc devenait invisible — ni message, ni
+        # trace — et la fonction rendait quand même True. C'était la première
+        # fabrique à « il ne se passe rien ».
+        import traceback
+        job._log(f"[calc] action {args} en échec : {exc}\n{traceback.format_exc()}")
+        try:
+            job._show_message(
+                "Action impossible",
+                f"« {args} » n'a pas pu s'exécuter sur cette feuille.\n\n{exc}")
+        except Exception:
+            pass          # dernier recours : ne jamais masquer l'erreur d'origine
 
     return True

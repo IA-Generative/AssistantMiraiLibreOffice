@@ -11,7 +11,7 @@ import os
 import tempfile
 import time
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.stubs.uno_stubs import install, make_job
 
@@ -38,6 +38,22 @@ def _write_config(config_dir, data):
     return path
 
 
+def _enrolled(**extra):
+    """Config d'un poste RÉELLEMENT enrôlé : drapeau + credentials relay.
+
+    `enrolled` seul ne suffit pas — c'est justement l'état « enrôlé à moitié »
+    (drapeau posé, aucun cred relay) qui bloquait le poste : le DM ne mintait
+    alors aucun llmToken et tous les appels /llm/v1 tombaient en 401.
+    """
+    data = {
+        "enrolled": True,
+        "relay_client_id": "relay-client-abc",
+        "relay_client_key": "relay-key-xyz",
+    }
+    data.update(extra)
+    return data
+
+
 class TestNeedsFirstEnrollment(unittest.TestCase):
     """Test _needs_first_enrollment() logic."""
 
@@ -59,14 +75,38 @@ class TestNeedsFirstEnrollment(unittest.TestCase):
         self.assertTrue(self.job._needs_first_enrollment())
 
     def test_enrolled_true_returns_false(self):
-        """enrolled=true → does NOT need enrollment."""
-        _write_config(self.config_dir, {"enrolled": True})
+        """enrolled=true + creds relay → does NOT need enrollment."""
+        _write_config(self.config_dir, _enrolled())
         self.assertFalse(self.job._needs_first_enrollment())
 
     def test_enrolled_string_true_returns_false(self):
-        """enrolled='true' (string) → does NOT need enrollment."""
-        _write_config(self.config_dir, {"enrolled": "true"})
+        """enrolled='true' (string) + creds relay → does NOT need enrollment."""
+        _write_config(self.config_dir, _enrolled(enrolled="true"))
         self.assertFalse(self.job._needs_first_enrollment())
+
+    def test_enrolled_without_relay_creds_and_no_login_returns_true(self):
+        """Régression : enrolled=true SANS cred relay ni session valide.
+
+        C'est l'état absorbant observé en production — le poste ne peut plus ni
+        obtenir de llmToken ni se ré-enrôler seul (le ré-enrôlement de fond a
+        besoin d'une session pour dériver l'email). Le wizard doit reprendre la
+        main au lieu de laisser passer.
+        """
+        _write_config(self.config_dir, {"enrolled": True, "access_token": ""})
+        self.assertTrue(self.job._needs_first_enrollment())
+
+    def test_enrolled_without_relay_creds_but_valid_login_returns_false(self):
+        """Même état, mais session valide → le ré-enrôlement de fond suffit,
+        on n'impose pas le wizard à l'utilisateur."""
+        token = _make_jwt({"exp": int(time.time()) + 3600})
+        _write_config(self.config_dir, {"enrolled": True, "access_token": token})
+        self.assertFalse(self.job._needs_first_enrollment())
+
+    def test_enrolled_with_expired_relay_creds_and_no_login_returns_true(self):
+        """Creds relay présents mais périmés → équivalent à pas de creds."""
+        _write_config(self.config_dir, _enrolled(
+            relay_key_expires_at=int(time.time()) - 10, access_token=""))
+        self.assertTrue(self.job._needs_first_enrollment())
 
     def test_not_enrolled_but_valid_token_returns_false(self):
         """enrolled=false but valid access_token → does NOT need enrollment."""
@@ -127,7 +167,7 @@ class TestEnrollmentDismissedFlag(unittest.TestCase):
 
     def test_trigger_proceeds_when_enrolled(self):
         """When already enrolled, trigger should NOT call _run_first_enrollment."""
-        _write_config(self.config_dir, {"enrolled": True})
+        _write_config(self.config_dir, _enrolled())
 
         with patch.object(self.job, '_run_first_enrollment') as mock_enroll:
             with patch.object(self.job, '_schedule_config_refresh'):
@@ -173,7 +213,7 @@ class TestScheduleEnrollmentCheck(unittest.TestCase):
 
     def test_timer_skips_when_already_enrolled(self):
         """Timer should NOT call _run_first_enrollment when already enrolled."""
-        _write_config(self.config_dir, {"enrolled": True})
+        _write_config(self.config_dir, _enrolled())
 
         with patch.object(self.job, '_run_first_enrollment') as mock_enroll:
             import threading

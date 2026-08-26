@@ -5,6 +5,7 @@ config/keycloak-client-export.json
 config/profiles/config.default.integration.json
 config/profiles/config.default.production.json
 config/profiles/config.default.kubernetes.json
+config/profiles/config.default.dgx.json
 
 # Build artifacts
 *.oxt
@@ -32,3 +33,10 @@ log.txt
 
 # Claude Code worktrees
 .claude/worktrees/
+
+# Sorties sensibles locales (rapports, diagnostics) — jamais committées
+private/
+
+# Artefacts OXT décompressés / archives locales
+mirai-dgx/
+mirai-dgx.zip

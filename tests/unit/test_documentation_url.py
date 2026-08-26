@@ -4,7 +4,7 @@ Tests for _open_documentation and _open_mirai_website URL-resolution logic.
 No LibreOffice required — UNO modules are stubbed.
 """
 import unittest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from tests.stubs.uno_stubs import install
 

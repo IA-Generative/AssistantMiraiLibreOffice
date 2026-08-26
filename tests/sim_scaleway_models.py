@@ -26,7 +26,6 @@ Usage:
 import argparse
 import json
 import os
-import re
 import sys
 import time
 import urllib.error
@@ -88,8 +87,8 @@ def _fetch_wikipedia_texts(article=_WIKIPEDIA_ARTICLE):
         return None
 
     # Non-empty, non-section-header lines
-    lines = [l.strip() for l in full_text.split("\n")
-             if l.strip() and not l.strip().startswith("==")]
+    lines = [line.strip() for line in full_text.split("\n")
+             if line.strip() and not line.strip().startswith("==")]
 
     # ExtendSelection — intro paragraph (first non-empty line)
     extend = lines[0] if lines else ""

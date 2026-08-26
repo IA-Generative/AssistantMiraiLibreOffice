@@ -3,9 +3,15 @@
 the GenerateFormula, TransformToColumn, AnalyzeRange and ExtendSelection actions.
 """
 from odf.opendocument import OpenDocumentSpreadsheet
-from odf.table import Table, TableRow, TableCell, TableColumn
+from odf.style import (
+    Style,
+    TableCellProperties,
+    TableColumnProperties,
+    TableRowProperties,
+    TextProperties,
+)
+from odf.table import Table, TableCell, TableColumn, TableRow
 from odf.text import P
-from odf.style import Style, TableCellProperties, TextProperties, TableColumnProperties, TableRowProperties
 
 doc = OpenDocumentSpreadsheet()
 

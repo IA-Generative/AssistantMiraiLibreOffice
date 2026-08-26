@@ -163,6 +163,46 @@ if leaked:
     sys.exit(1)
 print("✓ embedded config.default.json: transport-only (no SSO/keycloak/LLM leak)")
 PY
+
+# ── Anti-fuite (2/2) : aucun nom d'hôte d'infrastructure interne dans ce qui est
+# VERSIONNÉ. Le contrôle ci-dessus n'inspecte que les clés du config embarqué ;
+# il ne voyait donc pas les URLs internes présentes dans config/profiles/, docs/,
+# tests/ ou prompts/ — trois d'entre elles étaient parties sur GitHub.
+python3 - "$ROOT_DIR" <<'PY' || { err "Des noms d'hôtes internes sont présents dans des fichiers suivis par git"; exit 1; }
+import re, subprocess, sys
+
+root = sys.argv[1]
+# Domaines internes qui ne doivent JAMAIS être committés. Les placeholders
+# (.example, .internal.example, change-me, <HOTE...>) restent autorisés.
+FORBIDDEN = re.compile(r"\b[a-z0-9.-]+\.(minint|interieur)\.(fr|gouv\.fr)\b", re.I)
+ALLOWED_SUBSTRINGS = ("mirai.interieur.gouv.fr",)   # portail public, documenté
+
+tracked = subprocess.run(["git", "-C", root, "ls-files"],
+                         capture_output=True, text=True).stdout.split()
+offenders = []
+for rel in tracked:
+    if rel.startswith(("prompts/plan-", "docs/QUALIFICATION-")):
+        continue          # documents de travail : décrivent le problème, sans le reproduire
+    try:
+        with open(f"{root}/{rel}", encoding="utf-8") as fh:
+            content = fh.read()
+    except (OSError, UnicodeDecodeError):
+        continue
+    for match in FORBIDDEN.finditer(content):
+        host = match.group(0)
+        if any(allowed in host for allowed in ALLOWED_SUBSTRINGS):
+            continue
+        line = content[:match.start()].count("\n") + 1
+        offenders.append(f"{rel}:{line} → {host}")
+
+if offenders:
+    sys.stderr.write("LEAK: noms d'hôtes internes dans des fichiers versionnés :\n")
+    for item in sorted(set(offenders)):
+        sys.stderr.write(f"  {item}\n")
+    sys.stderr.write("Remplacez-les par des placeholders (.internal.example, <HOTE_...>)\n")
+    sys.exit(1)
+print("✓ aucun nom d'hôte interne dans les fichiers versionnés")
+PY
 # Calc functions reference for formula generation
 mkdir -p "$STAGE_DIR/config"
 if [ -f "$ROOT_DIR/config/calc-functions.json" ]; then

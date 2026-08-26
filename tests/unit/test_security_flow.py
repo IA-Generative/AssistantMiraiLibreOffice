@@ -8,7 +8,7 @@ import urllib.error
 from src.mirai.security_flow import FileJsonStore, FileQueueStore, MemoryVault, SecureBootstrapFlow
 
 
-class FakeSigner(object):
+class FakeSigner:
     def generate_keypair(self):
         return b"\x01" * 32, b"\x02" * 32
 
@@ -20,7 +20,7 @@ class FakeSigner(object):
         return b"sig:" + digest
 
 
-class FakeHttp(object):
+class FakeHttp:
     def __init__(self):
         self.calls = []
         self._rules = []

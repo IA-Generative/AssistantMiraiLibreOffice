@@ -804,7 +804,7 @@ allowed_redirect_uri   | keycloak_allowed_redirect_uri
 | `dev` | localhost:8082 | localhost:8082 | openwebui | Développement local Docker |
 | `integration` | bootstrap.fake-domain.name | mysso.fake-domain.name | openwebui | Scaleway/cloud |
 | `production` | bootstrap.fake-domain.name | sso.mirai.interieur.gouv.fr | mirai | Cloud prod |
-| `dgx` | onyxia.gpu.minint.fr | *(fourni par bootstrap)* | *(on-premise)* | GPU on-premise |
+| `dgx` | `<HOTE_GPU_INTERNE>` | *(fourni par bootstrap)* | *(on-premise)* | GPU on-premise |
 | `docker` | localhost:3001 | *(non configuré)* | — | Legacy dev |
 | `local-llm` | *(désactivé)* | *(désactivé)* | — | Ollama local direct |
 

@@ -57,8 +57,8 @@ def oxt_path(tmp_path_factory):
     )
     if res.returncode != 0:
         pytest.fail(
-            "02-build-oxt.sh a échoué (code %s)\nSTDOUT:\n%s\nSTDERR:\n%s"
-            % (res.returncode, res.stdout, res.stderr)
+            f"02-build-oxt.sh a échoué (code {res.returncode})\n"
+            f"STDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"
         )
     assert out.exists(), "l'archive .oxt n'a pas été produite"
     return str(out)
