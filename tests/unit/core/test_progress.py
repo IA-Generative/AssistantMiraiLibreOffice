@@ -188,3 +188,47 @@ def test_tooltip_prefers_reasoning_when_available():
 def test_tooltip_is_empty_before_anything_arrives():
     assert RunProgress().tooltip == ""
     assert NullProgress().tooltip == ""
+
+
+# ── Activité nommée (tâche de fond) ─────────────────────────────────────────
+#
+# Une tâche partie d'un simple clic d'onglet — l'analyse du document — doit
+# rester identifiable. Sans cela `on_reasoning` écrase la phase et la ligne
+# d'état devient indiscernable d'un run que l'utilisateur n'a pas demandé.
+
+def test_named_activity_survives_reasoning():
+    p = RunProgress(activity="Analyse du document")
+    p.on_reasoning("x" * 400)
+    assert p.phase == "Analyse du document"
+
+
+def test_named_activity_survives_text():
+    p = RunProgress(activity="Analyse du document")
+    p.on_text("y" * 400)
+    assert p.phase == "Analyse du document"
+
+
+def test_named_activity_survives_set_phase():
+    p = RunProgress(activity="Analyse du document")
+    p.set_phase("Action sur le document")
+    assert p.phase == "Analyse du document"
+
+
+def test_named_activity_still_counts_tokens_and_time():
+    """Même format que le run : seule l'étiquette d'activité est figée."""
+    p = RunProgress(activity="Analyse du document")
+    p.on_reasoning("x" * 400)
+    rendu = p.render()
+    assert "Analyse du document" in rendu
+    assert "tk" in rendu and rendu.endswith("s")
+
+
+def test_without_activity_phases_still_move():
+    """Le run garde son déroulé : c'est lui qui a été demandé explicitement."""
+    p = RunProgress()
+    p.on_reasoning("x")
+    assert p.phase == "Réflexion"
+    p.on_text("y")
+    assert p.phase == "Rédaction"
+    p.set_phase("Action sur le document")
+    assert p.phase == "Action sur le document"

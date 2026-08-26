@@ -43,11 +43,18 @@ def test_writer_shows_the_selection():
     assert writer_label("Le préfet arrête") == "Sélection : « Le préfet arrête »"
 
 
-def test_writer_falls_back_to_current_paragraph():
-    """Sans sélection les actions ciblent le paragraphe courant : le dire."""
+def test_writer_without_selection_announces_the_whole_document():
+    """Sans sélection, l'orchestrateur annonce « DOCUMENT ENTIER » au modèle.
+
+    Le libellé citait le paragraphe sous le curseur — donc le TITRE, curseur en
+    tête — ce qui laissait croire à une action limitée à cette ligne. Il nomme
+    désormais la portée large, et mentionne que les presets, eux, restent sur
+    le paragraphe courant.
+    """
     label = writer_label("", "Vu le code général des collectivités")
-    assert label.startswith("Paragraphe courant :")
-    assert "collectivités" in label
+    assert label.startswith("Document entier")
+    assert "paragraphe courant" in label
+    assert "collectivités" not in label      # plus d'extrait qui n'engage rien
 
 
 def test_writer_empty_document_invites_the_user():
@@ -56,7 +63,7 @@ def test_writer_empty_document_invites_the_user():
 
 
 def test_writer_ignores_whitespace_only_selection():
-    assert writer_label("   \n\t ", "paragraphe").startswith("Paragraphe courant")
+    assert writer_label("   \n\t ", "paragraphe").startswith("Document entier")
 
 
 # ── Calc ────────────────────────────────────────────────────────────────

@@ -52,6 +52,14 @@ ERROR_MESSAGES = {
                  "quelques instants."),
     "network_error": ("Le serveur IA est injoignable. Vérifiez votre "
                       "connexion réseau puis réessayez."),
+    # Le flux s'est terminé sans erreur mais n'a rien livré : ni texte, ni appel
+    # d'outil, et aucun outil n'avait agi plus tôt dans le run. Constaté en
+    # recette le 2026-08-04 — le relais renvoyait pourtant un tool call complet
+    # (229 chunks), le plugin n'en a rien récupéré. Sans cette garde le run se
+    # déclarait RÉUSSI avec un texte vide : écran muet côté utilisateur, et
+    # `assistant.ok=true` côté télémétrie, donc invisible dans les tableaux.
+    "empty_response": ("L'assistant n'a rien produit. Réessayez — si cela "
+                       "persiste, signalez-le."),
 }
 
 
@@ -108,6 +116,7 @@ class Orchestrator:
 
         self.observer.on_run_start(self.llm.effective_mode())
         result = RunResult(ok=False, reason="max_iterations")
+        acted = False    # un outil a-t-il déjà agi sur le document ?
         try:
             for iteration in range(self.max_iterations):
                 if self.cancelled:
@@ -131,9 +140,20 @@ class Orchestrator:
                     self.observer.on_tool_calls(step.tool_calls)
                     results = self._execute_tool_calls(step.tool_calls)
                     messages.extend(self.llm.encode_tool_exchange(step, results))
+                    acted = True
                     continue
 
                 final_text = step.text.strip()
+                # Rien produit ET rien fait : c'est un échec, pas une réussite
+                # muette. On ne déclenche PAS la garde si un outil a déjà agi —
+                # le document a alors bien été modifié, et un texte de clôture
+                # vide y est légitime.
+                if not final_text and not acted:
+                    message = error_message("empty_response")
+                    self.observer.on_error("empty_response", message)
+                    return RunResult(ok=False, iterations=iteration + 1,
+                                     reason="empty_response", text=message)
+
                 sink.finish(final_text, step.streamed)
                 self.observer.on_final(final_text)
                 if self.conversation is not None:

@@ -8524,16 +8524,27 @@ EDITED VERSION:
 
     # ── Calc formula prompts persistence ─────────────────────────────────────
     def _prompts_calc_path(self):
-        """Path to the Calc prompts history file."""
-        try:
-            return os.path.join(os.path.dirname(self._profile_config_path), "prompts_calc.txt")
-        except Exception:
-            return os.path.join(os.path.expanduser("~"), "prompts_calc.txt")
+        """Chemin du fichier d'historique des prompts Calc.
+
+        L'historique se range à côté de config.json, dans le profil utilisateur
+        LibreOffice. Si ce dossier est introuvable on rend "" — surtout pas un
+        repli sur le HOME : ces lignes sont du contenu saisi par l'utilisateur,
+        et les écrire en clair dans le dossier personnel est un défaut de
+        confidentialité (issue #31). Les appelants traitent "" comme
+        « pas d'historique disponible ».
+        """
+        config_dir = self._get_user_config_dir()
+        if not config_dir:
+            return ""
+        return os.path.join(config_dir, "prompts_calc.txt")
 
     def _load_prompts_calc(self):
         """Load saved prompts (most-recent-first, max 100)."""
+        path = self._prompts_calc_path()
+        if not path:
+            return []
         try:
-            with open(self._prompts_calc_path(), "r", encoding="utf-8") as f:
+            with open(path, "r", encoding="utf-8") as f:
                 lines = [l.rstrip("\n") for l in f if l.strip()]
             return lines[:100]
         except Exception:
@@ -8541,11 +8552,14 @@ EDITED VERSION:
 
     def _save_prompt_calc(self, prompt: str):
         """Prepend prompt to the history file (deduplicated, max 100 lines)."""
+        path = self._prompts_calc_path()
+        if not path:
+            return
         try:
             existing = self._load_prompts_calc()
             deduped = [p for p in existing if p != prompt]
             lines = [prompt] + deduped
-            with open(self._prompts_calc_path(), "w", encoding="utf-8") as f:
+            with open(path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines[:100]) + "\n")
         except Exception:
             pass
@@ -8853,7 +8867,9 @@ EDITED VERSION:
                     if mbox.execute() == 2:  # YES = 2
                         import os as _os
                         try:
-                            _os.remove(_job._prompts_calc_path())
+                            _hist = _job._prompts_calc_path()
+                            if _hist:
+                                _os.remove(_hist)
                         except Exception:
                             pass
                         _job._formula_dialog_state["history_lines"].clear()
@@ -8870,6 +8886,8 @@ EDITED VERSION:
                 import os as _os
                 try:
                     path = _job._prompts_calc_path()
+                    if not path:
+                        return
                     if not _os.path.exists(path):
                         open(path, "w").close()
                     _sub.Popen(["open", path])
