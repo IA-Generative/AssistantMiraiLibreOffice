@@ -26,6 +26,18 @@
   ],
   "changelog": [
     {
+      "version": "0.0.1.0.31",
+      "date": "2026-09-02",
+      "changes": [
+        "Sécurité : les formules Calc générées par l'IA passent par une liste blanche stricte avant d'être appliquées",
+        "Sécurité : les hyperliens générés par l'IA sont restreints aux schémas http, https et mailto",
+        "Mise en forme : les réponses Markdown et HTML deviennent du contenu Writer natif (titres, gras, listes, citations, liens, tableaux) au lieu de balises littérales",
+        "Palette : titre nommant le document travaillé, rappel au premier plan, jauge unique pour le run et l'analyse, « Raisonnement » promu en onglet, rejeu d'une ligne d'un clic depuis Conversation et Suggestions",
+        "Suggestions : analyse du document en tâche de fond, avec son propre budget de tokens",
+        "Observabilité : bilan de flux à chaque étape LLM ; un run qui ne produit rien ne se déclare plus réussi"
+      ]
+    },
+    {
       "version": "0.0.1.0.30",
       "date": "2026-08-02",
       "changes": [

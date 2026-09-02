@@ -15,8 +15,21 @@ ministère de l'Intérieur.
 
 Origine du projet
 
+Cette extension s'appuie sur le travail original de John Balis,
+auteur de l'extension « localwriter » pour LibreOffice, publiée
+sous licence libre :
+  https://github.com/balisujohn/localwriter
+
+Des portions de code sont issues du projet LibreOffice, distribuées
+sous licence Mozilla Public License 2.0 (MPL 2.0) :
+  https://gerrit.libreoffice.org/c/core/+/159938
+
 Le code source de cette version est disponible sur :
   https://github.com/IA-Generative/AssistantMiraiLibreOffice
+
+Conformément à la licence MPL 2.0, l'ensemble des modifications
+est distribué sous la même licence et les portions dérivées
+conservent leurs mentions d'origine.
 
 
 Limites de l'intelligence artificielle
@@ -58,6 +71,6 @@ de vos documents.
 
 Version
 
-MIrAI IA'ssistant LibreOffice — version 0.0.1.0.30
+MIrAI IA'ssistant LibreOffice — version 0.0.1.0.31
 Programme MIrAI — Ministère de l'Intérieur
 Mars 2026
