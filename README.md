@@ -1,17 +1,5 @@
 # MIrAI — Assistant LibreOffice
 
-> ⚠️ **EXPÉRIMENTATION JETABLE — ne pas merger vers master.**
-> Cette branche (`exp-jetable/demonstrateur-v2`) est un **démonstrateur jetable** : réécriture du cœur du plugin autour d'un moteur interne de type MCP (outils UNO orchestrés par le LLM) et d'une fenêtre de prompt universelle proche du DSFR. La coquille (enrôlement, SSO, device management, mises à jour, télémétrie) est inchangée, **hors** la chaîne d'authentification `/llm/v1` qui a été corrigée. Toute PR issue de cette branche reste en draft.
->
-> Deux documents décrivent l'état réel du code : [docs/QUALIFICATION-master-2026-07-26.md](docs/QUALIFICATION-master-2026-07-26.md) (ce qui n'allait pas dans la baseline) et [docs/RAPPORT-EXECUTION-2026-07-26.md](docs/RAPPORT-EXECUTION-2026-07-26.md) (ce qui a été corrigé, et ce qui ne l'a pas été).
-
-Extension LibreOffice intégrant un assistant IA directement dans Writer et Calc. Elle se connecte à un backend compatible OpenAI (OpenWebUI, Ollama, Scaleway, etc.) et inclut un mécanisme d'enrôlement via Device Management pour préconfigurer les URLs, tokens et modèles.
-
-**Origine :** cette application est développée dans le cadre du programme MIrAI du ministère de l'Intérieur.
-
-**Comparaison de modèles LLM :** une évaluation des modèles Scaleway sur les scénarios Writer (extension, résumé, reformulation) a été réalisée avec des textes issus de Wikipédia. Les résultats sont disponibles dans [bench/scaleway_model_comparison.md](bench/scaleway_model_comparison.md).
-
----
 
 ## Table des matières
 
