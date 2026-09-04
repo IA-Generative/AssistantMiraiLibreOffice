@@ -22,6 +22,74 @@ except Exception:
 # prior registration before re-installing in-process (avoids duplicate components).
 _EXTENSION_IDENTIFIER = "fr.gouv.interieur.mirai"
 
+# Interfaces UNO pré-bindées au chargement du module (= thread principal), pour le
+# même motif que _EXT_MGR_SINGLETON : le worker d'update ne peut pas faire de
+# `from com.sun.star… import …` lui-même ("No module named 'com'"). Elles servent
+# au marshaling vers le main thread (AsyncCallback) et au XCommandEnvironment
+# silencieux de l'installation in-process.
+try:
+    from com.sun.star.awt import XCallback as _XCALLBACK_IFACE
+except Exception:
+    _XCALLBACK_IFACE = None
+try:
+    from com.sun.star.ucb import XCommandEnvironment as _XCMDENV_IFACE
+    from com.sun.star.task import XInteractionHandler as _XINTERACTION_IFACE
+except Exception:
+    _XCMDENV_IFACE = None
+    _XINTERACTION_IFACE = None
+
+if _XCALLBACK_IFACE is not None:
+    class _MainThreadCallback(unohelper.Base, _XCALLBACK_IFACE):
+        """Exécute un callable sur le thread PRINCIPAL de LibreOffice, planifié via
+        com.sun.star.awt.AsyncCallback. Classe construite au chargement du module :
+        le worker d'update n'a qu'à l'instancier (aucun import UNO côté worker)."""
+
+        def __init__(self, fn):
+            self._fn = fn
+
+        def notify(self, _data):
+            try:
+                self._fn()
+            except Exception as exc:
+                log_to_file(f"_MainThreadCallback: callable raised: {exc}")
+else:
+    _MainThreadCallback = None
+
+if _XINTERACTION_IFACE is not None and _XCMDENV_IFACE is not None:
+    class _SilentInteractionHandler(unohelper.Base, _XINTERACTION_IFACE):
+        """Approuve les interactions de déploiement (VersionException lors du
+        remplacement d'une extension de même identifiant, licence déjà
+        supprimée, …) en sélectionnant une continuation « approve »."""
+
+        def handle(self, request):
+            try:
+                conts = request.getContinuations()
+            except Exception:
+                conts = ()
+            chosen = None
+            for cont in conts or ():
+                name = type(cont).__name__.lower()
+                if "approve" in name or "retry" in name or "resolved" in name:
+                    chosen = cont
+                    break
+            try:
+                (chosen or (conts[0] if conts else None)).select()
+            except Exception:
+                pass
+
+    class _SilentCommandEnv(unohelper.Base, _XCMDENV_IFACE):
+        def __init__(self, handler):
+            self._handler = handler
+
+        def getInteractionHandler(self):
+            return self._handler
+
+        def getProgressHandler(self):
+            return None
+else:
+    _SilentInteractionHandler = None
+    _SilentCommandEnv = None
+
 try:
     from com.sun.star.task import XJobExecutor, XJob
     from com.sun.star.awt import MessageBoxButtons as MSG_BUTTONS
@@ -567,6 +635,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     # re-downloading / re-prompting the same update in a loop.
     _update_launch_blocked_cls = set()
     _update_lock_cls = threading.Lock()
+    # Réconciliation post-redémarrage de la MAJ précédente : une seule fois par
+    # process (voir _schedule_update_reconciliation / _reconcile_update_state).
+    _update_reconcile_started_cls = False
     _context_menu_refs_cls = []
     _context_menu_controller_ids_cls = set()
     _context_menu_schedule_started_cls = False
@@ -666,6 +737,13 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             self._ensure_device_management_state_async()
         except Exception as e:
             log_to_file(f"Failed to initialize device management: {str(e)}")
+
+        # Clôt la mise à jour du cycle précédent (rapport « installed » véridique
+        # au DM une fois la nouvelle version active, purge de pending_update).
+        try:
+            self._schedule_update_reconciliation()
+        except Exception as e:
+            log_to_file(f"Failed to schedule update reconciliation: {str(e)}")
 
         # Proxy consistency check removed — proxy is configured via
         # bootstrap or the Settings dialog, no startup prompt needed.
@@ -1887,15 +1965,34 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 self._report_update_status(campaign_id, "deferred", version_before, "", "")
                 return
 
-            # Stage the artifact only: copy it to a stable path and prepare the
-            # fallback install script. The real install happens ONCE, in-process,
-            # when the user accepts the restart (see _install_and_restart_in_process).
-            # Installing here (from the update worker thread) AND at restart would
-            # double-install and can clobber the running instance.
-            installed = False
-            if not installed:
+            # Stage the artifact only: copy it to a stable path. The real install
+            # happens ONCE, in-process on the MAIN thread, when the user accepts
+            # the restart (see _install_and_restart_in_process). Installing here
+            # (from the update worker thread) AND at restart would double-install
+            # and can clobber the running instance.
+            try:
+                stable_dir = os.path.join(self._get_user_config_dir(), "pending_update")
+                os.makedirs(stable_dir, exist_ok=True)
+            except Exception:
+                stable_dir = os.path.dirname(tmp_path)
+            stable_oxt = os.path.join(stable_dir, "mirai_update.oxt")
+            import shutil
+            shutil.copy2(tmp_path, stable_oxt)
+            self._pending_install_oxt = stable_oxt
+            self._pending_install_script = ""
+            log_to_file(f"_perform_update: OXT copied to {stable_oxt}")
+            # Persiste l'état de campagne : la réconciliation au prochain
+            # démarrage rapporte l'issue RÉELLE au DM (_reconcile_update_state).
+            self._save_update_state(directive, "staged")
+
+            # Script d'installation de secours (.bat/.sh) : spawne un processus
+            # enfant → refusé sur postes durcis (WinError 5, AppLocker / Defender
+            # ASR), et son cycle unopkg remove/add est un vecteur de corruption du
+            # registre (issue #9). DÉSACTIVÉ par défaut ; réactivable explicitement
+            # via MIRAI_UPDATE_ALLOW_SCRIPT=1 (postes non durcis, diagnostic).
+            if os.environ.get("MIRAI_UPDATE_ALLOW_SCRIPT") == "1":
                 try:
-                    import subprocess, platform
+                    import platform
                     sys_name = platform.system()  # Darwin, Windows, Linux
 
                     # Find unopkg
@@ -1930,18 +2027,6 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     if not unopkg:
                         raise FileNotFoundError("unopkg not found")
                     log_to_file(f"_perform_update: unopkg={unopkg} platform={sys_name}")
-
-                    # Copy OXT to a stable location (tmp_path may be cleaned when LO exits)
-                    try:
-                        stable_dir = os.path.join(self._get_user_config_dir(), "pending_update")
-                        os.makedirs(stable_dir, exist_ok=True)
-                    except Exception:
-                        stable_dir = os.path.dirname(tmp_path)
-                    stable_oxt = os.path.join(stable_dir, "mirai_update.oxt")
-                    import shutil
-                    shutil.copy2(tmp_path, stable_oxt)
-                    self._pending_install_oxt = stable_oxt
-                    log_to_file(f"_perform_update: OXT copied to {stable_oxt}")
 
                     # Stage the update: quit LO → wait → remove old → install new → relaunch
                     log_path = os.path.expanduser("~/log.txt")
@@ -2026,16 +2111,17 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                             sf.write(f'rm -f "{stable_oxt}" "{install_script}"\n')
                         os.chmod(install_script, 0o755)
                         self._pending_install_script = install_script
-                    installed = True
-                    log_to_file(f"_perform_update: install staged for version={target_version}")
+                    log_to_file("_perform_update: fallback install script staged (opt-in)")
                 except Exception as pkg_err:
-                    log_to_file(f"_perform_update: unopkg error: {pkg_err}")
-            if not installed:
-                self._report_update_status(campaign_id, "failed", version_before, "", "install failed")
-                return
+                    log_to_file(f"_perform_update: script staging failed (non-fatal): {pkg_err}")
 
-            # Report success
-            self._report_update_status(campaign_id, "installed", version_before, target_version)
+            log_to_file(f"_perform_update: install staged for version={target_version}")
+            # « deferred » = artefact prêt, installation à suivre (acceptation
+            # utilisateur + redémarrage). « installed » n'est rapporté qu'une fois
+            # la nouvelle version réellement active (_reconcile_update_state au
+            # démarrage suivant) — l'ancien rapport « installed » dès le staging
+            # comptait comme réussies des installations jamais abouties.
+            self._report_update_status(campaign_id, "deferred", version_before, target_version)
 
             # Wait for enrollment wizard to finish and let user settle in
             _wait_start = time.time()
@@ -2092,17 +2178,21 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
 
             if user_wants_restart:
                 log_to_file("_perform_update: user accepted restart")
-                # Prefer the in-process deployment API + native restart. It works
-                # on locked-down postes where spawning the install script is denied
-                # (WinError 5 — AppLocker / Defender ASR). Fall back to the install
-                # script, then to the manual-install message.
+                self._save_update_state(directive, "user_accepted")
+                # In-process (ExtensionManager sur le main thread) : la seule voie
+                # automatique par défaut — aucun processus enfant (WinError 5-immune).
                 if self._install_and_restart_in_process(getattr(self, "_pending_install_oxt", "")):
-                    log_to_file("_perform_update: installed in-process, restarting natively")
+                    log_to_file("_perform_update: installed in-process, closing for restart")
+                    self._save_update_state(directive, "installed_inprocess")
                     return
-                log_to_file("_perform_update: in-process install unavailable, using install script")
-                try:
-                    install_script = self._pending_install_script
-                    if install_script and os.path.isfile(install_script):
+                # Script de secours : uniquement si explicitement réactivé
+                # (MIRAI_UPDATE_ALLOW_SCRIPT=1). Sinon, dégradation directe vers
+                # le message manuel validé GPO (bouton « Ouvrir le dossier »).
+                install_script = getattr(self, "_pending_install_script", "")
+                if install_script and os.path.isfile(install_script):
+                    log_to_file("_perform_update: in-process install failed, using opt-in install script")
+                    try:
+                        import subprocess
                         import platform as _pf
                         if _pf.system() == "Windows":
                             try:
@@ -2114,25 +2204,23 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                         # terminate() must run on the main thread to avoid
                         # macOS autolayout crashes — schedule it via UNO timer
                         self._terminate_on_main_thread()
-                    else:
-                        log_to_file("_perform_update: install script not found, skipping")
-                except Exception as launch_err:
-                    log_to_file(f"_perform_update: failed to launch install script: {launch_err}")
-                    # A locked-down workstation policy (AppLocker / Defender ASR
-                    # "block child process") can deny spawning the install script
-                    # (WinError 5 — Access Denied). Record the target so we stop
-                    # re-downloading / re-prompting in a loop, and tell the user
-                    # once how to finish the update.
-                    if target_version:
-                        MainJob._update_launch_blocked_cls.add(target_version)
-                    try:
-                        self._report_update_status(
-                            campaign_id, "failed", version_before, target_version,
-                            f"install launch blocked: {launch_err}"
-                        )
-                    except Exception:
-                        pass
-                    self._notify_update_blocked(target_version, getattr(self, "_pending_install_script", ""))
+                        return
+                    except Exception as launch_err:
+                        # WinError 5 (AppLocker / Defender ASR "block child
+                        # process") atterrit ici — on continue vers le manuel.
+                        log_to_file(f"_perform_update: failed to launch install script: {launch_err}")
+                # L'install auto n'a pas abouti : anti-boucle (ne pas re-prompter
+                # ce target), rapport DM, puis message manuel (voie validée).
+                if target_version:
+                    MainJob._update_launch_blocked_cls.add(target_version)
+                try:
+                    self._report_update_status(
+                        campaign_id, "failed", version_before, target_version,
+                        "in-process install failed; manual fallback offered"
+                    )
+                except Exception:
+                    pass
+                self._notify_update_blocked(target_version, install_script)
             else:
                 log_to_file("_perform_update: user postponed restart")
 
@@ -2362,59 +2450,105 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
         log_to_file("_install_oxt_inprocess: no in-process deployment API available")
         return False
 
+    def _make_silent_command_env(self):
+        """XCommandEnvironment silencieux pour l'API de déploiement (approuve la
+        VersionException du remplacement même-identifiant, licence déjà
+        supprimée). Classes pré-bindées au chargement du module — utilisable
+        depuis le worker d'update sans import UNO."""
+        if _SilentCommandEnv is not None and _SilentInteractionHandler is not None:
+            return _SilentCommandEnv(_SilentInteractionHandler())
+        return None
+
+    def _run_install_on_main_thread(self, oxt_url, props, cmd_env, timeout=90):
+        """Installe l'OXT via ExtensionManager.addExtension sur le thread PRINCIPAL.
+
+        C'est l'appel exact que le Gestionnaire des extensions (et l'updater natif
+        de LibreOffice) exécute pour une installation manuelle — la voie validée
+        sur le terrain comme fiable. Le main thread garde la base d'extensions et
+        registrymodifications.xcu cohérents ; les cycles removePackage/addPackage
+        répétés depuis le thread worker sont ce qui corrompait le registre
+        (issue #9). Pas de remove-avant-add : addExtension remplace atomiquement
+        une extension de même identifiant (VersionException approuvée par le
+        handler silencieux). Aucun processus enfant (immunisé WinError 5).
+
+        Retourne True sur succès confirmé ; False sur échec ou timeout (l'appelant
+        dégrade). Après un timeout, le callback éventuel devient no-op (garde
+        `cancelled`) pour interdire une double installation concurrente.
+        """
+        if _MainThreadCallback is None:
+            return False
+        holder = {"ok": False, "err": "", "cancelled": False}
+        done = threading.Event()
+        ctx = self.ctx
+
+        def _do_install():
+            if holder["cancelled"]:
+                return
+            try:
+                mgr = None
+                try:
+                    mgr = ctx.getValueByName(
+                        "/singletons/com.sun.star.deployment.theExtensionManager")
+                except Exception as exc:
+                    log_to_file(f"_run_install_on_main_thread: getValueByName(theExtensionManager): {exc}")
+                if mgr is None and _EXT_MGR_SINGLETON is not None:
+                    try:
+                        mgr = _EXT_MGR_SINGLETON.get(ctx)
+                    except Exception as exc:
+                        log_to_file(f"_run_install_on_main_thread: theExtensionManager.get: {exc}")
+                if mgr is None:
+                    holder["err"] = "theExtensionManager unavailable"
+                    return
+                mgr.addExtension(oxt_url, props, "user", None, cmd_env)
+                holder["ok"] = True
+            except Exception as exc:
+                holder["err"] = str(exc)
+            finally:
+                done.set()
+
+        try:
+            async_cb = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.awt.AsyncCallback", self.ctx)
+            if async_cb is None:
+                return False
+            async_cb.addCallback(_MainThreadCallback(_do_install), None)
+        except Exception as exc:
+            log_to_file(f"_run_install_on_main_thread: schedule failed: {exc}")
+            return False
+        if not done.wait(timeout):
+            holder["cancelled"] = True
+            log_to_file("_run_install_on_main_thread: timeout waiting for main thread")
+            return False
+        if holder["ok"]:
+            log_to_file("_run_install_on_main_thread: addExtension OK (main thread)")
+            return True
+        log_to_file(f"_run_install_on_main_thread: install failed: {holder['err']}")
+        return False
+
     def _install_and_restart_in_process(self, oxt_path):
-        """Install the update via LibreOffice's own deployment API and restart via
-        the native OfficeRestartManager — all inside the soffice process.
+        """Install the update via LibreOffice's own deployment API — entirely
+        inside the soffice process — then close LibreOffice cleanly.
 
         This is the key path for locked-down postes: it spawns **no** child
         process (no cmd.exe / soffice.exe), so it is not affected by the
         AppLocker / Defender-ASR policy that denies the install script (WinError
-        5). Returns True on success; any failure returns False so the caller
-        falls back to the install script, then to the manual-install message.
+        5). Order of attempts:
 
-        UNO imports are lazy (interfaces only resolve inside LibreOffice), so the
-        module still imports cleanly under the test stubs.
+          1. ExtensionManager.addExtension sur le MAIN thread (voie du
+             Gestionnaire des extensions — remplace proprement, pas de
+             corruption du registre) ;
+          2. legacy : thePackageManagerFactory depuis le worker
+             (_install_oxt_inprocess) — dernier recours seulement.
+
+        Returns True on success; any failure returns False so the caller falls
+        back to the manual-install message (ou au script si explicitement
+        réactivé). UNO usage is lazy so the module imports under test stubs.
         """
         try:
             if not oxt_path or not os.path.isfile(oxt_path):
                 return False
-            import unohelper
-            from com.sun.star.ucb import XCommandEnvironment
-            from com.sun.star.task import XInteractionHandler
-
-            class _SilentHandler(unohelper.Base, XInteractionHandler):
-                # Auto-approve deployment interactions (license already suppressed,
-                # version-replace confirmation, …) by selecting a continuation.
-                def handle(self, request):
-                    try:
-                        conts = request.getContinuations()
-                    except Exception:
-                        conts = ()
-                    chosen = None
-                    for cont in conts or ():
-                        name = type(cont).__name__.lower()
-                        if "approve" in name or "retry" in name or "resolved" in name:
-                            chosen = cont
-                            break
-                    try:
-                        (chosen or (conts[0] if conts else None)).select()
-                    except Exception:
-                        pass
-
-            class _SilentEnv(unohelper.Base, XCommandEnvironment):
-                def __init__(self, handler):
-                    self._handler = handler
-
-                def getInteractionHandler(self):
-                    return self._handler
-
-                def getProgressHandler(self):
-                    return None
-
-            handler = _SilentHandler()
-            cmd_env = _SilentEnv(handler)
+            cmd_env = self._make_silent_command_env()
             oxt_url = uno.systemPathToFileUrl(oxt_path)
-            smgr = self.ctx.getServiceManager()
 
             props = ()
             try:
@@ -2425,9 +2559,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             except Exception:
                 props = ()
 
-            if not self._install_oxt_inprocess(oxt_url, props, None, cmd_env):
-                log_to_file("_perform_update: in-process deployment API unavailable")
-                return False
+            if not self._run_install_on_main_thread(oxt_url, props, cmd_env):
+                log_to_file("_perform_update: main-thread install unavailable, trying legacy worker path")
+                if not self._install_oxt_inprocess(oxt_url, props, None, cmd_env):
+                    log_to_file("_perform_update: in-process deployment API unavailable")
+                    return False
             log_to_file("_perform_update: in-process install succeeded")
 
             # Close LibreOffice cleanly so the user reopens it with the new version
@@ -2540,6 +2676,115 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file("_terminate_on_main_thread: terminate() called (Windows)")
             except Exception as e:
                 log_to_file(f"_terminate_on_main_thread: terminate error: {e}")
+
+    # ── Update state & post-restart reconciliation (issue #9) ────────────
+    # Le résultat réel d'une mise à jour n'est connu qu'au redémarrage suivant
+    # (l'installation remplace l'extension qui exécute ce code). On persiste
+    # donc l'état de campagne à côté de l'artefact stagé, et au démarrage on
+    # compare la version active au target : rapport « installed » véridique,
+    # purge idempotente de pending_update, levée de l'anti-boucle.
+
+    def _update_state_path(self):
+        base = self._get_user_config_dir()
+        if not base:
+            return ""
+        return os.path.join(base, "pending_update", "update_state.json")
+
+    def _save_update_state(self, directive, stage):
+        """Persiste l'état de la campagne en cours (best-effort, jamais bloquant)."""
+        path = self._update_state_path()
+        if not path:
+            return
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            state = {
+                "campaign_id": directive.get("campaign_id"),
+                "target_version": str(directive.get("target_version", "")),
+                "version_before": str(self._get_extension_version() or ""),
+                "stage": stage,
+                "ts": time.time(),
+            }
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(state, fh)
+        except Exception as exc:
+            log_to_file(f"_save_update_state: {exc}")
+
+    def _purge_pending_update_dir(self):
+        base = self._get_user_config_dir()
+        if not base:
+            return
+        folder = os.path.join(base, "pending_update")
+        try:
+            import shutil
+            shutil.rmtree(folder, ignore_errors=True)
+            log_to_file("_purge_pending_update_dir: pending_update purged")
+        except Exception as exc:
+            log_to_file(f"_purge_pending_update_dir: {exc}")
+
+    def _reconcile_update_state(self):
+        """Au démarrage : clôt la mise à jour précédente de façon idempotente.
+
+        - version active == target → rapport « installed » au DM + télémétrie,
+          purge de pending_update (OXT stagé, scripts, état), retrait du target
+          de l'anti-boucle _update_launch_blocked_cls ;
+        - état illisible ou périmé (> 14 jours) → purge silencieuse ;
+        - sinon (mise à jour encore en attente) → no-op, l'état est conservé.
+        """
+        path = self._update_state_path()
+        if not path or not os.path.isfile(path):
+            return
+        try:
+            with open(path, encoding="utf-8") as fh:
+                state = json.load(fh)
+        except Exception:
+            state = None
+        if not isinstance(state, dict):
+            try:
+                os.unlink(path)
+            except Exception:
+                pass
+            return
+        target = str(state.get("target_version", ""))
+        current = str(self._get_extension_version() or "")
+        if target and current == target:
+            log_to_file(f"_reconcile_update_state: update to {target} confirmed active")
+            try:
+                self._report_update_status(
+                    state.get("campaign_id"), "installed",
+                    str(state.get("version_before", "")), target)
+            except Exception as exc:
+                log_to_file(f"_reconcile_update_state: status report failed: {exc}")
+            try:
+                self._send_telemetry("ExtensionUpdated", {
+                    "version_after": target,
+                    "campaign_id": str(state.get("campaign_id") or ""),
+                    "confirmed": "true",
+                })
+            except Exception:
+                pass
+            MainJob._update_launch_blocked_cls.discard(target)
+            self._purge_pending_update_dir()
+        else:
+            age = time.time() - float(state.get("ts", 0) or 0)
+            if age > 14 * 24 * 3600:
+                log_to_file("_reconcile_update_state: stale update state, purging")
+                self._purge_pending_update_dir()
+
+    def _schedule_update_reconciliation(self):
+        """Lance la réconciliation en fond, une fois par process (réseau possible)."""
+        if MainJob._update_reconcile_started_cls:
+            return
+        MainJob._update_reconcile_started_cls = True
+
+        def _safe_reconcile():
+            try:
+                self._reconcile_update_state()
+            except Exception as exc:
+                log_to_file(f"_reconcile_update_state: {exc}")
+
+        timer = threading.Timer(5.0, _safe_reconcile)
+        timer.daemon = True
+        timer.start()
 
     def _report_update_status(self, campaign_id, status, version_before, version_after, error_detail=""):
         """Report update status back to device-management server."""
