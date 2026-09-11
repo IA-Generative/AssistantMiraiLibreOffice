@@ -22,6 +22,12 @@ except Exception:
 # prior registration before re-installing in-process (avoids duplicate components).
 _EXTENSION_IDENTIFIER = "fr.gouv.interieur.mirai"
 
+# Feed natif LibreOffice (<update-information>) servi par le DM
+# (device-management#23). Le chemin doit rester aligné avec
+# scripts/inject_update_feed.py (FEED_PATH) qui le bake dans description.xml.
+_UPDATE_FEED_PATH = "/catalog/mirai-libreoffice/update.xml"
+_UPDATE_FEED_NS = "http://openoffice.org/extensions/update/2006"
+
 # Interfaces UNO pré-bindées au chargement du module (= thread principal), pour le
 # même motif que _EXT_MGR_SINGLETON : le worker d'update ne peut pas faire de
 # `from com.sun.star… import …` lui-même ("No module named 'com'"). Elles servent
@@ -638,6 +644,9 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     # Réconciliation post-redémarrage de la MAJ précédente : une seule fois par
     # process (voir _schedule_update_reconciliation / _reconcile_update_state).
     _update_reconcile_started_cls = False
+    # Diagnostic passif du feed natif : une seule fois par process
+    # (voir _schedule_native_feed_check / _check_native_feed).
+    _feed_check_started_cls = False
     _context_menu_refs_cls = []
     _context_menu_controller_ids_cls = set()
     _context_menu_schedule_started_cls = False
@@ -744,6 +753,14 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             self._schedule_update_reconciliation()
         except Exception as e:
             log_to_file(f"Failed to schedule update reconciliation: {str(e)}")
+
+        # Diagnostic passif du feed natif : valide proxy/TLS/GPO de la pile HTTP
+        # de LibreOffice sur la flotte et détecte un feed DM absent
+        # (device-management#23) avant d'appuyer le déploiement large dessus.
+        try:
+            self._schedule_native_feed_check()
+        except Exception as e:
+            log_to_file(f"Failed to schedule native feed check: {str(e)}")
 
         # Proxy consistency check removed — proxy is configured via
         # bootstrap or the Settings dialog, no startup prompt needed.
@@ -988,6 +1005,15 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
     _ACTION_NAMES = {
         "ExtensionLoaded": "launch",
         "ExtensionUpdated": "update",
+        # Étapes du flux de MAJ (issue #9) — permettent de mesurer le taux de
+        # succès PAR ÉTAPE sur la flotte (staged → accepted → installed confirmé),
+        # au lieu d'un unique événement ambigu.
+        "UpdateStaged": "update",
+        "UpdateAccepted": "update",
+        "UpdatePostponed": "update",
+        "UpdateInstalledPendingRestart": "update",
+        "UpdateInstallFailed": "update",
+        "NativeFeedCheck": "update",
         "ExtendSelection": "extend",
         "EditSelection": "edit",
         "ResizeSelection": "resize",
@@ -1984,6 +2010,11 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             # Persiste l'état de campagne : la réconciliation au prochain
             # démarrage rapporte l'issue RÉELLE au DM (_reconcile_update_state).
             self._save_update_state(directive, "staged")
+            self._send_telemetry("UpdateStaged", {
+                "version_after": target_version,
+                "campaign_id": str(campaign_id) if campaign_id is not None else "",
+                "urgency": urgency,
+            })
 
             # Script d'installation de secours (.bat/.sh) : spawne un processus
             # enfant → refusé sur postes durcis (WinError 5, AppLocker / Defender
@@ -2179,11 +2210,22 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
             if user_wants_restart:
                 log_to_file("_perform_update: user accepted restart")
                 self._save_update_state(directive, "user_accepted")
+                self._send_telemetry("UpdateAccepted", {
+                    "version_after": target_version,
+                    "campaign_id": str(campaign_id) if campaign_id is not None else "",
+                    "urgency": urgency,
+                })
                 # In-process (ExtensionManager sur le main thread) : la seule voie
                 # automatique par défaut — aucun processus enfant (WinError 5-immune).
                 if self._install_and_restart_in_process(getattr(self, "_pending_install_oxt", "")):
                     log_to_file("_perform_update: installed in-process, closing for restart")
                     self._save_update_state(directive, "installed_inprocess")
+                    # « installed » (rapport DM) n'arrive qu'à la réconciliation,
+                    # quand la nouvelle version est réellement active.
+                    self._send_telemetry("UpdateInstalledPendingRestart", {
+                        "version_after": target_version,
+                        "campaign_id": str(campaign_id) if campaign_id is not None else "",
+                    })
                     return
                 # Script de secours : uniquement si explicitement réactivé
                 # (MIRAI_UPDATE_ALLOW_SCRIPT=1). Sinon, dégradation directe vers
@@ -2220,16 +2262,19 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                     )
                 except Exception:
                     pass
+                self._send_telemetry("UpdateInstallFailed", {
+                    "version_after": target_version,
+                    "campaign_id": str(campaign_id) if campaign_id is not None else "",
+                    "fallback": "manual",
+                })
                 self._notify_update_blocked(target_version, install_script)
             else:
                 log_to_file("_perform_update: user postponed restart")
-
-            # Send telemetry
-            self._send_telemetry("ExtensionUpdated", {
-                "version_after": target_version,
-                "campaign_id": str(campaign_id) if campaign_id is not None else "",
-                "urgency": urgency,
-            })
+                self._send_telemetry("UpdatePostponed", {
+                    "version_after": target_version,
+                    "campaign_id": str(campaign_id) if campaign_id is not None else "",
+                    "urgency": urgency,
+                })
 
         except Exception as e:
             log_to_file(f"_perform_update: error: {e}")
@@ -2783,6 +2828,101 @@ class MainJob(unohelper.Base, XJobExecutor, XJob):
                 log_to_file(f"_reconcile_update_state: {exc}")
 
         timer = threading.Timer(5.0, _safe_reconcile)
+        timer.daemon = True
+        timer.start()
+
+    # ── Diagnostic passif du feed natif (<update-information>, issue #5) ──
+    # LibreOffice récupère le feed avec SA pile HTTP (proxy/TLS/GPO propres),
+    # pas celle du plugin. Ce check headless valide donc, sans aucune action
+    # utilisateur et à l'échelle de la flotte, que la route native est viable
+    # sur les postes durcis — et détecte un feed DM absent ou mal formé
+    # (device-management#23) AVANT d'appuyer le déploiement large dessus.
+
+    def _update_feed_urls(self):
+        """URLs du feed natif, dérivées des bootstrap configurés (failover d'abord).
+        Même convention que le bake au build (scripts/inject_update_feed.py)."""
+        return [
+            base.rstrip("/") + _UPDATE_FEED_PATH
+            for base in (self._failover_ordered_urls() or [])
+            if isinstance(base, str) and base.strip()
+        ]
+
+    def _check_native_feed(self):
+        """Interroge le feed via com.sun.star.deployment.UpdateInformationProvider
+        (la machinerie exacte du bouton « Vérifier les mises à jour »), et rapporte
+        le résultat en log + télémétrie NativeFeedCheck. N'installe rien, aucune
+        UI ; best-effort — toute erreur est non-fatale. Retourne la version
+        annoncée par le feed, ou None."""
+        urls = self._update_feed_urls()
+        if not urls:
+            log_to_file("_check_native_feed: no bootstrap configured, skipped")
+            return None
+        provider = None
+        try:
+            provider = self.ctx.getServiceManager().createInstanceWithContext(
+                "com.sun.star.deployment.UpdateInformationProvider", self.ctx)
+        except Exception as exc:
+            log_to_file(f"_check_native_feed: provider unavailable: {exc}")
+        if provider is None:
+            return None
+        announced = ""
+        error = ""
+        try:
+            infos = provider.getUpdateInformation(tuple(urls), _EXTENSION_IDENTIFIER)
+            for element in infos or ():
+                # Le feed conforme expose <version value="…"/> dans le namespace
+                # update/2006 ; on tolère aussi un document sans namespace.
+                for getter in ("getElementsByTagNameNS", "getElementsByTagName"):
+                    try:
+                        if getter == "getElementsByTagNameNS":
+                            nodes = element.getElementsByTagNameNS(_UPDATE_FEED_NS, "version")
+                        else:
+                            nodes = element.getElementsByTagName("version")
+                        node = nodes.item(0) if nodes is not None and nodes.getLength() > 0 else None
+                        value = str(node.getAttribute("value")) if node is not None else ""
+                    except Exception:
+                        value = ""
+                    if value:
+                        announced = value
+                        break
+                if announced:
+                    break
+            if not announced:
+                error = "feed reachable but no <version value> found"
+        except Exception as exc:
+            error = str(exc)
+        current = str(self._get_extension_version() or "")
+        ok = bool(announced)
+        log_to_file(
+            f"_check_native_feed: ok={ok} announced={announced or '-'} "
+            f"current={current or '-'} urls={len(urls)}"
+            + (f" error={error}" if error else "")
+        )
+        try:
+            self._send_telemetry("NativeFeedCheck", {
+                "feed.ok": "true" if ok else "false",
+                "feed.announced_version": announced,
+                "feed.error": error[:200],
+                "version_current": current,
+            })
+        except Exception:
+            pass
+        return announced or None
+
+    def _schedule_native_feed_check(self):
+        """Lance le diagnostic du feed en fond, une fois par process, après que
+        l'enrollment/config a eu le temps de se poser (réseau via la pile de LO)."""
+        if MainJob._feed_check_started_cls:
+            return
+        MainJob._feed_check_started_cls = True
+
+        def _safe_check():
+            try:
+                self._check_native_feed()
+            except Exception as exc:
+                log_to_file(f"_check_native_feed: {exc}")
+
+        timer = threading.Timer(45.0, _safe_check)
         timer.daemon = True
         timer.start()
 

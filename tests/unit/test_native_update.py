@@ -293,3 +293,109 @@ def test_save_update_state_roundtrip():
     assert state["version_before"] == "0.0.1.0.31"
     assert state["stage"] == "staged"
     assert state["ts"] > 0
+
+
+# ── Diagnostic passif du feed natif (NativeFeedCheck) ────────────────────
+# Le feed est récupéré par la pile HTTP de LibreOffice (UpdateInformationProvider,
+# la machinerie exacte du bouton « Vérifier les mises à jour ») : ce check
+# headless valide proxy/TLS/GPO sur la flotte sans action utilisateur.
+
+def _job_for_feed_check(urls):
+    job = make_job()
+    job._failover_ordered_urls = MagicMock(return_value=urls)
+    job._get_extension_version = MagicMock(return_value="0.0.1.0.31")
+    job._send_telemetry = MagicMock()
+    return job
+
+
+def test_update_feed_urls_follow_failover_order():
+    """Une URL de feed par bootstrap, ordre de failover préservé, même
+    convention de chemin que le bake au build."""
+    job = _job_for_feed_check(["https://dm-b.example/", "https://dm-a.example"])
+    assert job._update_feed_urls() == [
+        "https://dm-b.example/catalog/mirai-libreoffice/update.xml",
+        "https://dm-a.example/catalog/mirai-libreoffice/update.xml",
+    ]
+
+
+def test_check_native_feed_reports_announced_version():
+    """Feed joignable → version annoncée extraite du DOM (<version value>),
+    télémétrie feed.ok=true, et l'identifiant d'extension est bien passé au
+    provider (sinon LO matcherait d'autres extensions du feed)."""
+    job = _job_for_feed_check(["https://dm.example"])
+    provider = MagicMock(name="UpdateInformationProvider")
+    job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = provider
+    element = MagicMock(name="descriptionElement")
+    nodes = MagicMock()
+    nodes.getLength.return_value = 1
+    nodes.item.return_value.getAttribute.return_value = "0.0.1.0.32"
+    element.getElementsByTagNameNS.return_value = nodes
+    provider.getUpdateInformation.return_value = [element]
+
+    assert job._check_native_feed() == "0.0.1.0.32"
+
+    args = provider.getUpdateInformation.call_args.args
+    assert args[0] == ("https://dm.example/catalog/mirai-libreoffice/update.xml",)
+    assert args[1] == "fr.gouv.interieur.mirai"
+    attrs = job._send_telemetry.call_args.args[1]
+    assert job._send_telemetry.call_args.args[0] == "NativeFeedCheck"
+    assert attrs["feed.ok"] == "true"
+    assert attrs["feed.announced_version"] == "0.0.1.0.32"
+
+
+def test_check_native_feed_reports_error_without_raising():
+    """Feed injoignable (proxy/TLS/GPO/404) → None, télémétrie feed.ok=false
+    avec le détail — jamais d'exception (best-effort)."""
+    job = _job_for_feed_check(["https://dm.example"])
+    provider = MagicMock(name="UpdateInformationProvider")
+    provider.getUpdateInformation.side_effect = RuntimeError("proxy timeout")
+    job.ctx.getServiceManager.return_value.createInstanceWithContext.return_value = provider
+
+    assert job._check_native_feed() is None
+
+    attrs = job._send_telemetry.call_args.args[1]
+    assert attrs["feed.ok"] == "false"
+    assert "proxy timeout" in attrs["feed.error"]
+
+
+def test_check_native_feed_skips_without_bootstrap():
+    """Aucun bootstrap configuré → skip total : ni service UNO ni télémétrie."""
+    job = _job_for_feed_check([])
+    smgr = MagicMock(name="freshServiceManager")
+    job.ctx.getServiceManager.return_value = smgr
+
+    assert job._check_native_feed() is None
+
+    smgr.createInstanceWithContext.assert_not_called()
+    job._send_telemetry.assert_not_called()
+
+
+# ── Rollback : même voie que l'update, réconciliation incluse ────────────
+
+def test_schedule_update_runs_for_rollback_action():
+    """Une directive action=rollback démarre le worker comme un update."""
+    import threading as _threading
+    job = make_job()
+    done = _threading.Event()
+    job._perform_update = lambda directive: done.set()
+
+    job._schedule_update({"action": "rollback", "target_version": "0.0.1.0.30-rb"})
+
+    assert done.wait(2), "le worker de rollback aurait dû tourner"
+
+
+def test_reconcile_confirms_rollback_to_older_version():
+    """Après un rollback (target < version_before), la réconciliation confirme
+    « installed » dès que la version ACTIVE == target — la comparaison est une
+    égalité stricte, pas un « plus récent que »."""
+    job, pend = _job_with_state({
+        "campaign_id": 11, "target_version": "0.0.1.0.30",
+        "version_before": "0.0.1.0.31", "stage": "user_accepted",
+        "ts": time.time(),
+    }, current_version="0.0.1.0.30")
+
+    job._reconcile_update_state()
+
+    job._report_update_status.assert_called_once_with(
+        11, "installed", "0.0.1.0.31", "0.0.1.0.30")
+    assert not os.path.isdir(pend)

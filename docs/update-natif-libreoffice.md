@@ -96,3 +96,37 @@ indifférent (`text/xml` recommandé). Namespace **obligatoire**
   l'anti-boucle. Un état périmé (> 14 j) est purgé silencieusement.
 - **Pas de re-exec** : fermeture propre de LO (main thread), réouverture par
   l'utilisateur — comportement validé sur toutes les plateformes.
+
+## Observabilité — mesurer au lieu de supposer
+
+- **Télémétrie par étape** du flux piloté DM : `UpdateStaged` → `UpdateAccepted`
+  / `UpdatePostponed` → `UpdateInstalledPendingRestart` / `UpdateInstallFailed`
+  → `ExtensionUpdated` (`confirmed:true`, émis à la réconciliation quand la
+  nouvelle version est réellement active). Le taux de succès de la cohorte se
+  lit par étape, l'entonnoir montre où ça casse.
+- **`NativeFeedCheck`** : au démarrage (~45 s, une fois par process, headless),
+  le plugin interroge le feed via `com.sun.star.deployment.UpdateInformationProvider`
+  — la machinerie exacte du bouton « Vérifier les mises à jour », donc la pile
+  HTTP de LibreOffice (proxy/TLS/GPO propres à LO). Résultat en log +
+  télémétrie : `feed.ok`, `feed.announced_version`, `feed.error`. C'est la
+  validation à l'échelle de la flotte de la viabilité de la route native sur
+  postes durcis, sans aucune action utilisateur — et l'alarme si le feed DM
+  (device-management#23) est absent ou mal formé.
+
+## Vérifier la sémantique deferred→installed contre le DM (sans le modifier)
+
+Le plugin rapporte désormais `deferred` au staging puis `installed` après
+redémarrage. Pour vérifier que les campagnes DM digèrent ce cycle en deux
+temps (progression correcte, pas d'expiration entre les phases) :
+
+```bash
+python3 tests/simulation/deploy_simulator.py \
+  --devices 100 --bootstrap-url https://<bootstrap> --campaign-id <id> \
+  --relay-client <rc> --relay-key <rk> \
+  --restart-delay 5 --admin-token $DM_ADMIN_TOKEN
+```
+
+Le rapport affiche le progrès de campagne avant/après, compte les devices
+`stuck_in_deferred` (cycle cassé) et `--single-phase` permet de comparer avec
+l'ancien comportement. `/update/status` exige les relay-credentials
+(VULN-007) : sans `--relay-client`/`--relay-key`, un DM sécurisé répond 401.
